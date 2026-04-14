@@ -1,5 +1,16 @@
 # kernel-lore-mcp — project state
 
+## Pointers
+
+- **Standards:** [`docs/standards/`](./docs/standards/).
+- **Reciprocity:** [`docs/architecture/reciprocity.md`](./docs/architecture/reciprocity.md).
+- **Threat model:** [`docs/ops/threat-model.md`](./docs/ops/threat-model.md).
+- **Training retriever north star:** [`docs/research/training-retriever.md`](./docs/research/training-retriever.md).
+- **Deployment modes:** [`docs/architecture/deployment-modes.md`](./docs/architecture/deployment-modes.md).
+- **Legal posture:** [`LEGAL.md`](./LEGAL.md).
+- **Security policy:** [`SECURITY.md`](./SECURITY.md).
+- **Governance:** [`GOVERNANCE.md`](./GOVERNANCE.md).
+
 ## Standards
 
 Before touching Python code: read [`docs/standards/python/index.md`](./docs/standards/python/index.md)

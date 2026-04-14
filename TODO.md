@@ -231,6 +231,66 @@ These are doc/contract changes that shape the ingest + query layer
 - [ ] Add `docs/research/2026-04-14-review-findings.md` archiving
   the four reviewer reports so future sessions see the provenance.
 
+## Phase 1 complete (2026-04-14)
+
+Landed in commit `2b54d7c`:
+
+- Real ingest pipeline: `src/ingest.rs` walks a public-inbox
+  shard via `gix` with per-shard rayon tasks.
+- `src/parse.rs` parses RFC822 via `mail-parser`, strips quoted
+  replies + signatures, splits prose from patch at the first
+  `^diff --git`.
+- Trailer extraction (`signed_off_by`, `reviewed_by`, `acked_by`,
+  `tested_by`, `co_developed_by`, `reported_by`, `fixes`, `link`,
+  `closes`, `cc_stable`), subject-tag extraction
+  (`[PATCH vN]`, `N/M`, `RFC`, `RFT`, `GIT PULL`, `ANNOUNCE`,
+  `RESEND`), and `is_cover_letter` detection.
+- `touched_files` from patch hunks; patch_stats
+  (`files_changed`, `insertions`, `deletions`).
+- `src/store.rs` compressed raw store (zstd, append-only).
+- `src/metadata.rs` Parquet writer for the metadata tier.
+- `src/schema.rs` canonical column-name constants + Arrow
+  schema, `SCHEMA_VERSION=1`.
+- `src/state.rs` atomic-rename state file with generation
+  counter and stale-OID fallback.
+- `src/error.rs` single error enum, `From<_> for PyErr`.
+- Synthetic shard fixtures + Python integration tests under
+  `tests/python/`.
+
+Still open in this codebase: query router wiring
+(`src/router.rs` is a stub), trigram tier (`src/trigram.rs`
+stub), BM25 tier (`src/bm25.rs` stub), the MCP tool surface
+wired to real data. Those are Phase 2.
+
+## Public Instance Track
+
+Independent of Phase 1–6. Gates the hosted instance, not the
+code. Runs in parallel.
+
+- [ ] Pin `KLMCP_MODE` in `kernel_lore_mcp.config`
+  (`local` default, `hosted` opt-in). Same binary, runtime
+  gate. See `docs/architecture/deployment-modes.md`.
+- [ ] Embargo quarantine per `SECURITY.md` (72h hold for
+  `Fixes:`-to-<7d-old-SHA` or `CVE-YYYY-\d+` subject).
+- [ ] structlog processor that scrubs query strings + tool
+  args before serialization (per `LEGAL.md`). Nginx access
+  log format with path + status + timing only.
+- [ ] Redaction-request email workflow (72h SLA on hosted).
+  Re-ingest honors lore-side redactions on the grokmirror
+  cadence (already true by construction).
+- [ ] API-key gate on `lore_activity` file granularity
+  (free signup, no approval queue). Coarser granularity
+  stays anonymous.
+- [ ] Snapshot-bundle publication (weekly) so new self-hosters
+  bootstrap from us, not lore. Channel TBD (likely S3 +
+  IPFS). See `docs/architecture/reciprocity.md`.
+- [ ] TLS + nginx + certbot + HSTS (per Phase 4).
+- [ ] Abuse response: fail2ban on 429, named User-Agent on
+  any outbound request, honor Retry-After.
+
+Cross-link to Phase 6 "Reciprocity infrastructure": the
+snapshot-bundle piece is shared work.
+
 ## Phase 6 — deferred to v1.1 / v2
 
 - [DEFER] REST surface via FastAPI alongside MCP → depends on
@@ -248,6 +308,25 @@ These are doc/contract changes that shape the ingest + query layer
   PEP 803 abi3t landing.
 - [DEFER] MCP resource for the full MAINTAINERS snapshot so LLM
   can reason about ownership.
+
+### Reciprocity infrastructure
+
+Not deferred in spirit — just deferred in code, because it lands
+once the tiers are real. See
+`docs/architecture/reciprocity.md`.
+
+- [ ] Snapshot-bundle builder: pack the compressed store + all
+  index tiers + `SCHEMA_VERSION` + state-file into a single
+  bundle. Publish weekly from our infrastructure so new
+  self-hosters bootstrap from us, not from lore.
+- [ ] Snapshot-bundle fetcher in the ingest pipeline: if a
+  local shard tree is absent, pull the latest bundle before
+  running `grok-pull`.
+- [ ] Named User-Agent
+  (`kernel-lore-mcp/<version> (+https://github.com/mjbommar/kernel-lore-mcp)`)
+  on every outbound request. Honor `Retry-After`.
+- [ ] Prefer tier-1 mirror (`erol.kernel.org`) over lore
+  direct in the default grokmirror config under `scripts/`.
 
 ## Phase 0+ additions after review of KAOS standards
 

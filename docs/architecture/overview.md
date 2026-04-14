@@ -3,26 +3,42 @@
 One-paragraph version in [`../../README.md`](../../README.md). Full
 version here.
 
+## Deployment posture
+
+**Local-first, hosted-optional.** One binary; two modes. Local
+self-host is the primary target — anyone can run it against their
+own grokmirror shards with zero policy constraints from us. The
+hosted public instance is on the roadmap, runs the same binary
+with extra runtime policy gates (embargo quarantine, query
+non-logging, API-key rate limits on file-granularity
+`lore_activity`). Details in
+[`deployment-modes.md`](./deployment-modes.md).
+
 ## Goals
 
-1. **LLM-native surface.** MCP is the primary API; REST is for
-   everything else. Responses shape for an LLM caller first
-   (structured blocks, citations, deterministic IDs) and a human
-   second.
+1. **LLM-native surface.** MCP is the primary API. Responses
+   shape for an LLM caller first (structured blocks, citations,
+   deterministic IDs) and a human second.
 2. **Low latency, low cost.** Single-box deploy. Structured queries
-   sub-100ms, BM25 sub-500ms at the p95. ~$100/mo steady-state.
+   sub-100ms, BM25 sub-500ms at the p95. ~$100/mo steady-state
+   for the hosted instance; self-host cost is whatever the
+   operator's box costs.
 3. **Operator honesty.** The server tells callers what it doesn't
    see (private security queues, vendor backports, syzbot pre-public)
    so they calibrate. Silence is worse than a caveat.
 4. **Repeatability.** Indices are rebuildable from the compressed
    raw store without refetching lore.
+5. **Reciprocity.** We do not use the hosted instance to amplify
+   load on lore. See [`reciprocity.md`](./reciprocity.md).
 
 ## Non-goals
 
 - Replacing `lei` for human users. `lei` is better at `lei`.
 - Being a public-inbox mirror. We re-index a mirror; we don't serve
   `public-inbox-httpd`.
-- Semantic / vector search. Maybe v2; not v1.
+- Generic semantic / vector search in v1. A **kernel-specific
+  trained retriever** is the north star for v1.1 — see
+  [`../research/training-retriever.md`](../research/training-retriever.md).
 - Write operations of any kind.
 
 ## High-level flow
@@ -56,11 +72,12 @@ version here.
                          ▼
        Query router (Rust, exposed to Python via PyO3)
                          │
-           ┌─────────────┼─────────────┐
-           ▼             ▼             ▼
-        FastMCP     FastAPI REST    /status
-     (streamable      (JSON)
-       HTTP)
+                         ▼
+                 FastMCP (streamable HTTP
+                   + stdio for local dev)
+                         │
+                         ▼
+                      /status
 ```
 
 ## Three-tier index
@@ -78,9 +95,9 @@ over-serves or under-serves every class.
   walking, parsing, indexing, compression, query dispatch.
   Parallel-by-default via rayon; Send/Sync enforced by the type
   system; mmap'd indices stay cold-fast.
-- **Python** owns the MCP/REST surface, config, auth, rate
-  limiting, deploy glue. All the parts where developer velocity
-  beats microseconds.
+- **Python** owns the MCP surface, config, auth, rate limiting,
+  deploy glue. All the parts where developer velocity beats
+  microseconds.
 - **PyO3 0.28** is the seam. Every heavy Rust call releases the
   GIL; Python 3.14 free-threaded is forward-compatible (pending
   PEP 803 abi3t).
