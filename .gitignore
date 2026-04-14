@@ -1,0 +1,57 @@
+# Rust
+/target/
+# Cargo.lock is tracked — we build binaries (reindex) and a cdylib wheel
+# where reproducible builds matter. Follow the Rust guidance: commit the
+# lockfile for bin+cdylib crates.
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# uv
+.uv/
+
+# maturin
+target/wheels/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Runtime data — never commit lore mirrors, indices, or compressed stores
+/data/
+/cache/
+/var/
+*.tantivy
+*.zst
+*.parquet
+*.fst
+*.roaring
+manifest.js.gz
+
+# Logs
+*.log
+
+# Secrets
+.env
+.env.local
+*.pem
+*.key

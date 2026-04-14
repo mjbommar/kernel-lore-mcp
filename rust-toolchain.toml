@@ -1,0 +1,6 @@
+[toolchain]
+# Edition 2024 requires Rust 1.85+. tantivy 0.26 requires 1.81+.
+# Pin stable 1.85 so ingest/serving builds the same everywhere.
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -1,0 +1,98 @@
+[package]
+name = "kernel_lore_mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Michael Bommarito <michael@bommaritollc.com>"]
+license = "MIT"
+description = "Rust core for kernel-lore-mcp: ingestion, three-tier indexing, and query routing for lore.kernel.org."
+repository = "https://github.com/mjbommar/kernel-lore-mcp"
+readme = "README.md"
+
+[lib]
+name = "_core"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# abi3-py312 is ON by default. Free-threaded 3.14t requires building
+# with --no-default-features (abi3 is incompatible until PEP 803 "abi3t"
+# lands and ships in pyo3).
+default = ["abi3"]
+abi3 = ["pyo3/abi3-py312"]
+
+[dependencies]
+# Python bindings. Python::detach / Python::attach are present in
+# 0.28.3 stable (renamed from allow_threads/with_gil in PRs #5209 #5221).
+pyo3 = { version = "0.28", features = ["extension-module"] }
+
+# Git shard walking (gix, NOT git2-rs; see docs/research/2026-04-14-gix-vs-git2.md).
+gix = { version = "0.81", default-features = false, features = [
+    "max-performance-safe",
+    "revision",
+    "parallel",
+    # SHA-1 is the only hash kind the kernel ecosystem uses. Without this
+    # feature gix-hash's Kind enum ends up empty and `match self` fails to
+    # compile.
+    "sha1",
+] }
+
+# Email parsing
+mail-parser = { version = "0.11", default-features = false, features = [
+    "full_encoding",
+    "serde",
+] }
+
+# BM25 tier. Stemmer feature intentionally omitted (see CLAUDE.md).
+tantivy = { version = "0.26", default-features = false, features = ["mmap"] }
+
+# Trigram tier primitives
+roaring = "0.11"
+fst = "0.4"
+# Regex: DFA-only engine, safe for untrusted input (no backrefs).
+regex-automata = "0.4"
+
+# Compression (compressed raw store)
+zstd = "0.13"
+
+# Columnar metadata tier
+arrow = { version = "58", default-features = false, features = ["ipc"] }
+parquet = { version = "58", default-features = false, features = [
+    "arrow",
+    "zstd",
+    "async",
+] }
+
+# Parallelism
+rayon = "1.10"
+
+# Utilities
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+bytes = "1"
+memchr = "2"
+tracing = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+# anyhow ONLY for the reindex binary; library code uses thiserror.
+anyhow = "1"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "reindex"
+path = "src/bin/reindex.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+debug = 1
+panic = "abort"
+strip = "symbols"

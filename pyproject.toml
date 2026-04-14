@@ -1,0 +1,112 @@
+[project]
+name = "kernel-lore-mcp"
+version = "0.1.0"
+description = "MCP server exposing fast, structured search over lore.kernel.org to LLM developer tools."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Michael Bommarito", email = "michael@bommaritollc.com" }]
+requires-python = ">=3.12"
+keywords = ["mcp", "lore", "kernel", "search", "tantivy", "pyo3"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "fastmcp>=3.2,<4",
+    "mcp>=1.27,<2",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.5,<3",
+    "anyio>=4.4",
+    "httpx>=0.28",
+    "structlog>=24.4",
+    "prometheus-client>=0.21",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "freezegun>=1.5",
+    "ruff>=0.11",
+    "ty>=0.0.1a17",
+    "maturin>=1.13,<2",
+]
+
+[project.scripts]
+kernel-lore-mcp = "kernel_lore_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/mjbommar/kernel-lore-mcp"
+Repository = "https://github.com/mjbommar/kernel-lore-mcp"
+Issues = "https://github.com/mjbommar/kernel-lore-mcp/issues"
+
+[build-system]
+requires = ["maturin>=1.13,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+module-name = "kernel_lore_mcp._core"
+python-packages = ["kernel_lore_mcp"]
+python-source = "src"
+features = ["pyo3/extension-module"]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "src/**/*.rs" },
+    { file = "Cargo.toml" },
+    { file = "Cargo.lock" },
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Ruleset per docs/standards/python/code-quality.md
+select = [
+    "E", "F", "W",
+    "I",
+    "UP",
+    "B",
+    "C4",
+    "PTH",
+    "SIM",
+    "TC",
+    "RUF",
+    "S",
+]
+ignore = [
+    "S101",   # assert allowed
+    "B008",   # FastAPI/FastMCP idiom: Annotated[... , Field(...)] in args
+    "E501",   # line-length reported by formatter; lint only flags hard cases
+    # TC00x clash with pydantic v2's runtime annotation evaluation when
+    # using `from __future__ import annotations`. Leaving imports at
+    # module level is intentional here.
+    "TC001", "TC002", "TC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+asyncio_mode = "auto"
+
+# KAOS standard: `ty` (Astral) instead of mypy. See
+# docs/standards/python/code-quality.md for rationale (10-60x faster,
+# checks all code by default, same-vendor alignment with ruff/uv).
+[tool.ty.src]
+include = ["src/kernel_lore_mcp", "tests/python"]
+
+[tool.ty.rules]
+unresolved-import = "ignore"
