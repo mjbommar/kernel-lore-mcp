@@ -1,0 +1,59 @@
+"""lore_message — fetch one message by id + its prose/patch split."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Annotated
+
+from fastmcp.exceptions import ToolError
+from pydantic import Field
+
+from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.mapping import row_to_search_hit
+from kernel_lore_mcp.models import Freshness, MessageResponse
+
+
+def _split_prose_patch(body: str) -> tuple[str | None, str | None]:
+    marker = "\ndiff --git "
+    idx = body.find(marker)
+    if idx < 0:
+        return (body or None), None
+    return (body[: idx + 1] or None), (body[idx + 1 :] or None)
+
+
+async def lore_message(
+    message_id: Annotated[str, Field(min_length=1, max_length=512)],
+) -> MessageResponse:
+    """Fetch a single message + its prose/patch split + raw body bytes."""
+    from kernel_lore_mcp import _core
+
+    settings = Settings()
+    reader = _core.Reader(settings.data_dir)
+    row = await asyncio.to_thread(reader.fetch_message, message_id)
+    if row is None:
+        raise ToolError(f"message_id {message_id!r} not found in indexed corpus")
+
+    body = await asyncio.to_thread(reader.fetch_body, message_id)
+    if body is None:
+        raise ToolError(
+            f"body for {message_id!r} missing from compressed store "
+            "(metadata and store out of sync)"
+        )
+
+    # mail-parser on the Rust side decodes to UTF-8 for us; best-effort
+    # decode here for the body text. ASCII is the common case.
+    try:
+        body_text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        body_text = body.decode("latin-1", errors="replace")
+
+    prose, patch = _split_prose_patch(body_text)
+
+    return MessageResponse(
+        hit=row_to_search_hit(row, tier_provenance=["metadata"]),
+        prose=prose,
+        patch=patch,
+        body_sha256=row["body_sha256"],
+        body_length=row["body_length"],
+        freshness=Freshness(),
+    )

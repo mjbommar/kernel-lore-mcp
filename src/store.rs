@@ -88,13 +88,36 @@ impl Store {
     }
 
     /// Random-access read a previously-appended message.
+    ///
+    /// The `length` on the `StoreOffset` is the compressed frame size
+    /// (what `append` returned). It's used when the caller knows it;
+    /// prefer `read_at(segment_id, offset)` when the caller only
+    /// carries the offset (e.g., the metadata tier, which records the
+    /// uncompressed length for display and the compressed frame
+    /// self-delimits via zstd's stream format).
     pub fn read(&self, ptr: StoreOffset) -> Result<Vec<u8>> {
+        if ptr.length == 0 {
+            return self.read_at(ptr.segment_id, ptr.offset);
+        }
         let seg_path = segment_path(&self.list_root, ptr.segment_id);
         let mut f = File::open(&seg_path)?;
         f.seek(SeekFrom::Start(ptr.offset))?;
         let mut framed = vec![0u8; ptr.length as usize];
         f.read_exact(&mut framed)?;
         Ok(zstd::decode_all(io::Cursor::new(framed))?)
+    }
+
+    /// Read one message given only its segment + offset. zstd frames
+    /// are self-delimiting, so the streaming `Decoder` stops at the
+    /// natural end of the single frame we appended.
+    pub fn read_at(&self, segment_id: u32, offset: u64) -> Result<Vec<u8>> {
+        let seg_path = segment_path(&self.list_root, segment_id);
+        let mut f = File::open(&seg_path)?;
+        f.seek(SeekFrom::Start(offset))?;
+        let mut out = Vec::new();
+        let mut decoder = zstd::Decoder::new(f)?;
+        decoder.read_to_end(&mut out)?;
+        Ok(out)
     }
 
     /// fsync the active segment. Call after a batch of appends before

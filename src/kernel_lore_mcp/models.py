@@ -96,3 +96,77 @@ class SearchResponse(BaseModel):
         default="blind_spots://coverage",
         description="MCP resource pointer. Fetch once, not per response.",
     )
+
+
+class ActivityRow(BaseModel):
+    """One row in `lore_activity`; one per message in v0.5.
+
+    Grouping by tid lands in a later phase once the tid computation
+    pass is wired; for now each matching message is its own row with
+    enough metadata that an agent can group client-side.
+    """
+
+    message_id: str
+    cite_key: str
+    list: str
+    from_addr: str | None
+    from_name: str | None
+    subject: str
+    subject_tags: list[str] = Field(default_factory=list)
+    date: datetime | None
+    has_patch: bool
+    is_cover_letter: bool = False
+    series_version: int | None = None
+    series_index: str | None = None
+    patch_stats: PatchStats | None = None
+    reviewed_by: list[str] = Field(default_factory=list)
+    acked_by: list[str] = Field(default_factory=list)
+    tested_by: list[str] = Field(default_factory=list)
+    signed_off_by: list[str] = Field(default_factory=list)
+    fixes: list[str] = Field(default_factory=list)
+    cc_stable: list[str] = Field(default_factory=list)
+    lore_url: str
+
+
+class ActivityResponse(BaseModel):
+    rows: list[ActivityRow]
+    total: int = Field(description="Row count after filtering (not capped by limit).")
+    default_applied: list[str] = Field(default_factory=list)
+    freshness: Freshness
+    blind_spots_ref: str = "blind_spots://coverage"
+
+
+class MessageResponse(BaseModel):
+    """`lore_message` / `lore_explain_patch`."""
+
+    hit: SearchHit
+    prose: str | None = None
+    patch: str | None = None
+    body_sha256: str
+    body_length: int
+    freshness: Freshness
+    blind_spots_ref: str = "blind_spots://coverage"
+
+
+class SeriesTimelineEntry(BaseModel):
+    message_id: str
+    cite_key: str
+    subject: str
+    series_version: int | None
+    series_index: str | None
+    date: datetime | None
+    reviewed_by: list[str] = Field(default_factory=list)
+    acked_by: list[str] = Field(default_factory=list)
+    lore_url: str
+
+
+class SeriesTimelineResponse(BaseModel):
+    entries: list[SeriesTimelineEntry]
+    freshness: Freshness
+    blind_spots_ref: str = "blind_spots://coverage"
+
+
+class ExpandCitationResponse(BaseModel):
+    results: list[SearchHit]
+    freshness: Freshness
+    blind_spots_ref: str = "blind_spots://coverage"

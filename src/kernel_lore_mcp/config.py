@@ -20,7 +20,10 @@ class Settings(BaseSettings):
 
     data_dir: Path = Field(
         default=Path("./data"),
-        description="Root dir for compressed raw store + index tiers + state.",
+        description=(
+            "Root dir for compressed raw store + index tiers + state. "
+            "Override via KLMCP_DATA_DIR env var."
+        ),
     )
     lore_mirror_dir: Path = Field(
         default=Path("./data/lore-mirror"),

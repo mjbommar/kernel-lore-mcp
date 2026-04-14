@@ -13,10 +13,22 @@ from kernel_lore_mcp.config import Settings
 
 INSTRUCTIONS = """\
 Search and retrieve messages from the Linux kernel mailing list archives
-(lore.kernel.org). Discovery via lore_search; pull a full thread via
-lore_thread; fetch patch text via lore_patch; find recent activity on a
-file/function via lore_activity; fetch any single message via
-lore_message.
+(lore.kernel.org). The tools available in v0.5 answer structured
+metadata queries; prose BM25 and patch/code trigram search land in
+follow-up phases.
+
+Tools:
+  lore_activity(file|function, since?, list?, limit?)
+    Find recent messages touching a file or function.
+  lore_message(message_id)
+    Fetch one message + its prose/patch split + raw body bytes.
+  lore_expand_citation(token)
+    Resolve a Message-ID, a git commit SHA, or a CVE ID.
+  lore_series_timeline(message_id)
+    Return sibling versions (v1/v2/v3/...) of the same patch series.
+  lore_search(query, limit?, cursor?)
+    Free-text search — returns an empty SearchResponse in v0.5;
+    wired to real indices in Phase 3/4.
 
 Coverage is lore public archives only. The MCP resource
 `blind_spots://coverage` enumerates what is NOT visible (private
@@ -24,29 +36,33 @@ security@kernel.org queue, distro vendor backports, syzbot pre-public,
 research-shop pipelines, CVE in-flight embargoes). Fetch it once per
 session; do not re-fetch per call.
 
-Freshness: lore runs 1-5 minutes behind vger. Every discovery response
-carries a `freshness` block; also see /status.
+Freshness: lore runs 1-5 minutes behind vger. Every response carries
+a `freshness` block.
 """
 
 
 def build_server(settings: Settings | None = None) -> FastMCP:
-    """Construct the FastMCP app with all v1 tools registered."""
+    """Construct the FastMCP app with all v0.5 tools registered."""
     settings = settings or Settings()
     mcp: FastMCP = FastMCP(name="kernel-lore", instructions=INSTRUCTIONS)
 
-    # Explicit tool registration. Import-then-register, not
-    # import-for-side-effect. See TODO.md phase 2.
+    # Explicit tool registration.
+    from kernel_lore_mcp.tools.activity import lore_activity
+    from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
+    from kernel_lore_mcp.tools.message import lore_message
     from kernel_lore_mcp.tools.search import lore_search
+    from kernel_lore_mcp.tools.series import lore_series_timeline
 
-    mcp.tool(
-        lore_search,
-        annotations={"readOnlyHint": True, "idempotentHint": True},
-    )
+    read_only = {"readOnlyHint": True, "idempotentHint": True}
 
-    # TODO(task #17 ff): register lore_thread, lore_patch,
-    # lore_activity, lore_message, lore_series_versions,
-    # lore_patch_diff once those tool modules land.
+    mcp.tool(lore_search, annotations=read_only)
+    mcp.tool(lore_activity, annotations=read_only)
+    mcp.tool(lore_message, annotations=read_only)
+    mcp.tool(lore_expand_citation, annotations=read_only)
+    mcp.tool(lore_series_timeline, annotations=read_only)
 
-    # TODO: register blind_spots resource and /status + /metrics routes.
+    # TODO(phase-3/4): lore_patch, lore_thread, lore_patch_diff,
+    # lore_explain_patch once the trigram + BM25 tiers land.
+    # TODO(phase-2): register blind_spots resource + /status route.
     _ = settings
     return mcp
