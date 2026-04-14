@@ -25,6 +25,7 @@ mod bm25;
 mod error;
 mod ingest;
 mod metadata;
+mod parse;
 mod router;
 mod schema;
 mod state;
