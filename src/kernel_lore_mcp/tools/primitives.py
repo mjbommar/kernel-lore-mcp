@@ -17,7 +17,6 @@ already exposed as `lore_patch_search`.)
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 from datetime import UTC, datetime
 from typing import Annotated
@@ -35,6 +34,7 @@ from kernel_lore_mcp.models import (
     RowsResponse,
     Snippet,
 )
+from kernel_lore_mcp.timeout import run_with_timeout
 
 _EQ_FIELDS = {
     "message_id",
@@ -156,7 +156,7 @@ async def lore_eq(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.eq, field, value, since_unix_ns, list, limit)
+    rows = await run_with_timeout(reader.eq, field, value, since_unix_ns, list, limit)
     return _rows_to_response(rows, tier="metadata", reader=reader)
 
 
@@ -187,7 +187,7 @@ async def lore_in_list(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.in_list, field, values, since_unix_ns, list, limit)
+    rows = await run_with_timeout(reader.in_list, field, values, since_unix_ns, list, limit)
     return _rows_to_response(rows, tier="metadata", reader=reader)
 
 
@@ -213,7 +213,7 @@ async def lore_count(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    summary = await asyncio.to_thread(reader.count, field, value, since_unix_ns, list)
+    summary = await run_with_timeout(reader.count, field, value, since_unix_ns, list)
     return CountResponse(
         count=summary["count"],
         distinct_authors=summary["distinct_authors"],
@@ -248,7 +248,7 @@ async def lore_substr_subject(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.substr_subject, needle, list, since_unix_ns, limit)
+    rows = await run_with_timeout(reader.substr_subject, needle, list, since_unix_ns, limit)
     return _rows_to_response(
         rows,
         tier="metadata",
@@ -295,7 +295,7 @@ async def lore_substr_trailers(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(
+    rows = await run_with_timeout(
         reader.substr_trailers, name, value_substring, list, since_unix_ns, limit
     )
     return _rows_to_response(
@@ -357,7 +357,7 @@ async def lore_regex(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(
+    rows = await run_with_timeout(
         reader.regex,
         field,
         pattern,
@@ -404,7 +404,7 @@ async def lore_diff(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    result = await asyncio.to_thread(reader.diff, a, b, mode)
+    result = await run_with_timeout(reader.diff, a, b, mode)
     diff_text = "".join(
         difflib.unified_diff(
             result["text_a"].splitlines(keepends=True),

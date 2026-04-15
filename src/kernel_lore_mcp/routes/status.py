@@ -26,8 +26,9 @@ from starlette.responses import JSONResponse
 
 from kernel_lore_mcp.config import Settings
 
-_CACHE_TTL_SECONDS = 30
-_cache: tuple[float, dict[str, Any]] | None = None
+# Cache keyed by data_dir so multi-config / test embedding doesn't
+# cross-contaminate. TTL from settings.freshness_cache_ttl_seconds.
+_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _read_generation(data_dir: Path) -> tuple[int, datetime | None]:
@@ -104,23 +105,28 @@ def _native_version() -> str:
 
 
 def get_status(settings: Settings | None = None) -> dict[str, Any]:
-    """Cached status builder. Used by both the MCP route and tests."""
-    global _cache
+    """Cached status builder. Used by both the MCP route and tests.
+
+    Cache is keyed by `data_dir` so multiple in-process servers (or
+    tests with different tmp_paths) don't cross-contaminate. TTL
+    comes from `settings.freshness_cache_ttl_seconds`.
+    """
     settings = settings or Settings()
+    cache_key = str(settings.data_dir)
+    ttl = settings.freshness_cache_ttl_seconds
     now = time.monotonic()
-    if _cache is not None:
-        cached_at, body = _cache
-        if now - cached_at < _CACHE_TTL_SECONDS:
+    if cache_key in _cache:
+        cached_at, body = _cache[cache_key]
+        if now - cached_at < ttl:
             return body
     body = _build_status(settings)
-    _cache = (now, body)
+    _cache[cache_key] = (now, body)
     return body
 
 
 def clear_cache() -> None:
     """For tests: wipe the cache so the next `get_status()` rereads state."""
-    global _cache
-    _cache = None
+    _cache.clear()
 
 
 async def status_endpoint(request: Request) -> JSONResponse:

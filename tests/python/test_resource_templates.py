@@ -57,7 +57,7 @@ async def client_with_data(tmp_path: Path) -> AsyncIterator[Client]:
 
 EXPECTED_TEMPLATES = {
     "lore://message/{mid}": "text/plain",
-    "lore://thread/{tid}": "text/plain",
+    "lore://thread/{mid}": "text/plain",
     "lore://patch/{mid}": "text/x-diff",
     "lore://maintainer/{path}": "text/plain",
     "lore://patchwork/{msg_id}": "application/json",

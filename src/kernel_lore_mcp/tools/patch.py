@@ -6,7 +6,6 @@ diffing use lore_patch_diff.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
 from pydantic import Field
@@ -16,6 +15,7 @@ from kernel_lore_mcp.errors import LoreError, not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import PatchResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 
@@ -30,7 +30,7 @@ async def lore_patch(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    row = await asyncio.to_thread(reader.fetch_message, message_id)
+    row = await run_with_timeout(reader.fetch_message, message_id)
     if row is None:
         raise not_found(what="message", message_id=message_id)
     if not row.get("has_patch"):
@@ -41,7 +41,7 @@ async def lore_patch(
             valid_example="use lore_message for prose-only messages; lore_patch only accepts patches.",
         )
 
-    body = await asyncio.to_thread(reader.fetch_body, message_id)
+    body = await run_with_timeout(reader.fetch_body, message_id)
     if body is None:
         raise LoreError(
             "store_inconsistent",

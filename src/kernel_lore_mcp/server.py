@@ -18,31 +18,33 @@ from kernel_lore_mcp.routes.status import status_endpoint
 
 INSTRUCTIONS = """\
 Search and retrieve messages from the Linux kernel mailing list archives
-(lore.kernel.org). The tools available in v0.5 answer structured
-metadata queries; prose BM25 and patch/code trigram search land in
-follow-up phases.
+(lore.kernel.org). All tools are live and backed by real indices.
 
-Tools:
-  lore_activity(file|function, since?, list?, limit?)
-    Find recent messages touching a file or function.
-  lore_message(message_id)
-    Fetch one message + its prose/patch split + raw body bytes.
-  lore_expand_citation(token)
-    Resolve a Message-ID, a git commit SHA, or a CVE ID.
-  lore_series_timeline(message_id)
-    Return sibling versions (v1/v2/v3/...) of the same patch series.
-  lore_search(query, limit?, cursor?)
-    Free-text search — returns an empty SearchResponse in v0.5;
-    wired to real indices in Phase 3/4.
+Tool families:
+  Search — lore_search (fused BM25 + trigram + metadata via RRF),
+    lore_patch_search (literal or fuzzy substring in patch bodies),
+    lore_regex (DFA-only regex over subject/from/prose/patch),
+    lore_path_mentions (Aho-Corasick file-path reverse index).
+  Lookup — lore_message, lore_expand_citation, lore_thread, lore_patch,
+    lore_patch_diff, lore_explain_patch, lore_series_timeline.
+  Primitives — lore_eq, lore_in_list, lore_count, lore_substr_subject,
+    lore_substr_trailers, lore_diff.
+  Activity — lore_activity (file/function touches over time).
+  Semantic — lore_nearest (free-text → ANN), lore_similar (seed mid → ANN).
+  Sampling — lore_summarize_thread, lore_classify_patch,
+    lore_explain_review_status (LLM via ctx.sample, extractive fallback).
+
+Every tool's description includes a cost class (cheap/moderate/expensive)
+and expected p95 latency. Use `response_format="concise"` on high-volume
+tools to cap tokens.
 
 Coverage is lore public archives only. The MCP resource
-`blind-spots://coverage` enumerates what is NOT visible (private
-security@kernel.org queue, distro vendor backports, syzbot pre-public,
-research-shop pipelines, CVE in-flight embargoes). Fetch it once per
-session; do not re-fetch per call.
+`blind-spots://coverage` enumerates what is NOT visible. Fetch it once
+per session; do not re-fetch per call.
 
-Freshness: lore runs 1-5 minutes behind vger. Every response carries
-a `freshness` block.
+Freshness: every response carries a populated `freshness` block with
+`as_of`, `lag_seconds`, and `generation`. End-to-end p50 ~5 min,
+p95 ~11 min from vger to our index.
 """
 
 

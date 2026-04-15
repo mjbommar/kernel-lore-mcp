@@ -8,7 +8,7 @@ URI string + function signature.
 URIs we register:
 
   lore://message/{mid}         — raw mbox body (MIME text/plain)
-  lore://thread/{tid}          — concatenated bodies for a thread
+  lore://thread/{mid}          — concatenated bodies for a thread
                                  (MIME text/plain)
   lore://patch/{mid}           — patch payload only (MIME text/x-diff)
   lore://maintainer/{path}     — MAINTAINERS block for a file path
@@ -57,14 +57,14 @@ async def _fetch_message_body(mid: str) -> str:
     return _decode(body)
 
 
-async def _fetch_thread_text(tid: str) -> str:
+async def _fetch_thread_text(mid: str) -> str:
     from kernel_lore_mcp import _core
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.thread, tid, 500)
+    rows = await asyncio.to_thread(reader.thread, mid, 500)
     if not rows:
-        raise ResourceError(f"lore://thread/{tid} — no messages under that thread seed")
+        raise ResourceError(f"lore://thread/{mid} — no messages under that thread seed")
 
     chunks: list[str] = []
     for row in rows:
@@ -141,17 +141,18 @@ def register_templated_resources(mcp: FastMCP) -> None:
         return await _fetch_message_body(mid)
 
     @mcp.resource(
-        "lore://thread/{tid}",
+        "lore://thread/{mid}",
         name="lore_thread_text",
         description=(
             "Concatenated raw bodies of every message in a thread, seeded "
-            "by any message-id within it. For structured thread metadata, "
-            "use the `lore_thread` tool instead."
+            "by any message-id within it (not a thread-id — the walker "
+            "discovers the full thread from any message). For structured "
+            "thread metadata, use the `lore_thread` tool instead."
         ),
         mime_type="text/plain",
     )
-    async def _thread(tid: str) -> str:
-        return await _fetch_thread_text(tid)
+    async def _thread(mid: str) -> str:
+        return await _fetch_thread_text(mid)
 
     @mcp.resource(
         "lore://patch/{mid}",

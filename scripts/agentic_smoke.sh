@@ -221,7 +221,7 @@ async def main():
         "lore_explain_review_status",
     }
     need_templates = {
-        "lore://message/{mid}", "lore://thread/{tid}",
+        "lore://message/{mid}", "lore://thread/{mid}",
         "lore://patch/{mid}", "lore://maintainer/{path}",
         "lore://patchwork/{msg_id}",
     }

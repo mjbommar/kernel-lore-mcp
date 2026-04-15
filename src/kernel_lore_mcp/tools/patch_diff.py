@@ -7,7 +7,6 @@ patch payloads.
 
 from __future__ import annotations
 
-import asyncio
 import difflib
 from typing import Annotated, Literal
 
@@ -18,16 +17,17 @@ from kernel_lore_mcp.errors import LoreError, invalid_argument, not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import PatchDiffResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 _CONCISE_DIFF_LINES = 120
 
 
 async def _fetch_patch(reader, mid: str) -> tuple[dict, str]:
-    row = await asyncio.to_thread(reader.fetch_message, mid)
+    row = await run_with_timeout(reader.fetch_message, mid)
     if row is None:
         raise not_found(what="message", message_id=mid)
-    body = await asyncio.to_thread(reader.fetch_body, mid)
+    body = await run_with_timeout(reader.fetch_body, mid)
     if body is None:
         raise LoreError(
             "store_inconsistent",

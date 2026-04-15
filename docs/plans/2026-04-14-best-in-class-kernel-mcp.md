@@ -52,7 +52,7 @@ sorted by leverage:
 | K | **Public eval scorecard** via `mcp-eval` on ~20 canned kernel-research queries | mcp-survey §15, agent-ergo §15 | 1–2 d | 4 |
 | L | **Token-budget pagination** with HMAC opaque cursors wired through every list tool | mcp-survey §11, agent-ergo rule 5 | 1 d | 4 |
 | M | **Server-provided prompts (≤3–5 slash commands)** encoding the canonical workflows | mcp-survey §4, agent-ergo §12 | 1 d | 3 |
-| N | **Resource templates** (`lore://message/{mid}`, `lore://thread/{tid}`, `lore://patch/{mid}`, `lore://maintainer/{path}`, `lore://patchwork/{msg}`) | mcp-survey §3, workflow-gap multi | 1 d | 3 |
+| N | **Resource templates** (`lore://message/{mid}`, `lore://thread/{mid}`, `lore://patch/{mid}`, `lore://maintainer/{path}`, `lore://patchwork/{msg}`) | mcp-survey §3, workflow-gap multi | 1 d | 3 |
 
 **Single biggest unforced error**: **I (freshness marker)** — <100 LOC, no
 competitor does it well except FreshProbe, generation counter already exists.
@@ -121,7 +121,7 @@ Not a phase; a thin sweep across two days.
 **Checkpoint:** scorecard rises from 9.5/36 → ~15/36. No new data sources yet.
 
 ### Phase 10 — Resource templates (1 d)
-Per existing plan — `lore://message/{mid}`, `lore://thread/{tid}`,
+Per existing plan — `lore://message/{mid}`, `lore://thread/{mid}`,
 `lore://patch/{mid}`. **Extend** to also include `lore://maintainer/{path}`
 (foreshadowing Phase 18A) and `lore://patchwork/{msg_id}` (foreshadowing
 Phase 19). MIME types set correctly (`text/x-diff` for patches).

@@ -22,7 +22,6 @@ so agents know which algorithm produced the text.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from typing import Annotated
 
@@ -38,6 +37,7 @@ from kernel_lore_mcp.models import (
     SummarizeThreadResponse,
 )
 from kernel_lore_mcp.sampling import client_supports_sampling, sample_text
+from kernel_lore_mcp.timeout import run_with_timeout
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
@@ -220,13 +220,13 @@ async def lore_summarize_thread(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.thread, message_id, 500)
+    rows = await run_with_timeout(reader.thread, message_id, 500)
     if not rows:
         raise not_found(what="thread seed", message_id=message_id)
 
     bodies: list[str] = []
     for r in rows:
-        body = await asyncio.to_thread(reader.fetch_body, r["message_id"])
+        body = await run_with_timeout(reader.fetch_body, r["message_id"])
         if body is not None:
             bodies.append(_decode(body))
     joined = "\n\n".join(bodies)
@@ -275,11 +275,11 @@ async def lore_classify_patch(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    row = await asyncio.to_thread(reader.fetch_message, message_id)
+    row = await run_with_timeout(reader.fetch_message, message_id)
     if row is None:
         raise not_found(what="message", message_id=message_id)
 
-    body = await asyncio.to_thread(reader.fetch_body, message_id)
+    body = await run_with_timeout(reader.fetch_body, message_id)
     prose: str | None = None
     patch: str | None = None
     if body is not None:
@@ -356,13 +356,13 @@ async def lore_explain_review_status(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.thread, message_id, 500)
+    rows = await run_with_timeout(reader.thread, message_id, 500)
     if not rows:
         raise not_found(what="thread seed", message_id=message_id)
 
     bodies: list[str] = []
     for r in rows:
-        body = await asyncio.to_thread(reader.fetch_body, r["message_id"])
+        body = await run_with_timeout(reader.fetch_body, r["message_id"])
         if body is not None:
             bodies.append(_decode(body))
 

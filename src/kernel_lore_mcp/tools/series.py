@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
 from pydantic import Field
@@ -11,6 +10,7 @@ from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_timeline_entry
 from kernel_lore_mcp.models import SeriesTimelineResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 
 
 async def lore_series_timeline(
@@ -26,6 +26,6 @@ async def lore_series_timeline(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.series_timeline, message_id)
+    rows = await run_with_timeout(reader.series_timeline, message_id)
     entries = [row_to_timeline_entry(r) for r in rows]
     return SeriesTimelineResponse(entries=entries, freshness=build_freshness(reader))

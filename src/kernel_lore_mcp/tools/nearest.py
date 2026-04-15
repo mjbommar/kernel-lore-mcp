@@ -17,7 +17,6 @@ return empty.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated
@@ -30,6 +29,7 @@ from kernel_lore_mcp.errors import LoreError
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import cite_key, lore_url
 from kernel_lore_mcp.models import NearestHit, NearestResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 
 
 @lru_cache(maxsize=4)
@@ -78,8 +78,8 @@ async def lore_nearest(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    index_model = await asyncio.to_thread(reader.embedding_model)
-    index_dim = await asyncio.to_thread(reader.embedding_dim)
+    index_model = await run_with_timeout(reader.embedding_model)
+    index_dim = await run_with_timeout(reader.embedding_dim)
     if index_model is None or index_dim is None:
         raise LoreError(
             "embedding_index_not_built",
@@ -88,7 +88,7 @@ async def lore_nearest(
             retry_after_seconds=60,
         )
 
-    embedder = await asyncio.to_thread(_embedder_for, index_model)
+    embedder = await run_with_timeout(_embedder_for, index_model)
     if embedder.dim != index_dim:
         raise LoreError(
             "embedding_dim_mismatch",
@@ -97,13 +97,13 @@ async def lore_nearest(
             valid_example="rebuild the index with `kernel-lore-embed --model <same>`.",
         )
 
-    [vec] = await asyncio.to_thread(embedder.embed, [query])
+    [vec] = await run_with_timeout(embedder.embed, [query])
     vec = l2_normalize(vec)
-    hits = await asyncio.to_thread(reader.nearest, vec, k)
+    hits = await run_with_timeout(reader.nearest, vec, k)
 
     rows: list[NearestHit] = []
     for mid, score in hits:
-        row = await asyncio.to_thread(reader.fetch_message, mid)
+        row = await run_with_timeout(reader.fetch_message, mid)
         if row is not None:
             rows.append(_row_to_nearest_hit(row, score))
     return NearestResponse(
@@ -142,8 +142,8 @@ async def lore_similar(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    index_model = await asyncio.to_thread(reader.embedding_model)
-    index_dim = await asyncio.to_thread(reader.embedding_dim)
+    index_model = await run_with_timeout(reader.embedding_model)
+    index_dim = await run_with_timeout(reader.embedding_dim)
     if index_model is None or index_dim is None:
         raise LoreError(
             "embedding_index_not_built",
@@ -153,7 +153,7 @@ async def lore_similar(
         )
 
     over_k = k + (0 if include_seed else 1)
-    hits = await asyncio.to_thread(reader.nearest_to_mid, message_id, over_k)
+    hits = await run_with_timeout(reader.nearest_to_mid, message_id, over_k)
     if not hits:
         raise LoreError(
             "seed_not_in_embedding_index",
@@ -166,7 +166,7 @@ async def lore_similar(
     for mid, score in hits:
         if not include_seed and mid == message_id:
             continue
-        row = await asyncio.to_thread(reader.fetch_message, mid)
+        row = await run_with_timeout(reader.fetch_message, mid)
         if row is not None:
             rows.append(_row_to_nearest_hit(row, score))
         if len(rows) >= k:

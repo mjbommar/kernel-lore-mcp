@@ -22,6 +22,7 @@ from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.kwic import build_snippet_from_body
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import SearchResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 
 
 async def lore_patch_search(
@@ -62,23 +63,17 @@ async def lore_patch_search(
     SIMD-accelerated Levenshtein confirmation via triple_accel.
     """
     from kernel_lore_mcp import _core
-    from kernel_lore_mcp.errors import LoreError
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    timeout_s = settings.query_wall_clock_ms / 1000.0
-    try:
-        rows = await asyncio.wait_for(
-            asyncio.to_thread(reader.patch_search, needle, list, limit, fuzzy_edits),
-            timeout=timeout_s,
-        )
-    except TimeoutError:
-        raise LoreError(
-            "query_timeout",
-            f"query exceeded the {settings.query_wall_clock_ms} ms wall-clock cap",
-            echoed_input={"needle": needle, "fuzzy_edits": fuzzy_edits},
-            retry_after_seconds=5,
-        ) from None
+    rows = await run_with_timeout(
+        reader.patch_search,
+        needle,
+        list,
+        limit,
+        fuzzy_edits,
+        echoed_input={"needle": needle, "fuzzy_edits": fuzzy_edits},
+    )
     hits = []
     for r in rows:
         body = await asyncio.to_thread(reader.fetch_body, r["message_id"])

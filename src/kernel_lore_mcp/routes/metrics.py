@@ -61,6 +61,17 @@ TOOL_LATENCY = Histogram(
     registry=REGISTRY,
 )
 
+
+def record_tool_call(tool_name: str, elapsed_seconds: float, status: str = "ok") -> None:
+    """Record one tool invocation in the Prometheus metrics.
+
+    Called from the timeout wrapper after every tool call so metrics
+    are wired automatically without per-tool boilerplate.
+    """
+    TOOL_CALLS.labels(tool=tool_name, status=status).inc()
+    TOOL_LATENCY.labels(tool=tool_name).observe(elapsed_seconds)
+
+
 INDEX_GENERATION = Gauge(
     "kernel_lore_mcp_index_generation",
     "Current index generation counter.",

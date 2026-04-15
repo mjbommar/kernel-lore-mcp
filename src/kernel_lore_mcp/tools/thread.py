@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -12,6 +11,7 @@ from kernel_lore_mcp.errors import not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import ThreadMessage, ThreadResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 _CONCISE_MESSAGES = 10
@@ -38,7 +38,7 @@ async def lore_thread(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.thread, message_id, max_messages)
+    rows = await run_with_timeout(reader.thread, message_id, max_messages)
     if not rows:
         raise not_found(what="thread seed", message_id=message_id)
 
@@ -51,7 +51,7 @@ async def lore_thread(
         prose: str | None = None
         patch: str | None = None
         if response_format == "detailed":
-            body = await asyncio.to_thread(reader.fetch_body, row["message_id"])
+            body = await run_with_timeout(reader.fetch_body, row["message_id"])
             if body is not None:
                 try:
                     text = body.decode("utf-8")
@@ -66,8 +66,21 @@ async def lore_thread(
             )
         )
 
-    truncated = total_rows >= max_messages or (
-        response_format == "concise" and total_rows > _CONCISE_MESSAGES
+    # Enforce the configured max-bytes cap. Measure the concatenated
+    # prose+patch text; if it exceeds the limit, truncate messages.
+    total_bytes = sum(
+        len((m.prose or "").encode()) + len((m.patch or "").encode()) for m in messages
+    )
+    if total_bytes > settings.thread_response_max_bytes:
+        # Keep trimming from the tail until under budget.
+        while messages and total_bytes > settings.thread_response_max_bytes:
+            dropped = messages.pop()
+            total_bytes -= len((dropped.prose or "").encode()) + len((dropped.patch or "").encode())
+
+    truncated = (
+        total_rows >= max_messages
+        or (response_format == "concise" and total_rows > _CONCISE_MESSAGES)
+        or total_rows > len(messages)
     )
     return ThreadResponse(
         root_message_id=rows[0]["message_id"],

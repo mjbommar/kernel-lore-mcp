@@ -7,7 +7,6 @@ about a patch.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
 from pydantic import Field
@@ -17,6 +16,7 @@ from kernel_lore_mcp.errors import not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit, row_to_timeline_entry
 from kernel_lore_mcp.models import ExplainPatchResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 
@@ -32,11 +32,11 @@ async def lore_explain_patch(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    row = await asyncio.to_thread(reader.fetch_message, message_id)
+    row = await run_with_timeout(reader.fetch_message, message_id)
     if row is None:
         raise not_found(what="message", message_id=message_id)
 
-    body = await asyncio.to_thread(reader.fetch_body, message_id)
+    body = await run_with_timeout(reader.fetch_body, message_id)
     prose: str | None = None
     patch: str | None = None
     if body is not None:
@@ -46,13 +46,13 @@ async def lore_explain_patch(
             text = body.decode("latin-1", errors="replace")
         prose, patch = _split_prose_patch(text)
 
-    series_rows = await asyncio.to_thread(reader.series_timeline, message_id)
+    series_rows = await run_with_timeout(reader.series_timeline, message_id)
     series = [row_to_timeline_entry(r) for r in series_rows]
 
     # Downstream = direct replies that point at this message-id via
     # in_reply_to. We use the existing `thread` walker capped at
     # max_downstream + 1 (the seed itself counts as one).
-    thread_rows = await asyncio.to_thread(reader.thread, message_id, max_downstream + 1)
+    thread_rows = await run_with_timeout(reader.thread, message_id, max_downstream + 1)
     downstream = [
         row_to_search_hit(r, tier_provenance=["metadata"])
         for r in thread_rows

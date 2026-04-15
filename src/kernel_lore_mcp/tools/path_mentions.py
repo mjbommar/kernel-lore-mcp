@@ -18,7 +18,6 @@ Three match modes:
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -27,6 +26,7 @@ from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import RowsResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 
 
 async def lore_path_mentions(
@@ -73,7 +73,7 @@ async def lore_path_mentions(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.path_mentions, path, match, list, since_unix_ns, limit)
+    rows = await run_with_timeout(reader.path_mentions, path, match, list, since_unix_ns, limit)
     hits = [row_to_search_hit(r, tier_provenance=["path"]) for r in rows]
     return RowsResponse(
         results=hits,

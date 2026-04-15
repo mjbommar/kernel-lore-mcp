@@ -18,7 +18,6 @@ prose remain rejected by the BM25 tier.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -27,6 +26,7 @@ from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import SearchResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 
 _CONCISE_HITS = 10
 
@@ -64,23 +64,15 @@ async def lore_search(
     _ = cursor  # TODO(phase-5d): cursor consumption (router signs them already)
 
     from kernel_lore_mcp import _core
-    from kernel_lore_mcp.errors import LoreError
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    timeout_s = settings.query_wall_clock_ms / 1000.0
-    try:
-        rows = await asyncio.wait_for(
-            asyncio.to_thread(reader.router_search, query, limit),
-            timeout=timeout_s,
-        )
-    except TimeoutError:
-        raise LoreError(
-            "query_timeout",
-            f"query exceeded the {settings.query_wall_clock_ms} ms wall-clock cap",
-            echoed_input={"query": query},
-            retry_after_seconds=5,
-        ) from None
+    rows = await run_with_timeout(
+        reader.router_search,
+        query,
+        limit,
+        echoed_input={"query": query},
+    )
     total_rows = len(rows)
     if response_format == "concise":
         rows = rows[:_CONCISE_HITS]

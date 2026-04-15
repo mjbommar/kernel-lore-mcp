@@ -6,7 +6,6 @@ rollup lands in Phase 2.5 once the tid computation pass is wired.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -15,6 +14,7 @@ from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_activity_row
 from kernel_lore_mcp.models import ActivityResponse
+from kernel_lore_mcp.timeout import run_with_timeout
 
 _CONCISE_ROWS = 20
 
@@ -65,7 +65,7 @@ async def lore_activity(
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(
+    rows = await run_with_timeout(
         reader.activity,
         file,
         function,
