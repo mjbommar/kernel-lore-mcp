@@ -246,6 +246,12 @@ impl MetadataBatch {
 }
 
 /// Write a finished RecordBatch to disk as Parquet + zstd.
+///
+/// Uses tempfile + atomic rename so concurrent readers never see a
+/// partially-written `.parquet` file. The reader scans every visible
+/// `.parquet` in the list directory on each query; without the
+/// rename fence a query mid-write would hit a truncated file and
+/// fail.
 pub fn write_parquet(
     data_dir: &Path,
     list: &str,
@@ -254,7 +260,8 @@ pub fn write_parquet(
 ) -> Result<PathBuf> {
     let list_dir = data_dir.join("metadata").join(list);
     fs::create_dir_all(&list_dir)?;
-    let path = list_dir.join(format!("{run_id}.parquet"));
+    let final_path = list_dir.join(format!("{run_id}.parquet"));
+    let tmp_path = list_dir.join(format!(".{run_id}.parquet.tmp"));
 
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(
@@ -264,11 +271,15 @@ pub fn write_parquet(
         .set_column_bloom_filter_enabled(schema::COL_MESSAGE_ID.into(), true)
         .build();
 
-    let file = File::create(&path)?;
+    let file = File::create(&tmp_path)?;
     let mut writer = ArrowWriter::try_new(file, batch.schema(), Some(props))?;
     writer.write(batch)?;
     writer.close()?;
-    Ok(path)
+
+    // Atomic rename: readers either see the old state or the new
+    // complete file — never a partial write.
+    fs::rename(&tmp_path, &final_path)?;
+    Ok(final_path)
 }
 
 fn append_opt(b: &mut StringBuilder, v: Option<&str>) {

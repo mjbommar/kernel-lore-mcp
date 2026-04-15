@@ -47,7 +47,8 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
 
     let out_dir = data_dir.join("tid");
     fs::create_dir_all(&out_dir)?;
-    let path = out_dir.join(SIDETABLE_FILENAME);
+    let final_path = out_dir.join(SIDETABLE_FILENAME);
+    let tmp_path = out_dir.join(format!(".{SIDETABLE_FILENAME}.tmp"));
 
     let schema = sidetable_schema();
     let batch = build_batch(&schema, &computed)?;
@@ -57,11 +58,14 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
             ZstdLevel::try_new(3).map_err(|e| Error::State(format!("zstd: {e}")))?,
         ))
         .build();
-    let file = File::create(&path)?;
+    // Write to a tempfile, then atomic rename. A crash mid-write
+    // leaves the previous tid.parquet intact.
+    let file = File::create(&tmp_path)?;
     let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
     writer.write(&batch)?;
     writer.close()?;
-    Ok((path, computed.len()))
+    fs::rename(&tmp_path, &final_path)?;
+    Ok((final_path, computed.len()))
 }
 
 /// One side-table row.

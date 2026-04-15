@@ -244,7 +244,16 @@ pub fn ingest_shard_with_bm25(
     }
 
     state.save_last_indexed_oid(list, shard, &head_hex)?;
-    state.bump_generation()?;
+
+    // Bump generation ONLY when we own the BM25 writer (single-shard
+    // path via ingest_shard / ingest_shard_unlocked). When a shared
+    // BM25 writer is in use (multi-shard binary via par_iter), the
+    // caller bumps generation AFTER committing BM25 + rebuilding tid
+    // so readers never see metadata/trigram at gen N while BM25/tid
+    // are still stale at gen N-1.
+    if shared_bm25.is_none() {
+        state.bump_generation()?;
+    }
 
     Ok(stats)
 }

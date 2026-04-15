@@ -127,6 +127,13 @@ fn main() -> Result<()> {
         "tid rebuild done"
     );
 
+    // Bump generation ONCE, after BM25 commit + tid rebuild, so
+    // readers never see an inconsistent snapshot. Individual
+    // ingest_shard_with_bm25 calls skip the bump when a shared
+    // BM25 writer is in use.
+    let new_gen = state.bump_generation().context("bump generation")?;
+    tracing::info!(generation = new_gen, "generation bumped");
+
     let mut total_ingested: u64 = 0;
     let mut total_failed: u64 = 0;
     for (shard, result) in shards.iter().zip(totals.iter()) {

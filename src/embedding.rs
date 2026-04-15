@@ -172,11 +172,20 @@ impl EmbeddingBuilder {
         w.write_all(&json)?;
         w.flush()?;
 
-        // Atomic swap.
+        // Atomic swap: rename old → .old, rename new → final,
+        // then clean up .old. A crash at any point leaves either
+        // the old or new snapshot intact — never a gap.
+        let old = dest.with_extension("old");
         if dest.exists() {
-            fs::remove_dir_all(&dest)?;
+            if old.exists() {
+                fs::remove_dir_all(&old)?;
+            }
+            fs::rename(&dest, &old)?;
         }
         fs::rename(&tmp, &dest)?;
+        if old.exists() {
+            let _ = fs::remove_dir_all(&old); // best-effort cleanup
+        }
         Ok(meta)
     }
 }

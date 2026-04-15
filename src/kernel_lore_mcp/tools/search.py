@@ -64,10 +64,23 @@ async def lore_search(
     _ = cursor  # TODO(phase-5d): cursor consumption (router signs them already)
 
     from kernel_lore_mcp import _core
+    from kernel_lore_mcp.errors import LoreError
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
-    rows = await asyncio.to_thread(reader.router_search, query, limit)
+    timeout_s = settings.query_wall_clock_ms / 1000.0
+    try:
+        rows = await asyncio.wait_for(
+            asyncio.to_thread(reader.router_search, query, limit),
+            timeout=timeout_s,
+        )
+    except TimeoutError:
+        raise LoreError(
+            "query_timeout",
+            f"query exceeded the {settings.query_wall_clock_ms} ms wall-clock cap",
+            echoed_input={"query": query},
+            retry_after_seconds=5,
+        ) from None
     total_rows = len(rows)
     if response_format == "concise":
         rows = rows[:_CONCISE_HITS]

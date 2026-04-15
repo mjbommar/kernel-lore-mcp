@@ -254,11 +254,20 @@ impl Reader {
 
     /// Apply `visit` to every row matching `filter`. Short-circuits when
     /// `visit` returns false.
+    /// Core scan: walks every Parquet file, deduplicates by message_id.
+    ///
+    /// Because `parquet_files()` returns files in descending filename
+    /// order (newest run_id first), the first occurrence of each
+    /// message_id is the freshest. Subsequent duplicates (from
+    /// dangling-OID re-walks) are skipped. This makes the "freshest
+    /// row wins" contract from the ingest docs enforceable end-to-end
+    /// without a separate dedup pass.
     fn scan<F, V>(&self, mut filter: F, mut visit: V) -> Result<()>
     where
         F: FnMut(&MessageRow) -> bool,
         V: FnMut(MessageRow) -> bool,
     {
+        let mut seen = std::collections::HashSet::<String>::new();
         for path in self.parquet_files()? {
             let file = File::open(&path)?;
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
@@ -267,6 +276,9 @@ impl Reader {
                 let batch = batch?;
                 let rows = materialize_batch(&batch)?;
                 for row in rows {
+                    if !seen.insert(row.message_id.clone()) {
+                        continue; // duplicate — skip
+                    }
                     if !filter(&row) {
                         continue;
                     }

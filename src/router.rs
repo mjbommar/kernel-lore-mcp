@@ -242,6 +242,18 @@ pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<V
                     limit,
                 )?,
             );
+        } else if parsed.list.is_some()
+            || parsed.from_addr.is_some()
+            || parsed.since_unix_ns.is_some()
+        {
+            // Pure metadata predicates (list:, f:, since:) without a
+            // structural key. Do a filtered scan so the caller gets
+            // results instead of an empty set. The post-filter below
+            // applies the same predicates again for belt-and-suspenders.
+            tier_results.insert(
+                "metadata",
+                reader.all_rows(parsed.list.as_deref(), parsed.since_unix_ns)?,
+            );
         }
     }
 
