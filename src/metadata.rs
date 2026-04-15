@@ -335,7 +335,7 @@ diff --git a/fs/smb/server/smbacl.c b/fs/smb/server/smbacl.c\r\n\
  a\r\n\
 +b\r\n\
 ";
-        let parsed = parse_message(msg);
+        let parsed = parse_message(msg, None);
         batch.push(MetadataRow {
             list: "linux-cifs",
             shard: "0",
@@ -363,7 +363,7 @@ diff --git a/fs/smb/server/smbacl.c b/fs/smb/server/smbacl.c\r\n\
     #[test]
     fn drops_rows_without_message_id() {
         let mut batch = MetadataBatch::new();
-        let parsed = parse_message(b"Subject: no mid\r\n\r\nbody\r\n");
+        let parsed = parse_message(b"Subject: no mid\r\n\r\nbody\r\n", None);
         batch.push(MetadataRow {
             list: "x",
             shard: "0",

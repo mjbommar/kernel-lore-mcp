@@ -56,8 +56,11 @@ pub struct ParsedMessage {
     pub cc_stable: Vec<String>,
 }
 
-/// Parse a single RFC822 message.
-pub fn parse_message(bytes: &[u8]) -> ParsedMessage {
+/// Parse a single RFC822 message. `commit_date_unix_ns` is an
+/// optional fallback from the git commit's author date; used when
+/// the Date: header is missing or unparseable (common on messages
+/// injected by automated tools).
+pub fn parse_message(bytes: &[u8], commit_date_unix_ns: Option<i64>) -> ParsedMessage {
     let Some(msg) = MessageParser::default().parse(bytes) else {
         return ParsedMessage::default();
     };
@@ -91,6 +94,11 @@ pub fn parse_message(bytes: &[u8]) -> ParsedMessage {
             out.date_unix_ns = Some(parsed.unix_timestamp_nanos() as i64);
         }
     }
+    // Fallback: use the git commit's author date when the RFC822
+    // Date: header is missing or unparseable.
+    if out.date_unix_ns.is_none() {
+        out.date_unix_ns = commit_date_unix_ns;
+    }
     if let Some(list) = msg.in_reply_to().as_text_list() {
         if let Some(irt) = list.first() {
             out.in_reply_to = Some(strip_angles(irt.as_ref()).to_owned());
@@ -102,7 +110,22 @@ pub fn parse_message(bytes: &[u8]) -> ParsedMessage {
         }
     }
 
-    let body_text = msg.body_text(0).unwrap_or_default().into_owned();
+    // Collect ALL text body parts, not just the first. Multi-part
+    // messages (common on kernel lists) can carry the patch in a
+    // second text/plain part or have the prose split across parts.
+    // body_text(0) alone would silently lose content.
+    let part_count = msg.text_body_count();
+    let body_text = if part_count <= 1 {
+        msg.body_text(0).unwrap_or_default().into_owned()
+    } else {
+        let mut parts = Vec::with_capacity(part_count);
+        for i in 0..part_count {
+            if let Some(part) = msg.body_text(i) {
+                parts.push(part.into_owned());
+            }
+        }
+        parts.join("\n")
+    };
     split_prose_and_patch(&body_text, &mut out);
     let prose = out.prose.clone();
     extract_trailers(&prose, &mut out);
@@ -495,7 +518,7 @@ index 111..222 100644\r\n\
 
     #[test]
     fn full_patch_roundtrip() {
-        let p = parse_message(SAMPLE_PATCH);
+        let p = parse_message(SAMPLE_PATCH, None);
         assert_eq!(
             p.message_id.as_deref(),
             Some("20260414191533.1467353-3-alice@example.com")
@@ -540,7 +563,7 @@ Message-ID: <cover@x>\r\n\
 \r\n\
 Cover letter body.\r\n\
 ";
-        let p = parse_message(msg);
+        let p = parse_message(msg, None);
         assert!(p.is_cover_letter);
         assert_eq!(p.series_index, Some(0));
         assert_eq!(p.series_total, Some(3));
@@ -550,7 +573,7 @@ Cover letter body.\r\n\
     #[test]
     fn subject_tags_capture_rfc_and_resend() {
         let msg = b"Subject: [RFC] [RESEND v2 1/2] mm: test\r\nMessage-ID: <x>\r\n\r\n";
-        let p = parse_message(msg);
+        let p = parse_message(msg, None);
         assert!(p.subject_tags.iter().any(|t| t == "RFC"));
         assert!(p.subject_tags.iter().any(|t| t == "RESEND v2 1/2"));
         assert_eq!(p.series_version, 2);
@@ -570,7 +593,7 @@ I think this looks good.\r\n\
 -- \r\n\
 Alice | company\r\n\
 ";
-        let p = parse_message(msg);
+        let p = parse_message(msg, None);
         assert!(p.prose.contains("I think this looks good"));
         assert!(!p.prose.contains("quoted line"));
         assert!(!p.prose.contains("Alice | company"));

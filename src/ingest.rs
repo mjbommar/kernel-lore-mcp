@@ -159,7 +159,10 @@ pub fn ingest_shard_with_bm25(
             continue;
         }
 
-        let parsed = parse::parse_message(data);
+        // Extract commit author date for the parse_message fallback.
+        // commit.time() returns gix_date::Time with .seconds field.
+        let commit_date_ns = commit.time().ok().map(|t| t.seconds * 1_000_000_000);
+        let parsed = parse::parse_message(data, commit_date_ns);
         let Some(mid) = parsed.message_id.clone() else {
             stats.skipped_no_mid += 1;
             continue;
