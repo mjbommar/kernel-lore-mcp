@@ -263,15 +263,21 @@ impl PyReader {
     ///
     /// Returns a list of row dicts (same shape as `fetch_message`).
     /// `limit` is enforced after confirmation; newest-first.
-    #[pyo3(signature = (needle, list=None, limit=100))]
+    /// `fuzzy_edits`: 0 = exact (default), 1-2 = Levenshtein
+    /// approximate substring match at confirmation step.
+    #[pyo3(signature = (needle, list=None, limit=100, fuzzy_edits=0))]
     fn patch_search<'py>(
         &self,
         py: Python<'py>,
         needle: String,
         list: Option<String>,
         limit: usize,
+        fuzzy_edits: u32,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let rows = py.detach(|| self.inner.patch_search(&needle, list.as_deref(), limit))?;
+        let rows = py.detach(|| {
+            self.inner
+                .patch_search_fuzzy(&needle, list.as_deref(), limit, fuzzy_edits)
+        })?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
 
@@ -500,6 +506,76 @@ impl PyReader {
     fn generation_mtime_ns(&self, py: Python<'_>) -> PyResult<Option<i64>> {
         let ns = py.detach(|| self.inner.generation_mtime_ns())?;
         Ok(ns)
+    }
+
+    /// Path tier: search for messages mentioning a file path.
+    ///
+    /// `match_mode`: "exact" | "basename" | "prefix".
+    /// Returns a list of row-dicts (same shape as `fetch_message`).
+    #[pyo3(signature = (path, match_mode="exact", list=None, since_unix_ns=None, limit=100))]
+    fn path_mentions<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        match_mode: &str,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
+        use crate::path_tier;
+
+        let data_dir = self.inner.data_dir().to_owned();
+        let mode = match_mode.to_owned();
+
+        let rows = py.detach(
+            move || -> Result<Vec<crate::reader::MessageRow>, crate::error::Error> {
+                let vocab = path_tier::load_vocab(&data_dir)?;
+                let Some(vocab) = vocab else {
+                    return Ok(Vec::new());
+                };
+
+                let path_ids: Vec<u32> = match mode.as_str() {
+                    "exact" => vocab.lookup_exact(&path).into_iter().collect(),
+                    "basename" => vocab.lookup_basename(&path).to_vec(),
+                    "prefix" => vocab.lookup_prefix(&path),
+                    _ => {
+                        return Err(crate::error::Error::State(format!(
+                            "unknown match_mode {mode:?}; use exact/basename/prefix"
+                        )));
+                    }
+                };
+
+                if path_ids.is_empty() {
+                    return Ok(Vec::new());
+                }
+
+                // Scan all messages and filter by the ones whose bodies
+                // mention any of the target paths. For v0.1.x this is a
+                // brute-force scan; the posting-list optimization lands
+                // when we build incremental postings at ingest time.
+                let reader = crate::reader::Reader::new(&data_dir);
+                let all_rows = reader.all_rows(list.as_deref(), since_unix_ns)?;
+
+                let mut results = Vec::new();
+                for row in &all_rows {
+                    let body = reader.fetch_body(&row.message_id)?;
+                    let Some(body) = body else { continue };
+                    let found = vocab.scan_body(&body);
+                    let hit = found.iter().any(|id| path_ids.contains(id));
+                    if hit {
+                        results.push(row.clone());
+                        if results.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+                Ok(results)
+            },
+        )?;
+
+        rows.iter()
+            .map(|r| crate::python::row_to_pydict(py, r))
+            .collect()
     }
 
     /// Embedding-index dim, used by the Python tool to verify the

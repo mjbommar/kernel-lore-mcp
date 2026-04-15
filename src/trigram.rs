@@ -27,7 +27,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -231,16 +231,64 @@ impl SegmentReader {
     /// contain `needle`. Caller must confirm by decompressing the body
     /// and running the real needle.
     pub fn candidates_for_substring(&self, needle: &[u8]) -> Vec<&str> {
+        self.candidates_for_substring_fuzzy(needle, 0)
+    }
+
+    /// Fuzzy-aware substring candidate search. At `fuzzy_edits == 0`
+    /// this is exact (AND of all trigrams). At `fuzzy_edits > 0`,
+    /// uses threshold intersection: require at least
+    /// `max(1, num_trigrams - 3*k)` trigrams to match. Each edit can
+    /// destroy at most 3 trigrams (pigeonhole principle).
+    pub fn candidates_for_substring_fuzzy(&self, needle: &[u8], fuzzy_edits: u32) -> Vec<&str> {
         if needle.len() < 3 {
-            // Too short for trigram filtering — return every doc.
             return self.docs.iter().map(String::as_str).collect();
         }
-        let bitmap = self.candidate_docids(needle);
-        bitmap
-            .iter()
+        if fuzzy_edits == 0 {
+            let bitmap = self.candidate_docids(needle);
+            return bitmap
+                .iter()
+                .take(TRIGRAM_CONFIRM_LIMIT)
+                .filter_map(|docid| self.docs.get(docid as usize).map(String::as_str))
+                .collect();
+        }
+
+        // Threshold intersection for fuzzy: a document must contain
+        // at least `threshold` of the needle's trigrams.
+        let mut trigrams = Vec::new();
+        for w in needle.windows(3) {
+            if w.iter().all(|b| *b < 0x80) {
+                trigrams.push(pack_trigram(w));
+            }
+        }
+        if trigrams.is_empty() {
+            return self.docs.iter().map(String::as_str).collect();
+        }
+        trigrams.sort_unstable();
+        trigrams.dedup();
+
+        let threshold = trigrams
+            .len()
+            .saturating_sub(3 * fuzzy_edits as usize)
+            .max(1);
+
+        // Count how many of the needle's trigrams each doc matches.
+        let mut counts: HashMap<u32, usize> = HashMap::new();
+        for tri in &trigrams {
+            if let Some(bitmap) = self.posting_for(*tri) {
+                for docid in bitmap.iter() {
+                    *counts.entry(docid).or_default() += 1;
+                }
+            }
+        }
+
+        let mut out: Vec<&str> = counts
+            .into_iter()
+            .filter(|(_, c)| *c >= threshold)
             .take(TRIGRAM_CONFIRM_LIMIT)
-            .filter_map(|docid| self.docs.get(docid as usize).map(String::as_str))
-            .collect()
+            .filter_map(|(docid, _)| self.docs.get(docid as usize).map(String::as_str))
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     /// Yield every distinct trigram key in the segment. Useful for

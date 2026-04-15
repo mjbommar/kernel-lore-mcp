@@ -55,6 +55,15 @@ fst = "0.4"
 # Regex: DFA-only engine, safe for untrusted input (no backrefs).
 regex-automata = "0.4"
 
+# Path tier: multi-pattern match over the known kernel-path vocabulary.
+# Already in the dep tree via tantivy; pinned explicitly so path_tier.rs
+# can import it directly.
+aho-corasick = "1"
+
+# Fuzzy search: SIMD-accelerated Levenshtein substring search for the
+# trigram confirmation step. MIT, zero transitive deps.
+triple_accel = "0.4"
+
 # Compression (compressed raw store)
 zstd = "0.13"
 

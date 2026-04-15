@@ -60,6 +60,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.patch import lore_patch
     from kernel_lore_mcp.tools.patch_diff import lore_patch_diff
     from kernel_lore_mcp.tools.patch_search import lore_patch_search
+    from kernel_lore_mcp.tools.path_mentions import lore_path_mentions
     from kernel_lore_mcp.tools.primitives import (
         lore_count,
         lore_diff,
@@ -119,6 +120,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # actionable ToolError when the index hasn't been built yet.
     mcp.tool(lore_nearest, annotations=ann("Semantic nearest-neighbour on free text"))
     mcp.tool(lore_similar, annotations=ann("Nearest-neighbour on a seed message-id"))
+
+    # Phase 13a-file — Aho-Corasick path-mention reverse index.
+    mcp.tool(lore_path_mentions, annotations=ann("Find messages mentioning a file path"))
 
     # Phase 12 — sampling-backed tools with graceful extractive
     # fallback. `backend` on every response tells the agent which

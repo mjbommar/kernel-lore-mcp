@@ -160,6 +160,37 @@ impl Reader {
         )
     }
 
+    /// Collect all rows with optional list + since filters. Used by
+    /// the path tier's brute-force scan in v0.1.x; will be replaced
+    /// by posting-list reads in v0.2.x.
+    pub fn all_rows(
+        &self,
+        list: Option<&str>,
+        since_unix_ns: Option<i64>,
+    ) -> Result<Vec<MessageRow>> {
+        let mut out = Vec::new();
+        self.scan(
+            |_| true,
+            |r| {
+                if let Some(l) = list {
+                    if r.list != l {
+                        return true;
+                    }
+                }
+                if let Some(since) = since_unix_ns {
+                    if let Some(d) = r.date_unix_ns {
+                        if d < since {
+                            return true;
+                        }
+                    }
+                }
+                out.push(r);
+                true
+            },
+        )?;
+        Ok(out)
+    }
+
     /// Read the tid side-table at `<data_dir>/tid/tid.parquet` into a
     /// `message_id -> tid` map. Returns empty if the side-table
     /// hasn't been built yet.
@@ -831,6 +862,84 @@ impl Reader {
             let store = crate::store::Store::open(&self.data_dir, &row.list)?;
             let body = store.read_at(0, row.body_offset)?;
             if memchr::memmem::find(&body, &needle_bytes).is_some() {
+                confirmed.push(row);
+            }
+        }
+
+        confirmed.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        confirmed.truncate(limit);
+        Ok(confirmed)
+    }
+
+    /// Like `patch_search` but with optional edit-distance tolerance.
+    /// When `fuzzy_edits == 0`, behaves identically to `patch_search`.
+    /// When `fuzzy_edits > 0`, the confirmation step uses
+    /// `triple_accel::levenshtein_search` to find approximate matches.
+    pub fn patch_search_fuzzy(
+        &self,
+        needle: &str,
+        list: Option<&str>,
+        limit: usize,
+        fuzzy_edits: u32,
+    ) -> Result<Vec<MessageRow>> {
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lists = match list {
+            Some(l) => vec![l.to_owned()],
+            None => list_trigram_lists(&self.data_dir)?,
+        };
+
+        let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for lst in &lists {
+            for seg_dir in crate::trigram::list_segments(&self.data_dir, lst)? {
+                let seg = crate::trigram::SegmentReader::open(&seg_dir)?;
+                for mid in seg.candidates_for_substring_fuzzy(needle.as_bytes(), fuzzy_edits) {
+                    candidates.insert(mid.to_owned());
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut hits = Vec::new();
+        let list_filter = list.map(str::to_owned);
+        let needle_bytes = needle.as_bytes().to_owned();
+        self.scan(
+            |r| {
+                if let Some(ref lst) = list_filter {
+                    if &r.list != lst {
+                        return false;
+                    }
+                }
+                candidates.contains(&r.message_id)
+            },
+            |r| {
+                hits.push(r);
+                true
+            },
+        )?;
+
+        let mut confirmed = Vec::new();
+        for row in hits {
+            let store = crate::store::Store::open(&self.data_dir, &row.list)?;
+            let body = store.read_at(0, row.body_offset)?;
+            let is_match = if fuzzy_edits == 0 {
+                memchr::memmem::find(&body, &needle_bytes).is_some()
+            } else {
+                triple_accel::levenshtein::levenshtein_search_simd_with_opts(
+                    &needle_bytes,
+                    &body,
+                    fuzzy_edits,
+                    triple_accel::SearchType::Best,
+                    triple_accel::levenshtein::LEVENSHTEIN_COSTS,
+                    false,
+                )
+                .next()
+                .is_some()
+            };
+            if is_match {
                 confirmed.push(row);
             }
         }

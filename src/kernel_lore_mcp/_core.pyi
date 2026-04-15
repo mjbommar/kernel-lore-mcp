@@ -75,6 +75,7 @@ class Reader:
         needle: str,
         list: str | None = ...,
         limit: int = ...,
+        fuzzy_edits: int = ...,
     ) -> list[dict[str, Any]]: ...
     def prose_search(
         self,
@@ -149,3 +150,11 @@ class Reader:
     def embedding_model(self) -> str | None: ...
     def generation(self) -> int: ...
     def generation_mtime_ns(self) -> int | None: ...
+    def path_mentions(
+        self,
+        path: str,
+        match_mode: str = ...,
+        list: str | None = ...,
+        since_unix_ns: int | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...

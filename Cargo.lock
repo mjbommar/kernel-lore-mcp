@@ -2122,6 +2122,7 @@ dependencies = [
 name = "kernel_lore_mcp"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "arrow",
  "base64",
@@ -2149,6 +2150,7 @@ dependencies = [
  "time",
  "tracing",
  "tracing-subscriber",
+ "triple_accel",
  "zstd",
 ]
 
@@ -3512,6 +3514,12 @@ dependencies = [
  "tracing-log",
  "tracing-serde",
 ]
+
+[[package]]
+name = "triple_accel"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22048bc95dfb2ffd05b1ff9a756290a009224b60b2f0e7525faeee7603851e63"
 
 [[package]]
 name = "twox-hash"

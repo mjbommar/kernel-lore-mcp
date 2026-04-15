@@ -34,6 +34,7 @@ mod error;
 mod ingest;
 mod metadata;
 mod parse;
+pub mod path_tier;
 mod python;
 mod reader;
 mod router;
