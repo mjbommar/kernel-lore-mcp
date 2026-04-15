@@ -10,6 +10,9 @@
 - **Legal posture:** [`LEGAL.md`](./LEGAL.md).
 - **Security policy:** [`SECURITY.md`](./SECURITY.md).
 - **Governance:** [`GOVERNANCE.md`](./GOVERNANCE.md).
+- **Next-phase plan (Phases 10–17, MCP-spec coverage + UX uplift):**
+  [`docs/plans/2026-04-15-mcp-spec-coverage-and-uplift.md`](./docs/plans/2026-04-15-mcp-spec-coverage-and-uplift.md).
+  Includes the full lessons-learned retro at the bottom.
 
 ## Standards
 
