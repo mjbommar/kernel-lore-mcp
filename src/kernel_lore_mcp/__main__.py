@@ -1,27 +1,34 @@
 """Entry point for the ``kernel-lore-mcp`` console script.
 
-Defaults:
-  * `--transport stdio` (safe for local dev, Claude Code local config).
-  * HTTP mode binds `127.0.0.1` unless `KLMCP_BIND` is set or
-    `--host 0.0.0.0` is passed explicitly.
+Two subcommands:
 
-Stdio note: in stdio mode **all** logging must go to stderr, never
-stdout. stdout carries MCP JSON-RPC frames; any extra byte corrupts
-the stream. `logging_.configure()` handles this.
+  * ``serve`` (default) — run the MCP server. stdio for local dev,
+    streamable HTTP for hosted deployments. In stdio mode ALL logging
+    goes to stderr; stdout carries MCP JSON-RPC frames and any extra
+    byte corrupts the stream.
+
+  * ``status`` — read the generation file + mtime from a data_dir
+    and print one-line JSON. Zero dependencies on the HTTP surface;
+    use when you want to answer "is my index fresh?" without booting
+    a server. Output shape matches the /status route.
+
+Bare invocation with no subcommand behaves as ``serve`` for backwards
+compatibility with the pre-subcommand scripts.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
 from kernel_lore_mcp.logging_ import configure as configure_logging
-from kernel_lore_mcp.server import build_server
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="kernel-lore-mcp")
+def _add_serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--transport",
         choices=("stdio", "http"),
@@ -44,15 +51,39 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("KLMCP_LOG_LEVEL", "INFO"),
         help="Log level (DEBUG/INFO/WARN/ERROR). Env: KLMCP_LOG_LEVEL.",
     )
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="kernel-lore-mcp")
+    sub = parser.add_subparsers(dest="cmd")
+
+    serve = sub.add_parser("serve", help="Run the MCP server (default).")
+    _add_serve_args(serve)
+
+    status = sub.add_parser(
+        "status",
+        help=("Print generation + freshness for a data_dir as JSON. No HTTP server required."),
+    )
+    status.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "Data directory to probe. Default: KLMCP_DATA_DIR env or "
+            "the pydantic-settings default (./data)."
+        ),
+    )
+
+    # Back-compat: `kernel-lore-mcp --transport stdio` with no
+    # subcommand keeps working.
+    _add_serve_args(parser)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+def _run_serve(args: argparse.Namespace) -> int:
+    from kernel_lore_mcp.server import build_server
+
     configure_logging(transport=args.transport, level=args.log_level)
-
     mcp = build_server()
-
     if args.transport == "stdio":
         mcp.run(transport="stdio")
         return 0
@@ -63,6 +94,62 @@ def main(argv: list[str] | None = None) -> int:
     else:
         mcp.run(transport="http", host=host, port=args.port)
     return 0
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    """Read state/generation directly — no server, no HTTP."""
+    from kernel_lore_mcp.config import Settings
+
+    data_dir = Path(args.data_dir) if args.data_dir else Settings().data_dir
+    gen_file = data_dir / "state" / "generation"
+
+    if not gen_file.exists():
+        out = {
+            "service": "kernel-lore-mcp",
+            "data_dir": str(data_dir),
+            "generation": 0,
+            "last_ingest_utc": None,
+            "last_ingest_age_seconds": None,
+            "configured_interval_seconds": Settings().grokmirror_interval_seconds,
+            "freshness_ok": None,
+            "note": "no ingest has run against this data_dir yet",
+        }
+        json.dump(out, sys.stdout)
+        sys.stdout.write("\n")
+        return 0
+
+    try:
+        generation = int(gen_file.read_text().strip())
+    except ValueError:
+        generation = 0
+    mtime = datetime.fromtimestamp(gen_file.stat().st_mtime, tz=UTC)
+    now = datetime.now(tz=UTC)
+    age = max(0, int((now - mtime).total_seconds()))
+    interval = Settings().grokmirror_interval_seconds
+    out = {
+        "service": "kernel-lore-mcp",
+        "data_dir": str(data_dir),
+        "generation": generation,
+        "last_ingest_utc": mtime.isoformat(),
+        "last_ingest_age_seconds": age,
+        "configured_interval_seconds": interval,
+        "freshness_ok": age < 3 * interval,
+    }
+    json.dump(out, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.cmd == "status":
+        return _run_status(args)
+
+    # Default: serve. Accept both `serve ...` and the bare `--transport`
+    # form for back-compat with the pre-subcommand scripts.
+    return _run_serve(args)
 
 
 if __name__ == "__main__":

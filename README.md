@@ -3,116 +3,144 @@
 Free (MIT) MCP server exposing structured search over the Linux
 kernel mailing list archives at
 [lore.kernel.org](https://lore.kernel.org) to LLM-backed developer
-tools — Claude Code, Codex, Cursor, and anything else that speaks
+tools — Claude Code, Codex, Cursor, Zed, anything else that speaks
 the Model Context Protocol.
+
+**No authentication, ever.** No API keys, no OAuth, no login flow.
+Same anonymous posture on every deployment — local, hosted,
+everywhere. Every agent that asks us a question is one fewer
+agent scraping lore directly; fanout-to-one is the value
+proposition.
+
+## Quick start (10 minutes, zero accounts)
+
+```sh
+# 1. prereqs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable
+uv tool install grokmirror
+
+# 2. clone + build (Rust extension + ingest CLI)
+git clone https://github.com/mjbommar/kernel-lore-mcp.git
+cd kernel-lore-mcp
+uv sync
+uv run maturin develop --release
+cargo build --release --bin kernel-lore-ingest
+
+# 3. first sync — narrow scope, ~1.5 GB, 3-10 min
+export KLMCP_DATA_DIR=~/klmcp-data
+mkdir -p "$KLMCP_DATA_DIR"
+KLMCP_GROKMIRROR_CONF_TEMPLATE="$PWD/scripts/grokmirror-personal.conf" \
+    KLMCP_POST_PULL_HOOK="$PWD/scripts/post-pull-hook.sh" \
+    ./scripts/klmcp-grok-pull.sh
+
+# 4. first ingest — ~10-30 min
+./target/release/kernel-lore-ingest \
+    --data-dir "$KLMCP_DATA_DIR" \
+    --lore-mirror "$KLMCP_DATA_DIR/shards"
+
+# 5. confirm freshness
+./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
+# { "generation": >= 1, "freshness_ok": true, ... }
+
+# 6. verify the MCP surface (no API keys needed)
+./scripts/agentic_smoke.sh local
+# PASS: 6/6 tools, 5/5 resource templates, 5/5 prompts.
+```
+
+Then pick your agent and copy its snippet from
+[`docs/mcp/client-config.md`](./docs/mcp/client-config.md). All
+four clients (Claude Code, Codex, Cursor, Zed) work over stdio
+with the exact same server binary.
+
+Want fuller coverage? Swap `grokmirror-personal.conf` for
+`grokmirror.conf` to mirror all ~390 lists (~55 GB).
+
+Want production-grade systemd deployment?
+[`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
 ## Status — April 2026
 
-- **Phase 1 complete.** The ingest pipeline is real: walk a
-  public-inbox shard with `gix`, parse RFC822 with `mail-parser`,
-  split prose from patch, extract trailers / subject tags / series
-  numbering / touched files, append to the zstd-compressed raw
-  store, write the metadata tier as Parquet. See
-  [`src/ingest.rs`](./src/ingest.rs), [`src/parse.rs`](./src/parse.rs),
-  [`src/store.rs`](./src/store.rs), [`src/metadata.rs`](./src/metadata.rs),
-  [`src/schema.rs`](./src/schema.rs). Synthetic fixtures in
-  `tests/python/fixtures/` + integration tests cover it.
-- **Phase 2 in progress.** Query router + the MCP tool surface
-  wired to real data. See [`TODO.md`](./TODO.md).
-- **Explicitly deferred past v1:** trigram tier
-  ([`src/trigram.rs`](./src/trigram.rs) is a stub), BM25 tier
-  ([`src/bm25.rs`](./src/bm25.rs) is a stub), the full MCP tool
-  surface, and the trained kernel-specific retrieval model (our
-  north star — see
-  [`docs/research/training-retriever.md`](./docs/research/training-retriever.md)).
+Shipped:
 
-## Deployment modes
+- Ingest pipeline — gix + mail-parser + metadata/trigram/BM25/
+  embedding tiers. Incremental from grokmirror shards; dangling-OID
+  safe; single-writer flock.
+- Full MCP surface: 19 tools (search, primitives, sampling-backed
+  summarize/classify/explain), 5 RFC-6570 resource templates, 5
+  slash-command prompts, populated KWIC snippets, freshness
+  marker on every response, HMAC-signed pagination cursors.
+- stdio + Streamable HTTP transports; no SSE.
+- `/status` + `/metrics` (Prometheus) with freshness_ok signal.
+- systemd units for hosted deploy; 5-min grokmirror cadence
+  (docs/ops/update-frequency.md).
+- Live-tested against real `claude --print` and `codex exec`
+  every commit via `scripts/agentic_smoke.sh`.
 
-One binary, two postures. See
-[`docs/architecture/deployment-modes.md`](./docs/architecture/deployment-modes.md).
-
-- **Local self-host (primary).** Anyone can run
-  `kernel-lore-mcp` against their own grokmirror-managed shards
-  or against a snapshot we publish. Zero policy constraints from
-  us; the operator decides.
-- **Hosted public instance (on the roadmap).** A free public
-  instance we operate, with extra policy gates: embargo
-  quarantine, query non-logging, redaction honoring,
-  file-granularity `lore_activity` behind a free API key. See
-  [`docs/ops/threat-model.md`](./docs/ops/threat-model.md) and
-  [`LEGAL.md`](./LEGAL.md).
+Deferred past v1: trained kernel-specific retrieval model
+([`docs/research/training-retriever.md`](./docs/research/training-retriever.md)),
+cross-list maintainers graph, CVE-chain tool, Patchwork state
+integration (all planned; see
+[`docs/plans/2026-04-14-best-in-class-kernel-mcp.md`](./docs/plans/2026-04-14-best-in-class-kernel-mcp.md)).
 
 ## Why
 
-Linux kernel development lives on ~390 public mailing lists. Tools
-like `lei` and `b4` do a great job for humans with terminals, but
-LLM-backed developer tools have no equivalent: they can't answer
-"who fixed a bug in `ksmbd_alloc_user` in the last six months" or
-"has anyone touched `arch/um/drivers/vector_kern.c` on linux-um"
-without being fed curated context by hand.
+Linux kernel development lives on ~390 public mailing lists. `lei`
+and `b4` work well for humans with terminals, but LLM-backed
+developer tools have no equivalent: they can't answer "who touched
+`fs/smb/server/smbacl.c` in the last 90 days, grouped by series,
+with trailers" or "has this XDR overflow pattern been reported
+before" without being fed curated context by hand.
 
 This project closes that gap. One MCP server over the full corpus,
 so an agent working on kernel code has the same research surface a
-senior maintainer has.
+senior maintainer has. And because it's all mirrored + indexed
+once, every agent query is zero HTTP load on lore.kernel.org.
 
 ## Architecture in one paragraph
 
-Three-tier index, purpose-built per query class: **columnar
-metadata** (Arrow/Parquet, landed) for structured fields,
-**trigram** (planned) for patch content, **BM25** (planned,
-tantivy) for prose. Rust core (via PyO3 0.28) does the heavy
-lifting; Python serves MCP over Streamable HTTP. Ingestion is
-incremental from `grokmirror`-managed public-inbox git shards via
-`gix`. The compressed raw store is the source of truth; all three
-tiers rebuild from it. See
-[`docs/architecture/overview.md`](./docs/architecture/overview.md).
+Three-tier index plus an embedding tier, purpose-built per query
+class: **columnar metadata** (Arrow/Parquet) for structured fields;
+**trigram** (`fst` + `roaring`) for patch/diff content with DFA-only
+regex confirmation; **BM25** (tantivy) for prose; **semantic**
+(HNSW via instant-distance) for "more like this." Rust core via
+PyO3 0.28 does the heavy lifting; Python + FastMCP 3.2 serves
+MCP over stdio + Streamable HTTP. Ingestion is incremental from
+grokmirror-managed public-inbox git shards via gix. The
+zstd-compressed raw store is the source of truth; all four
+tiers rebuild from it.
 
 ## North star: a trained kernel retriever
 
-v0.5 (now) captures the training signal for free by writing the
-right columns to Parquet — subject/body pairs, series version
-chains, `Fixes:` → target SHA, reply graphs via `in_reply_to` /
-`references`, trailer co-occurrence. v1.1 trains a
-<200 MB int8-quantized, CPU-inferable retriever on that self-
-supervised signal. Recipe:
+The Parquet metadata tier captures the training signal for free —
+subject/body pairs, series version chains, `Fixes:` → target SHA,
+reply graphs via `in_reply_to` / `references`, trailer co-occurrence.
+A future phase trains a <200 MB int8-quantized CPU-inferable
+retriever on that self-supervised signal. Recipe:
 [`docs/research/training-retriever.md`](./docs/research/training-retriever.md).
-
-## Getting started (dev)
-
-```bash
-uv sync
-uv run maturin develop
-uv run pytest tests/python -q
-```
-
-The MCP server entry point lives at
-[`src/kernel_lore_mcp/__main__.py`](./src/kernel_lore_mcp/__main__.py).
-Local stdio transport is the only mode wired today; the
-streamable-HTTP surface lands with Phase 2.
 
 ## Documentation
 
-- [`CLAUDE.md`](./CLAUDE.md) — project proscriptions + current state
-- [`TODO.md`](./TODO.md) — execution contract
+- [`CLAUDE.md`](./CLAUDE.md) — authoritative project state +
+  non-negotiable product constraints
+- [`docs/ops/runbook.md`](./docs/ops/runbook.md) — local dev (§0A)
+  + hosted deploy (§1+)
+- [`docs/ops/update-frequency.md`](./docs/ops/update-frequency.md) —
+  5-min cadence policy + fanout-to-one cost analysis
+- [`docs/mcp/client-config.md`](./docs/mcp/client-config.md) —
+  copy-paste snippets for Claude Code, Codex, Cursor, Zed
+- [`docs/mcp/transport-auth.md`](./docs/mcp/transport-auth.md) —
+  transport + why no auth
 - [`docs/architecture/`](./docs/architecture/) — design rationale
-  including [`deployment-modes.md`](./docs/architecture/deployment-modes.md)
-  and [`reciprocity.md`](./docs/architecture/reciprocity.md)
-- [`docs/ingestion/`](./docs/ingestion/) — how data flows in
-- [`docs/indexing/`](./docs/indexing/) — the three tiers, tokenizer spec
-- [`docs/mcp/`](./docs/mcp/) — MCP tool schemas and query routing
-- [`docs/ops/`](./docs/ops/) — sizing, freshness, deploy, and
-  [`threat-model.md`](./docs/ops/threat-model.md)
-- [`docs/research/`](./docs/research/) — dated investigations
-- [`docs/standards/`](./docs/standards/) — Python + Rust house style
-- [`LEGAL.md`](./LEGAL.md) — re-hosting posture + redaction contact
-- [`SECURITY.md`](./SECURITY.md) — responsible disclosure
-- [`GOVERNANCE.md`](./GOVERNANCE.md) — who decides what
+- [`docs/plans/2026-04-14-best-in-class-kernel-mcp.md`](./docs/plans/2026-04-14-best-in-class-kernel-mcp.md) —
+  6-month roadmap
+- [`docs/research/`](./docs/research/) — dated investigations that
+  fed the plan
 
 ## License
 
 MIT. See [`LICENSE`](./LICENSE).
 
 Data from lore.kernel.org is re-hosted under the same terms as
-lore itself (public archive). Attribution to lore.kernel.org is
-preserved in all responses. Redaction policy:
-[`LEGAL.md`](./LEGAL.md).
+lore itself (public archive). Attribution preserved in every
+response. Redaction policy: [`LEGAL.md`](./LEGAL.md).

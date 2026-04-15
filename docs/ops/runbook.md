@@ -1,8 +1,87 @@
 # Operator runbook
 
-One page. Self-contained. Assumes Ubuntu 24.04 / Debian 12 /
-Rocky 9. For cadence background, read
-[`update-frequency.md`](./update-frequency.md) first.
+Two mode­s documented here:
+
+- **§0A — Local dev on one laptop.** No systemd, no nginx, no
+  service user. ~10 minutes from clone to "my agent just cited a
+  lore Message-ID." This is where you start.
+- **§1 onwards — Hosted / multi-user deployment.** Full systemd,
+  sandboxing, rate-limiting, Prometheus alerting. Use this when
+  you're deploying to a shared box.
+
+For cadence background read
+[`update-frequency.md`](./update-frequency.md).
+
+## 0A. Local dev — run it on your laptop (10 minutes)
+
+You want to: point Claude Code / Codex / Cursor at `kernel-lore-mcp`
+running locally against a slice of lore, and start asking it
+questions. Skip §1+ entirely.
+
+```sh
+# 0A.1 — prereqs
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+uv tool install grokmirror
+
+# 0A.2 — clone + build
+git clone https://github.com/mjbommar/kernel-lore-mcp.git
+cd kernel-lore-mcp
+uv sync
+uv run maturin develop --release
+cargo build --release --bin kernel-lore-ingest
+
+# 0A.3 — pick a data dir (any path)
+export KLMCP_DATA_DIR=~/klmcp-data
+mkdir -p "$KLMCP_DATA_DIR"
+
+# 0A.4 — first sync: ~1.5 GB, 3-10 minutes. Only 5 lists to keep
+# it small. Widen later by editing scripts/grokmirror-personal.conf.
+KLMCP_GROKMIRROR_CONF_TEMPLATE="$PWD/scripts/grokmirror-personal.conf" \
+    KLMCP_POST_PULL_HOOK="$PWD/scripts/post-pull-hook.sh" \
+    ./scripts/klmcp-grok-pull.sh
+
+# 0A.5 — first ingest: ~10-30 minutes depending on corpus size.
+./target/release/kernel-lore-ingest \
+    --data-dir "$KLMCP_DATA_DIR" \
+    --lore-mirror "$KLMCP_DATA_DIR/shards"
+
+# 0A.6 — confirm the index is live (no HTTP needed)
+./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
+# Expect: {"generation": >= 1, "freshness_ok": true, ...}
+
+# 0A.7 — sanity-check the MCP surface without burning API tokens
+./scripts/agentic_smoke.sh local
+# Expect: PASS: local probe — 6/6 tools, 5/5 resource templates,
+#                              5/5 prompts.
+```
+
+Now wire an agent into this. Copy the appropriate snippet from
+[`../mcp/client-config.md`](../mcp/client-config.md) — stdio,
+`command = <repo>/.venv/bin/kernel-lore-mcp`, `env = {
+KLMCP_DATA_DIR = "..." }`. No auth, no port, no systemd.
+
+### 0B. Keep it fresh
+
+Two approaches for personal dev:
+
+1. **Manual "top-up before I work":** run the pull + ingest lines
+   from 0A.4 and 0A.5 whenever you want a fresh index. Takes a few
+   seconds once the initial cold-start is done.
+2. **cron:** add a 5-min cron entry that runs both steps. Good
+   enough; no need for systemd on a single-user laptop.
+
+   ```crontab
+   */5 * * * * cd /home/you/kernel-lore-mcp && \
+       KLMCP_DATA_DIR=/home/you/klmcp-data \
+       KLMCP_GROKMIRROR_CONF_TEMPLATE=/home/you/kernel-lore-mcp/scripts/grokmirror-personal.conf \
+       KLMCP_POST_PULL_HOOK=/home/you/kernel-lore-mcp/scripts/post-pull-hook.sh \
+       ./scripts/klmcp-grok-pull.sh && \
+       ./target/release/kernel-lore-ingest --data-dir "$KLMCP_DATA_DIR" \
+           --lore-mirror "$KLMCP_DATA_DIR/shards" >> /home/you/klmcp-data/logs/cron.log 2>&1
+   ```
+
+If you ever want the full systemd treatment (multi-user box,
+monitoring, alerts), proceed to §1.
 
 ## 0. What you are deploying
 

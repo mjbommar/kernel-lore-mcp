@@ -45,20 +45,26 @@ if [[ -f "$last_run" ]]; then
 fi
 
 # Locate the ingest CLI. Prefer a system-installed binary; fall back
-# to the project venv (the canonical layout per CLAUDE.md).
+# to the project venv's bin/ and finally to target/release/ for local
+# dev checkouts (maturin develop doesn't auto-copy [[bin]] targets).
 if command -v kernel-lore-ingest >/dev/null 2>&1; then
     ingest="kernel-lore-ingest"
 elif [[ -x "$repo_root/.venv/bin/kernel-lore-ingest" ]]; then
     ingest="$repo_root/.venv/bin/kernel-lore-ingest"
+elif [[ -x "$repo_root/target/release/kernel-lore-ingest" ]]; then
+    ingest="$repo_root/target/release/kernel-lore-ingest"
 else
-    echo "ERROR: kernel-lore-ingest not found on PATH or in .venv/bin" >&2
+    echo "ERROR: kernel-lore-ingest not found on PATH, .venv/bin, or target/release/" >&2
+    echo "       build it with: cargo build --release --bin kernel-lore-ingest" >&2
     exit 2
 fi
 
 echo "[klmcp-ingest] starting, data_dir=$KLMCP_DATA_DIR ingest=$ingest"
 started=$(date -u +%s)
 
-"$ingest" --data-dir "$KLMCP_DATA_DIR" --shards-root "$KLMCP_DATA_DIR/shards"
+# The CLI accepts --lore-mirror (grokmirror toplevel) not --shards-root;
+# our grokmirror.conf sets toplevel=$KLMCP_DATA_DIR/shards.
+"$ingest" --data-dir "$KLMCP_DATA_DIR" --lore-mirror "$KLMCP_DATA_DIR/shards"
 
 ended=$(date -u +%s)
 elapsed=$(( ended - started ))
