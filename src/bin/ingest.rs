@@ -1,0 +1,232 @@
+//! `kernel-lore-ingest` — walk a grokmirror-managed lore mirror and
+//! ingest every shard into `<data_dir>`.
+//!
+//! Usage:
+//!     KLMCP_DATA_DIR=/var/klmcp/data \
+//!     KLMCP_LORE_MIRROR_DIR=/var/lore-mirror \
+//!     kernel-lore-ingest
+//!
+//! Or with explicit args:
+//!     kernel-lore-ingest --data-dir /var/klmcp/data \
+//!                        --lore-mirror /var/lore-mirror \
+//!                        --list linux-cifs \
+//!                        --run-id run-2026-04-14T19-00
+//!
+//! The binary walks `<lore_mirror>/<list>/git/<N>.git` for every
+//! `<list>` directory under the mirror root (or the one specified via
+//! `--list`), and calls `kernel_lore_mcp::ingest_shard` for each.
+//! Rayon parallelizes across shards; each shard's writer holds the
+//! per-data_dir flock for its segment of the run.
+//!
+//! Structured log lines stream to stderr via `tracing`. One-shot; no
+//! daemonization. Cron invokes it periodically.
+
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use anyhow::{Context, Result};
+use rayon::prelude::*;
+
+/// Discovered public-inbox v2 shard: one `<list>/git/<N>.git` directory.
+#[derive(Debug, Clone)]
+struct ShardRef {
+    list: String,
+    shard: String,
+    path: PathBuf,
+}
+
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .json()
+        .init();
+
+    let args = parse_args();
+    let data_dir = args
+        .data_dir
+        .or_else(|| std::env::var_os("KLMCP_DATA_DIR").map(PathBuf::from))
+        .context("--data-dir or KLMCP_DATA_DIR required")?;
+    let lore_mirror = args
+        .lore_mirror
+        .or_else(|| std::env::var_os("KLMCP_LORE_MIRROR_DIR").map(PathBuf::from))
+        .context("--lore-mirror or KLMCP_LORE_MIRROR_DIR required")?;
+
+    std::fs::create_dir_all(&data_dir)?;
+
+    let run_id = args.run_id.unwrap_or_else(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("run-{now}")
+    });
+
+    let shards = discover_shards(&lore_mirror, args.list.as_deref())?;
+    tracing::info!(
+        shards = shards.len(),
+        data_dir = %data_dir.display(),
+        lore_mirror = %lore_mirror.display(),
+        run_id,
+        "ingest starting"
+    );
+
+    // Acquire the writer lock ONCE for the whole run; rayon fan-out
+    // then shares it across shards.
+    let state = _core::State::new(&data_dir)?;
+    let _writer_lock = state
+        .acquire_writer_lock()
+        .context("another ingest process is running (writer.lock held)")?;
+
+    let start = Instant::now();
+    let totals = shards
+        .par_iter()
+        .map(|shard| ingest_one(&data_dir, shard, &run_id))
+        .collect::<Vec<_>>();
+
+    let mut total_ingested: u64 = 0;
+    let mut total_failed: u64 = 0;
+    for (shard, result) in shards.iter().zip(totals.iter()) {
+        match result {
+            Ok(stats) => {
+                total_ingested += stats.ingested;
+                tracing::info!(
+                    list = shard.list,
+                    shard = shard.shard,
+                    ingested = stats.ingested,
+                    skipped_no_m = stats.skipped_no_m,
+                    skipped_empty = stats.skipped_empty,
+                    skipped_no_mid = stats.skipped_no_mid,
+                    parquet = ?stats.parquet_path,
+                    "shard done"
+                );
+            }
+            Err(e) => {
+                total_failed += 1;
+                tracing::error!(
+                    list = shard.list,
+                    shard = shard.shard,
+                    error = %e,
+                    "shard failed"
+                );
+            }
+        }
+    }
+
+    tracing::info!(
+        elapsed_secs = start.elapsed().as_secs_f64(),
+        shards = shards.len(),
+        failed = total_failed,
+        ingested = total_ingested,
+        "ingest complete"
+    );
+
+    if total_failed > 0 {
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn ingest_one(data_dir: &Path, shard: &ShardRef, run_id: &str) -> Result<_core::IngestStats> {
+    let per_shard_run_id = format!("{run_id}-{}-{}", shard.list, shard.shard);
+    let stats = _core::ingest_shard_unlocked(
+        data_dir,
+        &shard.path,
+        &shard.list,
+        &shard.shard,
+        &per_shard_run_id,
+    )
+    .with_context(|| {
+        format!(
+            "ingest_shard failed for {}/{} at {}",
+            shard.list,
+            shard.shard,
+            shard.path.display()
+        )
+    })?;
+    Ok(stats)
+}
+
+fn discover_shards(mirror_root: &Path, only_list: Option<&str>) -> Result<Vec<ShardRef>> {
+    let mut out = Vec::new();
+    let read = std::fs::read_dir(mirror_root)
+        .with_context(|| format!("read_dir {}", mirror_root.display()))?;
+    for entry in read {
+        let entry = entry?;
+        let ftype = entry.file_type()?;
+        if !ftype.is_dir() {
+            continue;
+        }
+        let list = entry.file_name().to_string_lossy().into_owned();
+        if let Some(want) = only_list {
+            if list != want {
+                continue;
+            }
+        }
+        let git_dir = entry.path().join("git");
+        if !git_dir.is_dir() {
+            continue;
+        }
+        for shard_entry in std::fs::read_dir(&git_dir)? {
+            let shard_entry = shard_entry?;
+            let name = shard_entry.file_name().to_string_lossy().into_owned();
+            let Some(num) = name.strip_suffix(".git") else {
+                continue;
+            };
+            let path = shard_entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            out.push(ShardRef {
+                list: list.clone(),
+                shard: num.to_owned(),
+                path,
+            });
+        }
+    }
+    // Deterministic order; rayon will still parallelize.
+    out.sort_by(|a, b| (&a.list, &a.shard).cmp(&(&b.list, &b.shard)));
+    Ok(out)
+}
+
+#[derive(Default)]
+struct Args {
+    data_dir: Option<PathBuf>,
+    lore_mirror: Option<PathBuf>,
+    list: Option<String>,
+    run_id: Option<String>,
+}
+
+fn parse_args() -> Args {
+    // Minimal arg parser to avoid pulling in clap. The CLI surface is
+    // tiny and stable.
+    let mut args = Args::default();
+    let mut it = std::env::args().skip(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--data-dir" => args.data_dir = it.next().map(PathBuf::from),
+            "--lore-mirror" => args.lore_mirror = it.next().map(PathBuf::from),
+            "--list" => args.list = it.next(),
+            "--run-id" => args.run_id = it.next(),
+            "--help" | "-h" => {
+                println!(
+                    "kernel-lore-ingest\n\
+                     \n\
+                     --data-dir PATH     (or $KLMCP_DATA_DIR)\n\
+                     --lore-mirror PATH  (or $KLMCP_LORE_MIRROR_DIR)\n\
+                     --list NAME         optional: restrict to one list\n\
+                     --run-id STRING     optional: stable id for this run\n"
+                );
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("unknown arg: {other}");
+                std::process::exit(2);
+            }
+        }
+    }
+    args
+}

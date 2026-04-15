@@ -1,5 +1,9 @@
 //! kernel-lore-mcp native core.
 //!
+//! Public surface (as an `rlib`) re-exports `ingest::ingest_shard`
+//! and `ingest::IngestStats` so the `kernel-lore-ingest` binary can
+//! drive it without duplicating PyO3 glue.
+//!
 //! Three-tier index + ingestion + query routing. See `docs/architecture/`
 //! for the design rationale. This crate is loaded as
 //! `kernel_lore_mcp._core` from the Python layer.
@@ -36,6 +40,12 @@ mod schema;
 mod state;
 mod store;
 mod trigram;
+
+// Library re-exports for the `kernel-lore-ingest` binary (and any
+// future internal tooling) so they don't have to name the module
+// paths.
+pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked};
+pub use state::State;
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {

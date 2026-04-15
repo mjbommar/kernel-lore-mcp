@@ -39,8 +39,26 @@ pub fn ingest_shard(
     shard: &str,
     run_id: &str,
 ) -> Result<IngestStats> {
+    // Acquire the writer lock for the duration of this call. Callers
+    // that already hold the lock (the `kernel-lore-ingest` binary
+    // acquires it once per run so rayon can fan out across shards
+    // without collision) use `ingest_shard_unlocked` directly.
     let state = State::new(data_dir)?;
     let _lock = state.acquire_writer_lock()?;
+    ingest_shard_unlocked(data_dir, shard_path, list, shard, run_id)
+}
+
+/// Same as `ingest_shard` but assumes the caller already holds
+/// `state::acquire_writer_lock`. Use this when fanning out across
+/// multiple shards under one outer lock.
+pub fn ingest_shard_unlocked(
+    data_dir: &Path,
+    shard_path: &Path,
+    list: &str,
+    shard: &str,
+    run_id: &str,
+) -> Result<IngestStats> {
+    let state = State::new(data_dir)?;
     let store = Store::open(data_dir, list)?;
 
     let repo = gix::open(shard_path)

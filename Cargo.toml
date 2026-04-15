@@ -12,6 +12,10 @@ readme = "README.md"
 [lib]
 name = "_core"
 crate-type = ["cdylib", "rlib"]
+# Disable doctests globally: module-level `//!` blocks are
+# design-comment prose with pseudocode + indented examples, not real
+# Rust. Real Rust examples live in `#[cfg(test)]` blocks.
+doctest = false
 
 [features]
 # abi3-py312 is ON by default. Free-threaded 3.14t requires building
@@ -84,11 +88,20 @@ anyhow = "1"
 proptest = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# tracing-subscriber is used by the `kernel-lore-ingest` binary for
+# structured logs to stderr. Keep as a regular dep (not dev-only).
+[dependencies.tracing-subscriber]
+version = "0.3"
+features = ["env-filter", "json"]
 
 [[bin]]
 name = "reindex"
 path = "src/bin/reindex.rs"
+
+[[bin]]
+name = "kernel-lore-ingest"
+path = "src/bin/ingest.rs"
 
 [profile.release]
 lto = "thin"

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
+#[derive(Debug)]
 pub struct State {
     root: PathBuf,
 }
