@@ -46,6 +46,7 @@ mod trigram;
 // paths.
 pub use bm25::BmWriter;
 pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25};
+pub use router::{CursorPayload, ParsedQuery, RankedHit, parse_query, sign_cursor, verify_cursor};
 pub use state::State;
 
 #[pymodule]

@@ -21,6 +21,7 @@ use pyo3::types::PyDict;
 
 use crate::ingest;
 use crate::reader::{MessageRow, Reader as CoreReader};
+use crate::router;
 
 /// Ingest one public-inbox shard. Releases the GIL for the whole walk.
 ///
@@ -118,6 +119,33 @@ impl PyReader {
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let rows = py.detach(|| self.inner.expand_citation(&token, limit))?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    /// Run the full query router (lei-compatible subset) and return
+    /// fused results across metadata, trigram, and BM25 tiers via
+    /// reciprocal rank fusion. Each row carries `_score` (fused),
+    /// `_tier_provenance` (list of tier names), and
+    /// `_is_exact_match` (bool).
+    #[pyo3(signature = (query, limit=25))]
+    fn router_search<'py>(
+        &self,
+        py: Python<'py>,
+        query: String,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let hits = py.detach(|| -> Result<Vec<router::RankedHit>, crate::error::Error> {
+            let parsed = router::parse_query(&query)?;
+            router::dispatch(&self.inner, &parsed, limit)
+        })?;
+        hits.iter()
+            .map(|h| {
+                let d = row_to_pydict(py, &h.row)?;
+                d.set_item("_score", h.fused_score)?;
+                d.set_item("_tier_provenance", &h.tier_provenance)?;
+                d.set_item("_is_exact_match", h.is_exact_match)?;
+                Ok(d)
+            })
+            .collect()
     }
 
     /// Walk the reply graph from `message_id` and return every

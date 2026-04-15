@@ -43,6 +43,11 @@ class Reader:
         message_id: str,
         max_messages: int = ...,
     ) -> list[dict[str, Any]]: ...
+    def router_search(
+        self,
+        query: str,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
     def patch_search(
         self,
         needle: str,

@@ -202,7 +202,45 @@ async def test_lore_search_bm25_finds_prose_term(client: Client) -> None:
 async def test_lore_search_phrase_query_rejected(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 
-    # Double-quoted phrase is rejected by the Rust BM25 tier because
-    # positions are off by design.
+    # Double-quoted phrase is rejected by the router because the BM25
+    # tier indexes positions=off (would be a silent lie otherwise).
     with pytest.raises(ToolError, match="phrase queries"):
         await client.call_tool("lore_search", {"query": '"ACL bounds"'})
+
+
+@pytest.mark.asyncio
+async def test_lore_search_router_dispatches_to_metadata_tier(client: Client) -> None:
+    # `dfn:` predicate routes to the metadata tier; tier_provenance
+    # should reflect that. (This exercises the new router; the old
+    # bm25-only path would have returned empty.)
+    result = await client.call_tool(
+        "lore_search",
+        {"query": "dfn:fs/smb/server/smbacl.c"},
+    )
+    data = result.data
+    assert len(data.results) == 1
+    assert data.results[0].message_id == "m1@x"
+    assert data.query_tiers_hit == ["metadata"]
+    assert data.results[0].is_exact_match is True
+
+
+@pytest.mark.asyncio
+async def test_lore_search_router_combines_dfb_and_list(client: Client) -> None:
+    # `dfb:` (trigram) + `list:` (metadata constraint) — single
+    # request fuses both tiers.
+    result = await client.call_tool(
+        "lore_search",
+        {"query": "dfb:smb_check_perm_dacl list:linux-cifs"},
+    )
+    data = result.data
+    assert len(data.results) == 1
+    assert data.results[0].message_id == "m1@x"
+    assert "trigram" in data.query_tiers_hit
+
+
+@pytest.mark.asyncio
+async def test_lore_search_unknown_predicate_raises(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="unknown predicate"):
+        await client.call_tool("lore_search", {"query": "nope:foo"})
