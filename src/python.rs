@@ -120,6 +120,19 @@ impl PyReader {
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
 
+    /// Walk the reply graph from `message_id` and return every
+    /// message in the same conversation ordered by date.
+    #[pyo3(signature = (message_id, max_messages=200))]
+    fn thread<'py>(
+        &self,
+        py: Python<'py>,
+        message_id: String,
+        max_messages: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py.detach(|| self.inner.thread(&message_id, max_messages))?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
     /// Free-text BM25 search over prose bodies + subjects. Returns
     /// `[{..., "_score": f32}, ...]` (score attached inside the row
     /// dict under the `_score` key).

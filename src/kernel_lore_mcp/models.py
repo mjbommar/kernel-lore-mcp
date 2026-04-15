@@ -170,3 +170,54 @@ class ExpandCitationResponse(BaseModel):
     results: list[SearchHit]
     freshness: Freshness
     blind_spots_ref: str = "blind-spots://coverage"
+
+
+class ThreadMessage(BaseModel):
+    """One message in a conversation, with prose and patch separated."""
+
+    hit: SearchHit
+    prose: str | None = None
+    patch: str | None = None
+
+
+class ThreadResponse(BaseModel):
+    root_message_id: str
+    messages: list[ThreadMessage]
+    truncated: bool = False
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class PatchResponse(BaseModel):
+    """Raw patch text for one message."""
+
+    hit: SearchHit
+    patch: str
+    body_sha256: str
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class PatchDiffResponse(BaseModel):
+    """Diff-of-diffs between two patch versions of the same series."""
+
+    a: SearchHit
+    b: SearchHit
+    diff: str
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class ExplainPatchResponse(BaseModel):
+    """One-call view: prose + patch + series timeline + downstream replies."""
+
+    hit: SearchHit
+    prose: str | None
+    patch: str | None
+    series: list[SeriesTimelineEntry] = Field(default_factory=list)
+    downstream: list[SearchHit] = Field(
+        default_factory=list,
+        description="Direct replies (in_reply_to == this mid).",
+    )
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"

@@ -108,14 +108,15 @@ impl Store {
     }
 
     /// Read one message given only its segment + offset. zstd frames
-    /// are self-delimiting, so the streaming `Decoder` stops at the
-    /// natural end of the single frame we appended.
+    /// are self-delimiting; `Decoder::single_frame()` tells the
+    /// streaming decoder to stop after the first frame instead of
+    /// concatenating every subsequent message in the segment.
     pub fn read_at(&self, segment_id: u32, offset: u64) -> Result<Vec<u8>> {
         let seg_path = segment_path(&self.list_root, segment_id);
         let mut f = File::open(&seg_path)?;
         f.seek(SeekFrom::Start(offset))?;
         let mut out = Vec::new();
-        let mut decoder = zstd::Decoder::new(f)?;
+        let mut decoder = zstd::Decoder::new(f)?.single_frame();
         decoder.read_to_end(&mut out)?;
         Ok(out)
     }

@@ -235,6 +235,61 @@ impl Reader {
         Ok(out)
     }
 
+    /// Walk the reply graph from any starting message_id and return
+    /// every message in the same conversation, ordered by date.
+    /// Bounded by `max_messages` so a runaway thread can't OOM the
+    /// server.
+    pub fn thread(&self, message_id: &str, max_messages: usize) -> Result<Vec<MessageRow>> {
+        use std::collections::{HashSet, VecDeque};
+        let needle = strip_angles(message_id).to_owned();
+        let mut visited: HashSet<String> = HashSet::new();
+        let mut queue: VecDeque<String> = VecDeque::from([needle]);
+        let mut collected: Vec<MessageRow> = Vec::new();
+
+        while let Some(mid) = queue.pop_front() {
+            if visited.contains(&mid) || collected.len() >= max_messages {
+                continue;
+            }
+            visited.insert(mid.clone());
+            let mut new_relations: Vec<String> = Vec::new();
+            self.scan(
+                |r| {
+                    r.message_id == mid
+                        || r.in_reply_to.as_deref() == Some(mid.as_str())
+                        || r.references.iter().any(|p| p == &mid)
+                },
+                |r| {
+                    if r.message_id == mid {
+                        if let Some(parent) = r.in_reply_to.as_deref() {
+                            if !parent.is_empty() {
+                                new_relations.push(parent.to_owned());
+                            }
+                        }
+                        for p in &r.references {
+                            if !p.is_empty() {
+                                new_relations.push(p.clone());
+                            }
+                        }
+                    } else {
+                        new_relations.push(r.message_id.clone());
+                    }
+                    collected.push(r);
+                    collected.len() < max_messages
+                },
+            )?;
+            for relation in new_relations {
+                if !visited.contains(&relation) {
+                    queue.push_back(relation);
+                }
+            }
+        }
+
+        let mut seen = HashSet::new();
+        collected.retain(|r| seen.insert(r.message_id.clone()));
+        collected.sort_by_key(|r| r.date_unix_ns.unwrap_or(i64::MIN));
+        Ok(collected)
+    }
+
     /// Free-text BM25 search over prose (body minus patch) +
     /// subject_normalized. Returns ranked hits with their scores.
     ///

@@ -52,10 +52,14 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # Explicit tool registration.
     from kernel_lore_mcp.tools.activity import lore_activity
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
+    from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.message import lore_message
+    from kernel_lore_mcp.tools.patch import lore_patch
+    from kernel_lore_mcp.tools.patch_diff import lore_patch_diff
     from kernel_lore_mcp.tools.patch_search import lore_patch_search
     from kernel_lore_mcp.tools.search import lore_search
     from kernel_lore_mcp.tools.series import lore_series_timeline
+    from kernel_lore_mcp.tools.thread import lore_thread
 
     read_only = {"readOnlyHint": True, "idempotentHint": True}
 
@@ -65,6 +69,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(lore_expand_citation, annotations=read_only)
     mcp.tool(lore_series_timeline, annotations=read_only)
     mcp.tool(lore_patch_search, annotations=read_only)
+    mcp.tool(lore_thread, annotations=read_only)
+    mcp.tool(lore_patch, annotations=read_only)
+    mcp.tool(lore_patch_diff, annotations=read_only)
+    mcp.tool(lore_explain_patch, annotations=read_only)
 
     # Register blind_spots as an MCP resource — fetch once per session.
     @mcp.resource(
