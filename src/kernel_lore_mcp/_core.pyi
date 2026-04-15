@@ -66,3 +66,56 @@ class Reader:
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
     def fetch_body(self, message_id: str) -> bytes | None: ...
+    def eq(
+        self,
+        field: str,
+        value: str,
+        since_unix_ns: int | None = ...,
+        list: str | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    def in_list(
+        self,
+        field: str,
+        values: list[str],
+        since_unix_ns: int | None = ...,
+        list: str | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    def count(
+        self,
+        field: str,
+        value: str,
+        since_unix_ns: int | None = ...,
+        list: str | None = ...,
+    ) -> dict[str, Any]: ...
+    def substr_subject(
+        self,
+        needle: str,
+        list: str | None = ...,
+        since_unix_ns: int | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    def substr_trailers(
+        self,
+        name: str,
+        value_substring: str,
+        list: str | None = ...,
+        since_unix_ns: int | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    def regex(
+        self,
+        field: str,
+        pattern: str,
+        anchor_required: bool = ...,
+        list: str | None = ...,
+        since_unix_ns: int | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    def diff(
+        self,
+        a: str,
+        b: str,
+        mode: str = ...,
+    ) -> dict[str, Any]: ...

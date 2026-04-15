@@ -299,6 +299,357 @@ impl Reader {
         Ok(out)
     }
 
+    // ---- low-level retrieval primitives (Phase 7) -------------------
+    //
+    // Each method below is one well-defined query against one tier.
+    // The MCP layer exposes them as composable tools; agents stack
+    // them themselves rather than us inventing higher-order workflows
+    // for every new question.
+
+    /// Exact-equality scan over one structured metadata column.
+    ///
+    /// `field` selects the column; `value` is matched verbatim
+    /// (case-sensitive). For list-shaped columns (`touched_files`,
+    /// `signed_off_by`, ...), the row matches if `value` appears in
+    /// the list. `since_unix_ns` and `list` are global filters.
+    pub fn eq(
+        &self,
+        field: EqField,
+        value: &str,
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let value_owned = value.to_owned();
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned {
+                    if &r.list != l {
+                        return false;
+                    }
+                }
+                if let Some(t) = since_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                eq_field_matches(field, r, &value_owned)
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit
+            },
+        )?;
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        Ok(out)
+    }
+
+    /// `WHERE field IN (values)` — set-membership over one column.
+    pub fn in_list(
+        &self,
+        field: EqField,
+        values: &[String],
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let want: std::collections::HashSet<String> = values.iter().cloned().collect();
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned {
+                    if &r.list != l {
+                        return false;
+                    }
+                }
+                if let Some(t) = since_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                want.iter().any(|v| eq_field_matches(field, r, v))
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit
+            },
+        )?;
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        Ok(out)
+    }
+
+    /// Aggregate counts over the same predicate language as `eq`.
+    /// Single full scan; cheap relative to materializing rows.
+    pub fn count(
+        &self,
+        field: EqField,
+        value: &str,
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+    ) -> Result<CountSummary> {
+        let value_owned = value.to_owned();
+        let list_owned = list_filter.map(str::to_owned);
+        let mut summary = CountSummary::default();
+        let mut authors: std::collections::HashSet<String> = std::collections::HashSet::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned {
+                    if &r.list != l {
+                        return false;
+                    }
+                }
+                if let Some(t) = since_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                eq_field_matches(field, r, &value_owned)
+            },
+            |r| {
+                summary.count += 1;
+                if let Some(addr) = &r.from_addr {
+                    authors.insert(addr.clone());
+                }
+                if let Some(d) = r.date_unix_ns {
+                    summary.earliest_unix_ns = match summary.earliest_unix_ns {
+                        Some(e) => Some(e.min(d)),
+                        None => Some(d),
+                    };
+                    summary.latest_unix_ns = match summary.latest_unix_ns {
+                        Some(l) => Some(l.max(d)),
+                        None => Some(d),
+                    };
+                }
+                true
+            },
+        )?;
+        summary.distinct_authors = authors.len() as u64;
+        Ok(summary)
+    }
+
+    /// Case-insensitive byte substring scan over `subject_raw`.
+    /// Cheap because subjects are short; one full metadata scan.
+    pub fn substr_subject(
+        &self,
+        needle: &str,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let needle_lc = needle.to_ascii_lowercase();
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned {
+                    if &r.list != l {
+                        return false;
+                    }
+                }
+                if let Some(t) = since_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                r.subject_raw
+                    .as_ref()
+                    .map(|s| s.to_ascii_lowercase().contains(&needle_lc))
+                    .unwrap_or(false)
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit
+            },
+        )?;
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        Ok(out)
+    }
+
+    /// Substring scan inside one named trailer column.
+    ///
+    /// `name` is the trailer kind (case-insensitive): "fixes", "link",
+    /// "reviewed-by", "acked-by", "tested-by", "signed-off-by",
+    /// "co-developed-by", "reported-by", "closes", "cc-stable".
+    /// `value_substring` is matched case-insensitively against any
+    /// value in the column.
+    pub fn substr_trailers(
+        &self,
+        name: &str,
+        value_substring: &str,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let name_lc = name.to_ascii_lowercase();
+        let needle_lc = value_substring.to_ascii_lowercase();
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned {
+                    if &r.list != l {
+                        return false;
+                    }
+                }
+                if let Some(t) = since_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                trailer_matches(r, &name_lc, &needle_lc)
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit
+            },
+        )?;
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        Ok(out)
+    }
+
+    /// DFA-only regex scan over one of {subject_raw, from_addr,
+    /// body_prose, patch}. `body_prose` and `patch` require fetching
+    /// the body from the compressed store; subject + from are scanned
+    /// straight from the metadata tier.
+    ///
+    /// `anchor_required=true` rejects patterns starting with `.*` —
+    /// keeps the trigram filter (when we add it) honest. v0.5 fully
+    /// scans, so anchoring is policy not performance.
+    pub fn regex(
+        &self,
+        field: RegexField,
+        pattern: &str,
+        anchor_required: bool,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        if anchor_required && (pattern.starts_with(".*") || pattern.starts_with("^.*")) {
+            return Err(crate::error::Error::RegexComplexity(
+                "anchored-only mode rejected leading `.*` — narrow the pattern \
+                 (prefix anchor, list:/since: filter) or pass anchor_required=false"
+                    .to_owned(),
+            ));
+        }
+        // DFA build via regex-automata. Reject non-DFA-able patterns
+        // (backrefs, lookaround) by using the dense::DFA::new builder
+        // which only supports a safe subset.
+        use regex_automata::dfa::dense;
+        use regex_automata::util::syntax;
+        let dfa = dense::DFA::builder()
+            .syntax(syntax::Config::new().unicode(false).utf8(false))
+            .build(pattern)
+            .map_err(|e| {
+                crate::error::Error::RegexComplexity(format!(
+                    "pattern not DFA-buildable (backrefs / lookaround / size limit): {e}"
+                ))
+            })?;
+
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned {
+                    if &r.list != l {
+                        return false;
+                    }
+                }
+                if let Some(t) = since_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                match field {
+                    RegexField::Subject => r
+                        .subject_raw
+                        .as_deref()
+                        .map(|s| dfa_search(&dfa, s.as_bytes()))
+                        .unwrap_or(false),
+                    RegexField::FromAddr => r
+                        .from_addr
+                        .as_deref()
+                        .map(|s| dfa_search(&dfa, s.as_bytes()))
+                        .unwrap_or(false),
+                    RegexField::Prose | RegexField::Patch => true, // confirm via body fetch below
+                }
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit * 4 // gather extra for body confirm pass
+            },
+        )?;
+
+        if matches!(field, RegexField::Prose | RegexField::Patch) {
+            let mut confirmed = Vec::with_capacity(out.len());
+            for row in out {
+                if let Some(body) = self.fetch_body(&row.message_id)? {
+                    let bytes = match field {
+                        RegexField::Patch => extract_patch_bytes(&body),
+                        RegexField::Prose => extract_prose_bytes(&body),
+                        _ => unreachable!(),
+                    };
+                    if let Some(b) = bytes {
+                        if dfa_search(&dfa, &b) {
+                            confirmed.push(row);
+                        }
+                    }
+                }
+                if confirmed.len() >= limit {
+                    break;
+                }
+            }
+            confirmed.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+            return Ok(confirmed);
+        }
+
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    /// Generalized message-vs-message diff. `mode` selects the view:
+    /// `Patch` (just the diff payload), `Prose` (body minus patch
+    /// minus quoted reply / sig), or `Raw` (verbatim RFC822 bytes).
+    pub fn diff(&self, a: &str, b: &str, mode: DiffMode) -> Result<DiffResult> {
+        let row_a = self
+            .fetch_message(a)?
+            .ok_or_else(|| crate::error::Error::State(format!("message_id {a:?} not found")))?;
+        let row_b = self
+            .fetch_message(b)?
+            .ok_or_else(|| crate::error::Error::State(format!("message_id {b:?} not found")))?;
+        let body_a = self
+            .fetch_body(a)?
+            .ok_or_else(|| crate::error::Error::State(format!("body for {a:?} missing")))?;
+        let body_b = self
+            .fetch_body(b)?
+            .ok_or_else(|| crate::error::Error::State(format!("body for {b:?} missing")))?;
+        let text_a = match mode {
+            DiffMode::Raw => decode_lossy(&body_a),
+            DiffMode::Patch => decode_lossy(&extract_patch_bytes(&body_a).unwrap_or_default()),
+            DiffMode::Prose => decode_lossy(&extract_prose_bytes(&body_a).unwrap_or_default()),
+        };
+        let text_b = match mode {
+            DiffMode::Raw => decode_lossy(&body_b),
+            DiffMode::Patch => decode_lossy(&extract_patch_bytes(&body_b).unwrap_or_default()),
+            DiffMode::Prose => decode_lossy(&extract_prose_bytes(&body_b).unwrap_or_default()),
+        };
+        Ok(DiffResult {
+            row_a,
+            row_b,
+            text_a,
+            text_b,
+        })
+    }
+
     /// Walk the reply graph from any starting message_id and return
     /// every message in the same conversation, ordered by date.
     /// Bounded by `max_messages` so a runaway thread can't OOM the
@@ -509,6 +860,199 @@ impl Reader {
         out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
         Ok(out)
     }
+}
+
+/// Equality-targetable column. The PyO3 wrapper maps Python strings
+/// to these variants; downstream code stays type-safe.
+#[derive(Debug, Clone, Copy)]
+pub enum EqField {
+    MessageId,
+    List,
+    FromAddr,
+    InReplyTo,
+    Tid,
+    CommitOid,
+    BodySha256,
+    SubjectNormalized,
+    /// list-shaped columns: row matches if value appears in the list.
+    TouchedFile,
+    TouchedFunction,
+    Reference,
+    SubjectTag,
+    SignedOffBy,
+    ReviewedBy,
+    AckedBy,
+    TestedBy,
+    CoDevelopedBy,
+    ReportedBy,
+    Fixes,
+    Link,
+    Closes,
+    CcStable,
+}
+
+impl EqField {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "message_id" => EqField::MessageId,
+            "list" => EqField::List,
+            "from_addr" => EqField::FromAddr,
+            "in_reply_to" => EqField::InReplyTo,
+            "tid" => EqField::Tid,
+            "commit_oid" => EqField::CommitOid,
+            "body_sha256" => EqField::BodySha256,
+            "subject_normalized" => EqField::SubjectNormalized,
+            "touched_files" | "touched_file" => EqField::TouchedFile,
+            "touched_functions" | "touched_function" => EqField::TouchedFunction,
+            "references" | "reference" => EqField::Reference,
+            "subject_tags" | "subject_tag" | "tag" => EqField::SubjectTag,
+            "signed_off_by" => EqField::SignedOffBy,
+            "reviewed_by" => EqField::ReviewedBy,
+            "acked_by" => EqField::AckedBy,
+            "tested_by" => EqField::TestedBy,
+            "co_developed_by" => EqField::CoDevelopedBy,
+            "reported_by" => EqField::ReportedBy,
+            "fixes" => EqField::Fixes,
+            "link" => EqField::Link,
+            "closes" => EqField::Closes,
+            "cc_stable" => EqField::CcStable,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RegexField {
+    Subject,
+    FromAddr,
+    Prose,
+    Patch,
+}
+
+impl RegexField {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "subject_raw" | "subject" => RegexField::Subject,
+            "from_addr" | "from" => RegexField::FromAddr,
+            "body_prose" | "prose" => RegexField::Prose,
+            "patch" => RegexField::Patch,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DiffMode {
+    Patch,
+    Prose,
+    Raw,
+}
+
+impl DiffMode {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "patch" => DiffMode::Patch,
+            "prose" => DiffMode::Prose,
+            "raw" => DiffMode::Raw,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct CountSummary {
+    pub count: u64,
+    pub distinct_authors: u64,
+    pub earliest_unix_ns: Option<i64>,
+    pub latest_unix_ns: Option<i64>,
+}
+
+pub struct DiffResult {
+    pub row_a: MessageRow,
+    pub row_b: MessageRow,
+    pub text_a: String,
+    pub text_b: String,
+}
+
+fn eq_field_matches(field: EqField, r: &MessageRow, value: &str) -> bool {
+    match field {
+        EqField::MessageId => r.message_id == value,
+        EqField::List => r.list == value,
+        EqField::FromAddr => r.from_addr.as_deref() == Some(value),
+        EqField::InReplyTo => r.in_reply_to.as_deref() == Some(value),
+        EqField::Tid => r.tid.as_deref() == Some(value),
+        EqField::CommitOid => r.commit_oid == value,
+        EqField::BodySha256 => r.body_sha256 == value,
+        EqField::SubjectNormalized => r.subject_normalized.as_deref() == Some(value),
+        EqField::TouchedFile => r.touched_files.iter().any(|x| x == value),
+        EqField::TouchedFunction => r.touched_functions.iter().any(|x| x == value),
+        EqField::Reference => r.references.iter().any(|x| x == value),
+        EqField::SubjectTag => r.subject_tags.iter().any(|x| x == value),
+        EqField::SignedOffBy => r.signed_off_by.iter().any(|x| x.contains(value)),
+        EqField::ReviewedBy => r.reviewed_by.iter().any(|x| x.contains(value)),
+        EqField::AckedBy => r.acked_by.iter().any(|x| x.contains(value)),
+        EqField::TestedBy => r.tested_by.iter().any(|x| x.contains(value)),
+        EqField::CoDevelopedBy => r.co_developed_by.iter().any(|x| x.contains(value)),
+        EqField::ReportedBy => r.reported_by.iter().any(|x| x.contains(value)),
+        EqField::Fixes => r.fixes.iter().any(|x| x.contains(value)),
+        EqField::Link => r.link.iter().any(|x| x.contains(value)),
+        EqField::Closes => r.closes.iter().any(|x| x.contains(value)),
+        EqField::CcStable => r.cc_stable.iter().any(|x| x.contains(value)),
+    }
+}
+
+fn trailer_matches(r: &MessageRow, name_lc: &str, needle_lc: &str) -> bool {
+    let bag: &[String] = match name_lc {
+        "fixes" => &r.fixes,
+        "link" => &r.link,
+        "closes" => &r.closes,
+        "cc-stable" | "cc_stable" => &r.cc_stable,
+        "signed-off-by" | "signed_off_by" => &r.signed_off_by,
+        "reviewed-by" | "reviewed_by" => &r.reviewed_by,
+        "acked-by" | "acked_by" => &r.acked_by,
+        "tested-by" | "tested_by" => &r.tested_by,
+        "co-developed-by" | "co_developed_by" => &r.co_developed_by,
+        "reported-by" | "reported_by" => &r.reported_by,
+        _ => return false,
+    };
+    bag.iter()
+        .any(|v| v.to_ascii_lowercase().contains(needle_lc))
+}
+
+fn dfa_search(dfa: &regex_automata::dfa::dense::DFA<Vec<u32>>, haystack: &[u8]) -> bool {
+    use regex_automata::Input;
+    use regex_automata::dfa::Automaton;
+    dfa.try_search_fwd(&Input::new(haystack))
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+fn extract_patch_bytes(body: &[u8]) -> Option<Vec<u8>> {
+    // Find first "\ndiff --git " or leading "diff --git ".
+    let needle = b"\ndiff --git ";
+    if body.starts_with(b"diff --git ") {
+        return Some(body.to_vec());
+    }
+    let pos = memchr::memmem::find(body, needle)?;
+    Some(body[pos + 1..].to_vec())
+}
+
+fn extract_prose_bytes(body: &[u8]) -> Option<Vec<u8>> {
+    let needle = b"\ndiff --git ";
+    let end = if body.starts_with(b"diff --git ") {
+        0
+    } else {
+        memchr::memmem::find(body, needle).unwrap_or(body.len())
+    };
+    if end == 0 {
+        return Some(Vec::new());
+    }
+    Some(body[..end].to_vec())
+}
+
+fn decode_lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 fn list_trigram_lists(data_dir: &Path) -> Result<Vec<String>> {
@@ -965,6 +1509,170 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let rows = r.expand_citation("<m2@x>", 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m2@x");
+    }
+
+    #[test]
+    fn eq_by_from_addr_returns_only_matching_rows() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r
+            .eq(EqField::FromAddr, "alice@example.com", None, None, 50)
+            .unwrap();
+        let mids: std::collections::HashSet<&str> =
+            rows.iter().map(|r| r.message_id.as_str()).collect();
+        assert!(mids.contains("m1@x"));
+        assert!(mids.contains("m2@x"));
+    }
+
+    #[test]
+    fn eq_on_touched_files_set_membership() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r
+            .eq(
+                EqField::TouchedFile,
+                "fs/smb/server/smb2pdu.c",
+                None,
+                None,
+                50,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, "m2@x");
+    }
+
+    #[test]
+    fn in_list_unions_multiple_values() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r
+            .in_list(
+                EqField::TouchedFile,
+                &[
+                    "fs/smb/server/smbacl.c".to_owned(),
+                    "fs/smb/server/smb2pdu.c".to_owned(),
+                ],
+                None,
+                None,
+                50,
+            )
+            .unwrap();
+        let mids: std::collections::HashSet<&str> =
+            rows.iter().map(|r| r.message_id.as_str()).collect();
+        assert_eq!(mids, ["m1@x", "m2@x"].into_iter().collect());
+    }
+
+    #[test]
+    fn count_returns_summary_stats() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let s = r
+            .count(EqField::FromAddr, "alice@example.com", None, None)
+            .unwrap();
+        assert_eq!(s.count, 2);
+        assert_eq!(s.distinct_authors, 1);
+        assert!(s.earliest_unix_ns.is_some());
+        assert!(s.latest_unix_ns.is_some());
+    }
+
+    #[test]
+    fn substr_subject_case_insensitive() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r.substr_subject("ksmbd", None, None, 50).unwrap();
+        assert!(rows.iter().any(|r| r.message_id == "m1@x"));
+        assert!(rows.iter().any(|r| r.message_id == "m2@x"));
+        // Uppercase needle still hits.
+        let rows = r.substr_subject("KSMBD", None, None, 50).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn substr_trailers_finds_via_fixes_substring() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r
+            .substr_trailers("fixes", "deadbeef", None, None, 50)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, "m1@x");
+
+        // Unknown trailer name returns empty without erroring.
+        assert!(
+            r.substr_trailers("nonsense", "x", None, None, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn regex_subject_anchored() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r
+            .regex(
+                RegexField::Subject,
+                r"\[PATCH v3 1/2\]",
+                false,
+                None,
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, "m1@x");
+    }
+
+    #[test]
+    fn regex_rejects_unanchored_dotstar_when_required() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let err = r
+            .regex(RegexField::Subject, ".*ksmbd.*", true, None, None, 10)
+            .unwrap_err();
+        match err {
+            crate::error::Error::RegexComplexity(_) => {}
+            other => panic!("wrong err: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn regex_patch_field_confirms_via_body() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let rows = r
+            .regex(
+                RegexField::Patch,
+                r"smb_check_perm_dacl\(",
+                false,
+                None,
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message_id, "m1@x");
+    }
+
+    #[test]
+    fn diff_patch_mode_returns_both_views() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let res = r.diff("m1@x", "m2@x", DiffMode::Patch).unwrap();
+        assert_eq!(res.row_a.message_id, "m1@x");
+        assert_eq!(res.row_b.message_id, "m2@x");
+        assert!(res.text_a.starts_with("diff --git "));
+        assert!(res.text_b.starts_with("diff --git "));
     }
 
     #[test]

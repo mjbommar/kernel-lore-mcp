@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use crate::ingest;
-use crate::reader::{MessageRow, Reader as CoreReader};
+use crate::reader::{DiffMode, EqField, MessageRow, Reader as CoreReader, RegexField};
 use crate::router;
 use crate::tid;
 
@@ -209,6 +209,176 @@ impl PyReader {
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let rows = py.detach(|| self.inner.patch_search(&needle, list.as_deref(), limit))?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    // ---- low-level retrieval primitives (Phase 7) ----------------
+
+    /// Exact-equality scan on a structured column.
+    /// `field` ∈ {message_id, list, from_addr, in_reply_to, tid,
+    /// commit_oid, body_sha256, subject_normalized,
+    /// touched_files, touched_functions, references, subject_tags,
+    /// signed_off_by, reviewed_by, acked_by, tested_by,
+    /// co_developed_by, reported_by, fixes, link, closes, cc_stable}.
+    #[pyo3(signature = (field, value, since_unix_ns=None, list=None, limit=100))]
+    fn eq<'py>(
+        &self,
+        py: Python<'py>,
+        field: String,
+        value: String,
+        since_unix_ns: Option<i64>,
+        list: Option<String>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let f = EqField::from_name(&field)
+            .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
+        let rows = py.detach(|| {
+            self.inner
+                .eq(f, &value, since_unix_ns, list.as_deref(), limit)
+        })?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    /// `WHERE field IN (values)`. Same field set as `eq`.
+    #[pyo3(signature = (field, values, since_unix_ns=None, list=None, limit=100))]
+    fn in_list<'py>(
+        &self,
+        py: Python<'py>,
+        field: String,
+        values: Vec<String>,
+        since_unix_ns: Option<i64>,
+        list: Option<String>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let f = EqField::from_name(&field)
+            .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
+        let rows = py.detach(|| {
+            self.inner
+                .in_list(f, &values, since_unix_ns, list.as_deref(), limit)
+        })?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    /// Aggregate counts over the same predicate as `eq`.
+    /// Returns {"count", "distinct_authors", "earliest_unix_ns",
+    /// "latest_unix_ns"}.
+    #[pyo3(signature = (field, value, since_unix_ns=None, list=None))]
+    fn count<'py>(
+        &self,
+        py: Python<'py>,
+        field: String,
+        value: String,
+        since_unix_ns: Option<i64>,
+        list: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let f = EqField::from_name(&field)
+            .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
+        let summary = py.detach(|| self.inner.count(f, &value, since_unix_ns, list.as_deref()))?;
+        let d = PyDict::new(py);
+        d.set_item("count", summary.count)?;
+        d.set_item("distinct_authors", summary.distinct_authors)?;
+        d.set_item("earliest_unix_ns", summary.earliest_unix_ns)?;
+        d.set_item("latest_unix_ns", summary.latest_unix_ns)?;
+        Ok(d)
+    }
+
+    /// Case-insensitive byte substring scan over `subject_raw`.
+    #[pyo3(signature = (needle, list=None, since_unix_ns=None, limit=100))]
+    fn substr_subject<'py>(
+        &self,
+        py: Python<'py>,
+        needle: String,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py.detach(|| {
+            self.inner
+                .substr_subject(&needle, list.as_deref(), since_unix_ns, limit)
+        })?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    /// Substring scan inside one named trailer column. `name` ∈
+    /// {fixes, link, closes, cc-stable, signed-off-by, reviewed-by,
+    /// acked-by, tested-by, co-developed-by, reported-by}.
+    #[pyo3(signature = (name, value_substring, list=None, since_unix_ns=None, limit=100))]
+    fn substr_trailers<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        value_substring: String,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py.detach(|| {
+            self.inner.substr_trailers(
+                &name,
+                &value_substring,
+                list.as_deref(),
+                since_unix_ns,
+                limit,
+            )
+        })?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    /// DFA-only regex over one of {subject, from_addr, body_prose,
+    /// patch}. Patterns with backrefs / lookaround are rejected.
+    /// `anchor_required=True` rejects leading `.*` patterns.
+    #[pyo3(signature = (field, pattern, anchor_required=true, list=None, since_unix_ns=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
+    fn regex<'py>(
+        &self,
+        py: Python<'py>,
+        field: String,
+        pattern: String,
+        anchor_required: bool,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let f = RegexField::from_name(&field).ok_or_else(|| {
+            crate::error::Error::QueryParse(format!(
+                "unknown regex field {field:?}; supported: subject, from_addr, body_prose, patch"
+            ))
+        })?;
+        let rows = py.detach(|| {
+            self.inner.regex(
+                f,
+                &pattern,
+                anchor_required,
+                list.as_deref(),
+                since_unix_ns,
+                limit,
+            )
+        })?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
+    /// Diff two messages by message-id. `mode` ∈ {patch, prose, raw}.
+    /// Returns `{"a": <row>, "b": <row>, "text_a": str, "text_b": str}`.
+    /// Caller can then run difflib / show side-by-side.
+    #[pyo3(signature = (a, b, mode="patch"))]
+    fn diff<'py>(
+        &self,
+        py: Python<'py>,
+        a: String,
+        b: String,
+        mode: &str,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let m = DiffMode::from_name(mode).ok_or_else(|| {
+            crate::error::Error::QueryParse(format!(
+                "unknown diff mode {mode:?}; supported: patch, prose, raw"
+            ))
+        })?;
+        let result = py.detach(|| self.inner.diff(&a, &b, m))?;
+        let d = PyDict::new(py);
+        d.set_item("a", row_to_pydict(py, &result.row_a)?)?;
+        d.set_item("b", row_to_pydict(py, &result.row_b)?)?;
+        d.set_item("text_a", result.text_a)?;
+        d.set_item("text_b", result.text_b)?;
+        Ok(d)
     }
 
     /// Fetch the raw uncompressed message body by Message-ID.

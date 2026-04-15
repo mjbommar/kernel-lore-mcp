@@ -208,6 +208,44 @@ class PatchDiffResponse(BaseModel):
     blind_spots_ref: str = "blind-spots://coverage"
 
 
+class RowsResponse(BaseModel):
+    """Plain envelope around a list of `SearchHit` rows + the
+    standard freshness/blind-spots fields. Used by the low-level
+    primitives (eq / in_list / substr_* / regex) — none of which
+    rank, so no fused score and `tier_provenance` is fixed per
+    primitive.
+    """
+
+    results: list[SearchHit]
+    total: int
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class CountResponse(BaseModel):
+    """Aggregate counts from `lore_count`."""
+
+    count: int
+    distinct_authors: int
+    earliest_unix_ns: int | None = None
+    latest_unix_ns: int | None = None
+    earliest_utc: datetime | None = None
+    latest_utc: datetime | None = None
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class DiffResponse(BaseModel):
+    """Generalized message-vs-message diff."""
+
+    a: SearchHit
+    b: SearchHit
+    mode: str = Field(description='One of: "patch", "prose", "raw".')
+    diff: str
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
 class ExplainPatchResponse(BaseModel):
     """One-call view: prose + patch + series timeline + downstream replies."""
 

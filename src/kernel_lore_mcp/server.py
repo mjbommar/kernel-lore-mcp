@@ -57,12 +57,22 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.patch import lore_patch
     from kernel_lore_mcp.tools.patch_diff import lore_patch_diff
     from kernel_lore_mcp.tools.patch_search import lore_patch_search
+    from kernel_lore_mcp.tools.primitives import (
+        lore_count,
+        lore_diff,
+        lore_eq,
+        lore_in_list,
+        lore_regex,
+        lore_substr_subject,
+        lore_substr_trailers,
+    )
     from kernel_lore_mcp.tools.search import lore_search
     from kernel_lore_mcp.tools.series import lore_series_timeline
     from kernel_lore_mcp.tools.thread import lore_thread
 
     read_only = {"readOnlyHint": True, "idempotentHint": True}
 
+    # Higher-level / orchestrating tools.
     mcp.tool(lore_search, annotations=read_only)
     mcp.tool(lore_activity, annotations=read_only)
     mcp.tool(lore_message, annotations=read_only)
@@ -73,6 +83,16 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(lore_patch, annotations=read_only)
     mcp.tool(lore_patch_diff, annotations=read_only)
     mcp.tool(lore_explain_patch, annotations=read_only)
+
+    # Low-level retrieval primitives. Agents stack these themselves
+    # when they want one well-defined query against one tier.
+    mcp.tool(lore_eq, annotations=read_only)
+    mcp.tool(lore_in_list, annotations=read_only)
+    mcp.tool(lore_count, annotations=read_only)
+    mcp.tool(lore_substr_subject, annotations=read_only)
+    mcp.tool(lore_substr_trailers, annotations=read_only)
+    mcp.tool(lore_regex, annotations=read_only)
+    mcp.tool(lore_diff, annotations=read_only)
 
     # Register blind_spots as an MCP resource — fetch once per session.
     @mcp.resource(
