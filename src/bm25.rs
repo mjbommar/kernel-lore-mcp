@@ -270,6 +270,20 @@ impl BmReader {
     /// Phrase queries are rejected here with a clear error — positions
     /// are off, so a phrase query would be a lie.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<(String, f32)>> {
+        self.search_filtered(query, None, limit)
+    }
+
+    /// Like `search` but optionally filter to a specific list at the
+    /// tantivy query level. This eliminates false negatives from
+    /// post-filtering: when `list_filter` is set, tantivy only
+    /// scores documents from that list, so the top-N are guaranteed
+    /// to be from the requested list.
+    pub fn search_filtered(
+        &self,
+        query: &str,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>> {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -295,15 +309,32 @@ impl BmReader {
             &self.index,
             vec![self.schema.body_prose, self.schema.subject_normalized],
         );
-        let q = parser
+        let text_query = parser
             .parse_query(query)
             .map_err(|e| Error::QueryParse(format!("parse {query:?}: {e}")))?;
+
+        // When a list filter is present, combine the text query with
+        // a TermQuery on the `list` field. This filters at the
+        // tantivy level so the top-N results are all from the right
+        // list — no post-filter starvation.
+        let q: Box<dyn tantivy::query::Query> = if let Some(list_name) = list_filter {
+            use tantivy::query::{BooleanQuery, Occur, TermQuery};
+            use tantivy::schema::IndexRecordOption as IRO;
+            let list_term =
+                tantivy::Term::from_field_text(self.schema.list, &list_name.to_lowercase());
+            Box::new(BooleanQuery::new(vec![
+                (Occur::Must, text_query),
+                (Occur::Must, Box::new(TermQuery::new(list_term, IRO::Basic))),
+            ]))
+        } else {
+            text_query
+        };
 
         // tantivy 0.26: TopDocs::with_limit(N) is a builder; chain
         // `.order_by_score()` to get an `impl Collector`. The result
         // is `Vec<(Score, DocAddress)>` just like earlier versions.
         let top: Vec<(tantivy::Score, tantivy::DocAddress)> =
-            searcher.search(&q, &TopDocs::with_limit(limit).order_by_score())?;
+            searcher.search(&*q, &TopDocs::with_limit(limit).order_by_score())?;
 
         let mut out = Vec::with_capacity(top.len());
         for (score, addr) in top {

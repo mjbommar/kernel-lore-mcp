@@ -128,16 +128,20 @@ impl Reader {
 
     /// Enumerate every `.parquet` file under `<data_dir>/metadata/`.
     ///
-    /// Files are sorted by filename **descending** so that newer
-    /// run_ids come first. This is load-bearing: `fetch_message`
-    /// returns the first match it sees during a scan, and after a
-    /// dangling-OID re-walk the same message_id may appear in two
-    /// Parquet files. Descending order guarantees freshest-wins.
+    /// Files are sorted by **mtime descending** so the most recently
+    /// written file comes first. This is load-bearing: `scan()`
+    /// deduplicates by message_id and keeps the first occurrence, so
+    /// mtime-descending guarantees freshest-wins regardless of what
+    /// `run_id` the caller passed (run_id is caller-controlled on the
+    /// PyO3 surface and only happens to be monotone in the default
+    /// CLI path). File mtime is set by `fs::rename` in
+    /// `metadata::write_parquet` (the atomic-rename step) and is
+    /// monotone with real wall-clock time.
     fn parquet_files(&self) -> Result<Vec<PathBuf>> {
         let root = self.data_dir.join("metadata");
-        let mut out = Vec::new();
+        let mut out: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         if !root.exists() {
-            return Ok(out);
+            return Ok(Vec::new());
         }
         for list_entry in fs::read_dir(&root)? {
             let list_entry = list_entry?;
@@ -148,13 +152,18 @@ impl Reader {
                 let file = file?;
                 let path = file.path();
                 if path.extension().and_then(|s| s.to_str()) == Some("parquet") {
-                    out.push(path);
+                    let mtime = file
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    out.push((path, mtime));
                 }
             }
         }
-        // Sort descending by filename so newer run_ids come first.
-        out.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-        Ok(out)
+        // Sort by mtime descending — newest first. Deterministic
+        // regardless of run_id naming conventions.
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(out.into_iter().map(|(p, _)| p).collect())
     }
 
     /// Collect every row in the metadata tier into `out`. Used by the
@@ -796,9 +805,22 @@ impl Reader {
     /// Phrase queries (`"..."`) are rejected — positions are off by
     /// design. Use `patch_search` for literal substrings in code.
     pub fn prose_search(&self, query: &str, limit: usize) -> Result<Vec<(MessageRow, f32)>> {
+        self.prose_search_filtered(query, None, limit)
+    }
+
+    /// Like `prose_search` but with an optional tantivy-side list
+    /// filter. When `list_filter` is set, tantivy only scores
+    /// documents from that list, eliminating false negatives from
+    /// post-filter starvation under corpus skew.
+    pub fn prose_search_filtered(
+        &self,
+        query: &str,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(MessageRow, f32)>> {
         use crate::bm25::BmReader;
         let bm = BmReader::open(&self.data_dir)?;
-        let top = bm.search(query, limit)?;
+        let top = bm.search_filtered(query, list_filter, limit)?;
         if top.is_empty() {
             return Ok(Vec::new());
         }
