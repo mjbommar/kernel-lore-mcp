@@ -41,7 +41,11 @@ _EQ_FIELDS = {
     "list",
     "from_addr",
     "in_reply_to",
-    "tid",
+    # "tid" — intentionally excluded. The tid side-table is computed
+    # at ingest time for cover-letter propagation but is NOT joined
+    # into metadata rows at read time (metadata writes tid=null at
+    # src/metadata.rs:170). eq(field="tid") would always return
+    # nothing. When the reader-side join ships, re-add it here.
     "commit_oid",
     "body_sha256",
     "subject_normalized",
@@ -126,7 +130,7 @@ async def lore_eq(
             min_length=1,
             description=(
                 "Structured column to match. Supported: "
-                "message_id, list, from_addr, in_reply_to, tid, commit_oid, "
+                "message_id, list, from_addr, in_reply_to, commit_oid, "
                 "body_sha256, subject_normalized, touched_files, "
                 "touched_functions, references, subject_tags, signed_off_by, "
                 "reviewed_by, acked_by, tested_by, co_developed_by, "

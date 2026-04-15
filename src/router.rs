@@ -269,9 +269,15 @@ pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<V
     if !parsed.free_text.is_empty() {
         let q = parsed.free_text.join(" ");
         // BM25 doesn't natively filter by list/from/since; we apply
-        // those predicates as a post-filter after RRF merge so they
-        // are honored regardless of which tier produced the hit.
-        let scored = reader.prose_search(&q, limit * 2)?;
+        // those predicates as a post-filter after RRF merge. Over-
+        // fetch aggressively (10x) when filters are present so the
+        // post-filter doesn't starve the result set under corpus
+        // skew (e.g. BM25 returns 200 results but only 3 are from
+        // the requested list).
+        let has_filters =
+            parsed.list.is_some() || parsed.from_addr.is_some() || parsed.since_unix_ns.is_some();
+        let bm25_limit = if has_filters { limit * 10 } else { limit * 2 };
+        let scored = reader.prose_search(&q, bm25_limit)?;
         tier_results.insert("bm25", scored.into_iter().map(|(r, _)| r).collect());
     }
 
