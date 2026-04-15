@@ -73,6 +73,18 @@ stats = _core.ingest_shard(
     run_id="smoke-001",
 )
 print(f"[smoke] ingested {stats['ingested']} messages")
+
+# Build path vocab for lore_path_mentions (Phase 13a-file).
+reader = _core.Reader(data)
+rows = reader.eq("list", "linux-cifs", None, None, 1000)
+all_paths = set()
+for r in rows:
+    for f in (r.get("touched_files") or []):
+        all_paths.add(f)
+vocab_dir = data / "paths"
+vocab_dir.mkdir(exist_ok=True)
+(vocab_dir / "vocab.txt").write_text("\n".join(sorted(all_paths)))
+print(f"[smoke] path vocab: {len(all_paths)} paths")
 EOF
 }
 
@@ -85,6 +97,8 @@ mcp_cmd="$repo_root/.venv/bin/kernel-lore-mcp"
 prompt_tool='List every linux-cifs message authored by alice@example.com using the lore_eq tool with field=from_addr, value=alice@example.com. Reply with ONLY the message-ids on separate lines, no prose.'
 prompt_classify='Call lore_classify_patch with message_id=m1@x. Reply with ONLY the single-word label from the response (e.g. bugfix). No prose, no JSON, no explanation.'
 prompt_resource='Read the MCP resource lore://message/m1@x and print the Message-ID header line that starts with "Message-ID:". Reply with ONLY that one line.'
+prompt_fuzzy='Call lore_patch_search with needle=smb_check_perm_dacX and fuzzy_edits=1. Reply with ONLY the message-ids on separate lines, no prose.'
+prompt_path='Call lore_path_mentions with path=smbacl.c and match=basename. Reply with ONLY the message-ids on separate lines, no prose.'
 
 check_contains() {
     local label="$1"
@@ -159,6 +173,12 @@ EOF
     run_claude "resource read (lore://message)" "$prompt_resource" \
         'Message-ID: <m1@x>' \
         "mcp__kernel-lore__*,ReadMcpResource"
+    run_claude "fuzzy patch search (Phase 13a)" "$prompt_fuzzy" \
+        '\bm1@x\b' \
+        "mcp__kernel-lore__lore_patch_search"
+    run_claude "path mentions (Phase 13a)" "$prompt_path" \
+        '\bm1@x\b' \
+        "mcp__kernel-lore__lore_path_mentions"
 fi
 
 # ---------------------------------------------------------------- codex
@@ -171,6 +191,8 @@ if [[ "$agent" =~ ^(both|codex)$ ]]; then
     # fetch (codex may choose to wrap through a shell).
     run_codex "resource read (lore://message)" "$prompt_resource" \
         'Message-ID: <m1@x>'
+    run_codex "fuzzy patch search (Phase 13a)" "$prompt_fuzzy" '\bm1@x\b'
+    run_codex "path mentions (Phase 13a)" "$prompt_path" '\bm1@x\b'
 fi
 
 # ---------------------------------------------------------------- local probe
