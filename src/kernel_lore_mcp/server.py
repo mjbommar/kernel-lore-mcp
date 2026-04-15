@@ -11,6 +11,7 @@ from fastmcp import FastMCP
 
 from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.resources.blind_spots import BLIND_SPOTS_URI, blind_spots_text
+from kernel_lore_mcp.resources.templates import register_templated_resources
 from kernel_lore_mcp.routes.metrics import metrics_endpoint
 from kernel_lore_mcp.routes.status import status_endpoint
 
@@ -122,6 +123,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
     def _blind_spots() -> str:
         return blind_spots_text()
+
+    # Phase 10 — RFC-6570 templated resources. `lore://message/{mid}`,
+    # `lore://thread/{tid}`, `lore://patch/{mid}` wrap existing reader
+    # paths; `lore://maintainer/{path}` and `lore://patchwork/{msg_id}`
+    # return a stub body that names the phase that ships real data.
+    register_templated_resources(mcp)
 
     # Non-MCP HTTP routes. Accessible only when transport=http.
     mcp.custom_route("/status", methods=["GET"])(status_endpoint)
