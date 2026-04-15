@@ -110,7 +110,11 @@ jobs:
       - name: Publish via Trusted Publisher (OIDC)
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          skip-existing: false
+          # Tolerate the case where artifacts for this version are
+          # already on PyPI (e.g. 0.1.0 was uploaded manually via
+          # `uv publish` before the workflow was wired). Subsequent
+          # tagged releases still publish fresh wheels normally.
+          skip-existing: true
           print-hash: true
 
   github-release:
