@@ -246,6 +246,33 @@ class DiffResponse(BaseModel):
     blind_spots_ref: str = "blind-spots://coverage"
 
 
+class NearestHit(BaseModel):
+    """One hit from the embedding tier. `score` is cosine similarity
+    in [-1, 1]; higher = more similar. `tier_provenance` is fixed to
+    ["embedding"]; `is_exact_match` is always False (semantic, not
+    structural).
+    """
+
+    message_id: str
+    cite_key: str
+    score: float
+    list: str
+    from_addr: str | None
+    subject: str
+    date: datetime | None
+    has_patch: bool
+    lore_url: str
+
+
+class NearestResponse(BaseModel):
+    results: list[NearestHit]
+    model: str = Field(description="Embedder model name; matches the indexed model.")
+    dim: int
+    tier_provenance: list[str] = Field(default_factory=lambda: ["embedding"])
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
 class ExplainPatchResponse(BaseModel):
     """One-call view: prose + patch + series timeline + downstream replies."""
 

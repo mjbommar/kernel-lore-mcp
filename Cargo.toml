@@ -58,6 +58,12 @@ regex-automata = "0.4"
 # Compression (compressed raw store)
 zstd = "0.13"
 
+# Approximate-nearest-neighbour index for the embedding tier.
+# Pure Rust, no transitive ML deps; we feed it pre-computed f32
+# vectors (Python side embeds via fastembed).
+instant-distance = { version = "0.6", features = ["with-serde"] }
+bincode = "1.3"
+
 # Columnar metadata tier
 arrow = { version = "58", default-features = false, features = ["ipc"] }
 parquet = { version = "58", default-features = false, features = [

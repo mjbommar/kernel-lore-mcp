@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use crate::embedding::{EmbeddingBuilder, EmbeddingReader};
 use crate::ingest;
 use crate::reader::{DiffMode, EqField, MessageRow, Reader as CoreReader, RegexField};
 use crate::router;
@@ -66,6 +67,69 @@ pub fn py_rebuild_tid<'py>(py: Python<'py>, data_dir: PathBuf) -> PyResult<Bound
     d.set_item("path", path.display().to_string())?;
     d.set_item("rows", n)?;
     Ok(d)
+}
+
+/// Build (or rebuild) the embedding index. Caller passes parallel
+/// lists of message-ids and L2-normalized f32 vectors (one row each).
+/// The Python side runs the actual embedding model (fastembed) and
+/// hands the resulting `numpy.ndarray.astype(np.float32)` here.
+///
+/// Idempotent — overwrites `<data_dir>/embedding/` atomically.
+#[pyfunction]
+#[pyo3(name = "build_embedding_index")]
+#[pyo3(signature = (data_dir, model, dim, message_ids, vectors))]
+pub fn py_build_embedding_index<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+    model: String,
+    dim: u32,
+    message_ids: Vec<String>,
+    vectors: Vec<Vec<f32>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    if message_ids.len() != vectors.len() {
+        return Err(crate::error::Error::State(format!(
+            "build_embedding_index: {} message-ids vs {} vectors",
+            message_ids.len(),
+            vectors.len()
+        ))
+        .into());
+    }
+    let meta = py.detach(move || -> Result<_, crate::error::Error> {
+        let mut b = EmbeddingBuilder::new(model, dim);
+        for (mid, v) in message_ids.into_iter().zip(vectors.into_iter()) {
+            b.add(&mid, v)?;
+        }
+        b.finalize(&data_dir)
+    })?;
+    let d = PyDict::new(py);
+    d.set_item("model", &meta.model)?;
+    d.set_item("dim", meta.dim)?;
+    d.set_item("metric", &meta.metric)?;
+    d.set_item("count", meta.count)?;
+    d.set_item("schema_version", meta.schema_version)?;
+    Ok(d)
+}
+
+/// Read the embedding index metadata. Returns `None` if no index
+/// has been built yet.
+#[pyfunction]
+#[pyo3(name = "embedding_meta")]
+pub fn py_embedding_meta<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let reader = py.detach(|| EmbeddingReader::open(&data_dir))?;
+    let Some(reader) = reader else {
+        return Ok(None);
+    };
+    let m = reader.meta();
+    let d = PyDict::new(py);
+    d.set_item("model", &m.model)?;
+    d.set_item("dim", m.dim)?;
+    d.set_item("metric", &m.metric)?;
+    d.set_item("count", m.count)?;
+    d.set_item("schema_version", m.schema_version)?;
+    Ok(Some(d))
 }
 
 /// Handle on a `<data_dir>` that exposes all v0.5 reader methods.
@@ -379,6 +443,65 @@ impl PyReader {
         d.set_item("text_a", result.text_a)?;
         d.set_item("text_b", result.text_b)?;
         Ok(d)
+    }
+
+    // ---- embedding tier (Phase 8) ----------------------------------
+
+    /// Top-`k` nearest message-ids to a pre-computed query vector.
+    /// `query_vec` must be L2-normalized and the same dim as the
+    /// stored index. Returns `[(message_id, cosine_similarity), ...]`
+    /// as a list of `(str, float)` tuples; Python side wraps in a
+    /// pydantic model.
+    #[pyo3(signature = (query_vec, k=25))]
+    fn nearest<'py>(
+        &self,
+        py: Python<'py>,
+        query_vec: Vec<f32>,
+        k: usize,
+    ) -> PyResult<Vec<(String, f32)>> {
+        let result = py.detach(|| -> Result<_, crate::error::Error> {
+            let Some(reader) = EmbeddingReader::open(self.inner.data_dir())? else {
+                return Ok(Vec::new());
+            };
+            reader.nearest(&query_vec, k)
+        })?;
+        Ok(result)
+    }
+
+    /// Top-`k` nearest message-ids to the stored vector of an
+    /// existing message. Useful for "more like this" without
+    /// re-embedding text.
+    #[pyo3(signature = (message_id, k=25))]
+    fn nearest_to_mid(
+        &self,
+        py: Python<'_>,
+        message_id: String,
+        k: usize,
+    ) -> PyResult<Vec<(String, f32)>> {
+        let result = py.detach(|| -> Result<_, crate::error::Error> {
+            let Some(reader) = EmbeddingReader::open(self.inner.data_dir())? else {
+                return Ok(Vec::new());
+            };
+            reader.nearest_to_mid(&message_id, k)
+        })?;
+        Ok(result)
+    }
+
+    /// Embedding-index dim, used by the Python tool to verify the
+    /// query embedder matches the indexed embedder.
+    fn embedding_dim(&self, py: Python<'_>) -> PyResult<Option<u32>> {
+        let dim = py.detach(|| -> Result<Option<u32>, crate::error::Error> {
+            Ok(EmbeddingReader::open(self.inner.data_dir())?.map(|r| r.meta().dim))
+        })?;
+        Ok(dim)
+    }
+
+    /// Embedding-index model name.
+    fn embedding_model(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let m = py.detach(|| -> Result<Option<String>, crate::error::Error> {
+            Ok(EmbeddingReader::open(self.inner.data_dir())?.map(|r| r.meta().model.clone()))
+        })?;
+        Ok(m)
     }
 
     /// Fetch the raw uncompressed message body by Message-ID.

@@ -29,6 +29,7 @@
 use pyo3::prelude::*;
 
 mod bm25;
+mod embedding;
 mod error;
 mod ingest;
 mod metadata;
@@ -46,6 +47,7 @@ mod trigram;
 // future internal tooling) so they don't have to name the module
 // paths.
 pub use bm25::BmWriter;
+pub use embedding::{EmbeddingBuilder, EmbeddingMeta, EmbeddingReader};
 pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25};
 pub use router::{CursorPayload, ParsedQuery, RankedHit, parse_query, sign_cursor, verify_cursor};
 pub use state::State;
@@ -56,6 +58,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_ingest_shard, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_rebuild_tid, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::python::py_build_embedding_index,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_embedding_meta, m)?)?;
     m.add_class::<crate::python::PyReader>()?;
     Ok(())
 }

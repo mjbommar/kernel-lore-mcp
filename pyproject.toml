@@ -28,6 +28,11 @@ dependencies = [
     "httpx>=0.28",
     "structlog>=24.4",
     "prometheus-client>=0.21",
+    # Embedding tier (Phase 8): query-side text -> f32 vector. Pure
+    # Python wrapper around an ONNX runtime; small enough to ship
+    # by default. Model weights download on first use.
+    "fastembed>=0.8,<1",
+    "numpy>=2.0",
 ]
 
 [dependency-groups]
@@ -43,6 +48,7 @@ dev = [
 
 [project.scripts]
 kernel-lore-mcp = "kernel_lore_mcp.__main__:main"
+kernel-lore-embed = "kernel_lore_mcp.cli.embed:main"
 
 [project.urls]
 Homepage = "https://github.com/mjbommar/kernel-lore-mcp"

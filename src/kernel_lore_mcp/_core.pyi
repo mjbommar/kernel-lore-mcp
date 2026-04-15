@@ -31,6 +31,22 @@ class TidRebuildResult(TypedDict):
 
 def rebuild_tid(data_dir: str | PathLike[str]) -> TidRebuildResult: ...
 
+class EmbeddingMeta(TypedDict):
+    model: str
+    dim: int
+    metric: str
+    count: int
+    schema_version: int
+
+def build_embedding_index(
+    data_dir: str | PathLike[str],
+    model: str,
+    dim: int,
+    message_ids: list[str],
+    vectors: list[list[float]],
+) -> EmbeddingMeta: ...
+def embedding_meta(data_dir: str | PathLike[str]) -> EmbeddingMeta | None: ...
+
 class Reader:
     def __init__(self, data_dir: str | PathLike[str]) -> None: ...
     def fetch_message(self, message_id: str) -> dict[str, Any] | None: ...
@@ -119,3 +135,15 @@ class Reader:
         b: str,
         mode: str = ...,
     ) -> dict[str, Any]: ...
+    def nearest(
+        self,
+        query_vec: list[float],
+        k: int = ...,
+    ) -> list[tuple[str, float]]: ...
+    def nearest_to_mid(
+        self,
+        message_id: str,
+        k: int = ...,
+    ) -> list[tuple[str, float]]: ...
+    def embedding_dim(self) -> int | None: ...
+    def embedding_model(self) -> str | None: ...

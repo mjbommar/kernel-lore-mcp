@@ -54,6 +54,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.message import lore_message
+    from kernel_lore_mcp.tools.nearest import lore_nearest, lore_similar
     from kernel_lore_mcp.tools.patch import lore_patch
     from kernel_lore_mcp.tools.patch_diff import lore_patch_diff
     from kernel_lore_mcp.tools.patch_search import lore_patch_search
@@ -93,6 +94,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(lore_substr_trailers, annotations=read_only)
     mcp.tool(lore_regex, annotations=read_only)
     mcp.tool(lore_diff, annotations=read_only)
+
+    # Embedding tier (Phase 8). Both tools fail loudly with an
+    # actionable ToolError when the index hasn't been built yet.
+    mcp.tool(lore_nearest, annotations=read_only)
+    mcp.tool(lore_similar, annotations=read_only)
 
     # Register blind_spots as an MCP resource — fetch once per session.
     @mcp.resource(
