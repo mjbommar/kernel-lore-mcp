@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.prompts import register_prompts
 from kernel_lore_mcp.resources.blind_spots import BLIND_SPOTS_URI, blind_spots_text
 from kernel_lore_mcp.resources.templates import register_templated_resources
 from kernel_lore_mcp.routes.metrics import metrics_endpoint
@@ -129,6 +130,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # paths; `lore://maintainer/{path}` and `lore://patchwork/{msg_id}`
     # return a stub body that names the phase that ships real data.
     register_templated_resources(mcp)
+
+    # Phase 11 — server-provided prompts (Claude Code slash commands).
+    # 5 prompts encoding the canonical kernel-research workflows.
+    # Every argument has a default so the slash command is invocable
+    # with zero user input (anthropics/claude-code#30733).
+    register_prompts(mcp)
 
     # Non-MCP HTTP routes. Accessible only when transport=http.
     mcp.custom_route("/status", methods=["GET"])(status_endpoint)
