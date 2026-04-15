@@ -281,9 +281,19 @@ impl SegmentReader {
             }
         }
 
-        let mut out: Vec<&str> = counts
+        // Collect ALL candidates meeting the threshold, sort by
+        // match quality (count DESC, docid ASC) so the cap is
+        // deterministic + quality-biased rather than hash-order-
+        // dependent. Without this, identical queries can return
+        // different result sets across runs.
+        let mut candidates: Vec<(u32, usize)> = counts
             .into_iter()
             .filter(|(_, c)| *c >= threshold)
+            .collect();
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let mut out: Vec<&str> = candidates
+            .into_iter()
             .take(TRIGRAM_CONFIRM_LIMIT)
             .filter_map(|(docid, _)| self.docs.get(docid as usize).map(String::as_str))
             .collect();

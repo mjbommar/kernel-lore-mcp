@@ -61,17 +61,25 @@ pub fn ingest_shard_unlocked(
     shard: &str,
     run_id: &str,
 ) -> Result<IngestStats> {
-    ingest_shard_with_bm25(data_dir, shard_path, list, shard, run_id, None)
+    ingest_shard_with_bm25(data_dir, shard_path, list, shard, run_id, None, None)
 }
 
-/// Full-control variant: accepts an optional shared `BmWriter` so
+/// Full-control variant: accepts optional shared writers so
 /// multi-shard binaries can fan out via rayon while still writing to
-/// a single tantivy index (tantivy's own index lock is exclusive).
+/// a single compressed store + tantivy index per list.
 ///
 /// - When `shared_bm25` is `Some(mutex)`, the caller is responsible
 ///   for committing it once per run, after all shards finish.
 /// - When `None`, this function opens its own writer, commits, and
 ///   drops it when the shard finishes.
+/// - When `shared_store` is `Some(mutex)`, all same-list shards
+///   serialize their appends through one `Store` instance, keeping
+///   the cached offset counter correct. **Required** when
+///   multiple shards from the same list are ingested in parallel;
+///   without it, each shard's independent `SegmentWriter::position`
+///   goes stale and the returned `StoreOffset` can point at the
+///   wrong frame.
+/// - When `None`, this function opens its own `Store`.
 pub fn ingest_shard_with_bm25(
     data_dir: &Path,
     shard_path: &Path,
@@ -79,9 +87,17 @@ pub fn ingest_shard_with_bm25(
     shard: &str,
     run_id: &str,
     shared_bm25: Option<&Mutex<BmWriter>>,
+    shared_store: Option<&Mutex<Store>>,
 ) -> Result<IngestStats> {
     let state = State::new(data_dir)?;
-    let store = Store::open(data_dir, list)?;
+    let owned_store;
+    let store_ref: &Mutex<Store> = match shared_store {
+        Some(s) => s,
+        None => {
+            owned_store = Mutex::new(Store::open(data_dir, list)?);
+            &owned_store
+        }
+    };
 
     let repo = gix::open(shard_path)
         .map_err(|e| Error::Gix(format!("open {}: {e}", shard_path.display())))?;
@@ -181,7 +197,10 @@ pub fn ingest_shard_with_bm25(
             }
         }
 
-        let appended = store.append(data)?;
+        let appended = store_ref
+            .lock()
+            .map_err(|_| Error::State("store mutex poisoned".to_owned()))?
+            .append(data)?;
         let row = MetadataRow {
             list,
             shard,
@@ -195,7 +214,10 @@ pub fn ingest_shard_with_bm25(
         stats.ingested += 1;
     }
 
-    store.flush()?;
+    store_ref
+        .lock()
+        .map_err(|_| Error::State("store mutex poisoned".to_owned()))?
+        .flush()?;
 
     if batch.is_empty() {
         // Nothing new; still advance the oid so we don't re-walk.

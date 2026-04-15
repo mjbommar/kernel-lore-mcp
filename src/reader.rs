@@ -68,6 +68,7 @@ pub struct MessageRow {
     pub link: Vec<String>,
     pub closes: Vec<String>,
     pub cc_stable: Vec<String>,
+    pub body_segment_id: u32,
     pub body_offset: u64,
     pub body_length: u64,
     pub body_sha256: String,
@@ -126,6 +127,12 @@ impl Reader {
     }
 
     /// Enumerate every `.parquet` file under `<data_dir>/metadata/`.
+    ///
+    /// Files are sorted by filename **descending** so that newer
+    /// run_ids come first. This is load-bearing: `fetch_message`
+    /// returns the first match it sees during a scan, and after a
+    /// dangling-OID re-walk the same message_id may appear in two
+    /// Parquet files. Descending order guarantees freshest-wins.
     fn parquet_files(&self) -> Result<Vec<PathBuf>> {
         let root = self.data_dir.join("metadata");
         let mut out = Vec::new();
@@ -145,6 +152,8 @@ impl Reader {
                 }
             }
         }
+        // Sort descending by filename so newer run_ids come first.
+        out.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
         Ok(out)
     }
 
@@ -860,7 +869,7 @@ impl Reader {
         let mut confirmed = Vec::new();
         for row in hits {
             let store = crate::store::Store::open(&self.data_dir, &row.list)?;
-            let body = store.read_at(0, row.body_offset)?;
+            let body = store.read_at(row.body_segment_id, row.body_offset)?;
             if memchr::memmem::find(&body, &needle_bytes).is_some() {
                 confirmed.push(row);
             }
@@ -924,7 +933,7 @@ impl Reader {
         let mut confirmed = Vec::new();
         for row in hits {
             let store = crate::store::Store::open(&self.data_dir, &row.list)?;
-            let body = store.read_at(0, row.body_offset)?;
+            let body = store.read_at(row.body_segment_id, row.body_offset)?;
             let is_match = if fuzzy_edits == 0 {
                 memchr::memmem::find(&body, &needle_bytes).is_some()
             } else {
@@ -965,7 +974,7 @@ impl Reader {
         // TODO(phase-2): add `segment_id` column to metadata so we aren't
         // relying on this convention on the reader side.
         let store = crate::store::Store::open(&self.data_dir, &row.list)?;
-        let body = store.read_at(0, row.body_offset)?;
+        let body = store.read_at(row.body_segment_id, row.body_offset)?;
         Ok(Some(body))
     }
 
@@ -1277,15 +1286,15 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
     let references = downcast_list(batch, sc::COL_REFERENCES)?;
     let tid = downcast_string_opt(batch, sc::COL_TID)?;
     let series_version = downcast_u32(batch, sc::COL_SERIES_VERSION)?;
-    let series_index = downcast_u32_opt(batch, sc::COL_SERIES_INDEX)?;
-    let series_total = downcast_u32_opt(batch, sc::COL_SERIES_TOTAL)?;
+    let series_index = downcast_u32(batch, sc::COL_SERIES_INDEX)?;
+    let series_total = downcast_u32(batch, sc::COL_SERIES_TOTAL)?;
     let is_cover_letter = downcast_bool(batch, sc::COL_IS_COVER_LETTER)?;
     let has_patch = downcast_bool(batch, sc::COL_HAS_PATCH)?;
     let touched_files = downcast_list(batch, sc::COL_TOUCHED_FILES)?;
     let touched_functions = downcast_list(batch, sc::COL_TOUCHED_FUNCTIONS)?;
-    let files_changed = downcast_u32_opt(batch, sc::COL_FILES_CHANGED)?;
-    let insertions = downcast_u32_opt(batch, sc::COL_INSERTIONS)?;
-    let deletions = downcast_u32_opt(batch, sc::COL_DELETIONS)?;
+    let files_changed = downcast_u32(batch, sc::COL_FILES_CHANGED)?;
+    let insertions = downcast_u32(batch, sc::COL_INSERTIONS)?;
+    let deletions = downcast_u32(batch, sc::COL_DELETIONS)?;
     let signed_off_by = downcast_list(batch, sc::COL_SIGNED_OFF_BY)?;
     let reviewed_by = downcast_list(batch, sc::COL_REVIEWED_BY)?;
     let acked_by = downcast_list(batch, sc::COL_ACKED_BY)?;
@@ -1296,6 +1305,9 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
     let link_trailers = downcast_list(batch, sc::COL_LINK)?;
     let closes = downcast_list(batch, sc::COL_CLOSES)?;
     let cc_stable = downcast_list(batch, sc::COL_CC_STABLE)?;
+    // body_segment_id was added after v0.1.0; older Parquet files
+    // lack it. Default to segment 0 for backward compat.
+    let body_segment_id = downcast_u32_opt(batch, sc::COL_BODY_SEGMENT_ID);
     let body_offset = downcast_u64(batch, sc::COL_BODY_OFFSET)?;
     let body_length = downcast_u64(batch, sc::COL_BODY_LENGTH)?;
     let body_sha256 = downcast_string(batch, sc::COL_BODY_SHA256)?;
@@ -1357,6 +1369,7 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
             link: list_strings(&link_trailers, i),
             closes: list_strings(&closes, i),
             cc_stable: list_strings(&cc_stable, i),
+            body_segment_id: body_segment_id.as_ref().map(|a| a.value(i)).unwrap_or(0),
             body_offset: body_offset.value(i),
             body_length: body_length.value(i),
             body_sha256: body_sha256.value(i).to_owned(),
@@ -1408,8 +1421,15 @@ fn downcast_u32(batch: &RecordBatch, name: &str) -> Result<UInt32Array> {
         .clone())
 }
 
-fn downcast_u32_opt(batch: &RecordBatch, name: &str) -> Result<UInt32Array> {
-    downcast_u32(batch, name)
+/// Like `downcast_u32` but returns `None` when the column doesn't
+/// exist (backward compat for columns added after v0.1.0).
+fn downcast_u32_opt(batch: &RecordBatch, name: &str) -> Option<UInt32Array> {
+    let idx = batch.schema().index_of(name).ok()?;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .cloned()
 }
 
 fn downcast_u64(batch: &RecordBatch, name: &str) -> Result<UInt64Array> {

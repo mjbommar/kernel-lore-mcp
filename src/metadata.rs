@@ -73,6 +73,7 @@ pub struct MetadataBatch {
     link: ListBuilder<StringBuilder>,
     closes: ListBuilder<StringBuilder>,
     cc_stable: ListBuilder<StringBuilder>,
+    body_segment_id: UInt32Builder,
     body_offset: UInt64Builder,
     body_length: UInt64Builder,
     body_sha256: StringBuilder,
@@ -123,6 +124,7 @@ impl MetadataBatch {
             link: ListBuilder::new(StringBuilder::new()),
             closes: ListBuilder::new(StringBuilder::new()),
             cc_stable: ListBuilder::new(StringBuilder::new()),
+            body_segment_id: UInt32Builder::new(),
             body_offset: UInt64Builder::new(),
             body_length: UInt64Builder::new(),
             body_sha256: StringBuilder::new(),
@@ -188,6 +190,7 @@ impl MetadataBatch {
         append_list(&mut self.closes, &row.parsed.closes);
         append_list(&mut self.cc_stable, &row.parsed.cc_stable);
 
+        self.body_segment_id.append_value(row.offset.segment_id);
         self.body_offset.append_value(row.offset.offset);
         self.body_length.append_value(row.body_length);
         self.body_sha256.append_value(&row.body_sha256_hex);
@@ -232,6 +235,7 @@ impl MetadataBatch {
             Arc::new(self.link.finish()),
             Arc::new(self.closes.finish()),
             Arc::new(self.cc_stable.finish()),
+            Arc::new(self.body_segment_id.finish()),
             Arc::new(self.body_offset.finish()),
             Arc::new(self.body_length.finish()),
             Arc::new(self.body_sha256.finish()),

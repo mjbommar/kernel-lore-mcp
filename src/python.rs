@@ -645,6 +645,7 @@ fn row_to_pydict<'py>(py: Python<'py>, r: &MessageRow) -> PyResult<Bound<'py, Py
     d.set_item("link", &r.link)?;
     d.set_item("closes", &r.closes)?;
     d.set_item("cc_stable", &r.cc_stable)?;
+    d.set_item("body_segment_id", r.body_segment_id)?;
     d.set_item("body_offset", r.body_offset)?;
     d.set_item("body_length", r.body_length)?;
     d.set_item("body_sha256", &r.body_sha256)?;

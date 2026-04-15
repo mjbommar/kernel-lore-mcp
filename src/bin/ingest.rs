@@ -88,10 +88,25 @@ fn main() -> Result<()> {
     // serialize bm25.add calls.
     let bm25 = Mutex::new(_core::BmWriter::open(&data_dir).context("open BM25 writer")?);
 
+    // One shared Store per list. When a list has multiple shards
+    // (e.g. lkml has 19), every shard in that list MUST serialize
+    // its store appends through the same SegmentWriter so the
+    // offset counter stays correct. Without this, parallel shards
+    // from the same list produce metadata with stale offsets.
+    let mut stores: std::collections::HashMap<String, Mutex<_core::Store>> =
+        std::collections::HashMap::new();
+    for shard in &shards {
+        stores.entry(shard.list.clone()).or_insert_with(|| {
+            Mutex::new(
+                _core::Store::open(&data_dir, &shard.list).expect("failed to open store for list"),
+            )
+        });
+    }
+
     let start = Instant::now();
     let totals = shards
         .par_iter()
-        .map(|shard| ingest_one(&data_dir, shard, &run_id, &bm25))
+        .map(|shard| ingest_one(&data_dir, shard, &run_id, &bm25, &stores))
         .collect::<Vec<_>>();
 
     // Commit BM25 once, after all shards finish.
@@ -160,8 +175,12 @@ fn ingest_one(
     shard: &ShardRef,
     run_id: &str,
     bm25: &Mutex<_core::BmWriter>,
+    stores: &std::collections::HashMap<String, Mutex<_core::Store>>,
 ) -> Result<_core::IngestStats> {
     let per_shard_run_id = format!("{run_id}-{}-{}", shard.list, shard.shard);
+    let shared_store = stores
+        .get(&shard.list)
+        .ok_or_else(|| anyhow::anyhow!("no shared store for list {:?}", shard.list))?;
     let stats = _core::ingest_shard_with_bm25(
         data_dir,
         &shard.path,
@@ -169,6 +188,7 @@ fn ingest_one(
         &shard.shard,
         &per_shard_run_id,
         Some(bm25),
+        Some(shared_store),
     )
     .with_context(|| {
         format!(

@@ -53,6 +53,7 @@ pub const COL_FIXES: &str = "fixes";
 pub const COL_LINK: &str = "link";
 pub const COL_CLOSES: &str = "closes";
 pub const COL_CC_STABLE: &str = "cc_stable";
+pub const COL_BODY_SEGMENT_ID: &str = "body_segment_id";
 pub const COL_BODY_OFFSET: &str = "body_offset";
 pub const COL_BODY_LENGTH: &str = "body_length";
 pub const COL_BODY_SHA256: &str = "body_sha256";
@@ -108,6 +109,7 @@ pub fn metadata_schema() -> Arc<Schema> {
         Field::new(COL_LINK, utf8_list.clone(), true),
         Field::new(COL_CLOSES, utf8_list.clone(), true),
         Field::new(COL_CC_STABLE, utf8_list, true),
+        Field::new(COL_BODY_SEGMENT_ID, DataType::UInt32, false),
         Field::new(COL_BODY_OFFSET, DataType::UInt64, false),
         Field::new(COL_BODY_LENGTH, DataType::UInt64, false),
         Field::new(COL_BODY_SHA256, DataType::Utf8, false),

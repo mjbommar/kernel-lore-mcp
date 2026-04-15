@@ -256,11 +256,37 @@ pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<V
     // BM25 tier
     if !parsed.free_text.is_empty() {
         let q = parsed.free_text.join(" ");
-        let scored = reader.prose_search(&q, limit)?;
+        // BM25 doesn't natively filter by list/from/since; we apply
+        // those predicates as a post-filter after RRF merge so they
+        // are honored regardless of which tier produced the hit.
+        let scored = reader.prose_search(&q, limit * 2)?;
         tier_results.insert("bm25", scored.into_iter().map(|(r, _)| r).collect());
     }
 
-    Ok(rrf_merge(tier_results, limit))
+    let mut merged = rrf_merge(tier_results, limit * 2);
+
+    // Post-filter: apply list/from/since predicates that not all
+    // tiers honored natively. This ensures a query like
+    // "list:linux-cifs ksmbd" never returns results from other lists,
+    // even though BM25 searched unfiltered.
+    if let Some(list) = &parsed.list {
+        merged.retain(|h| h.row.list == *list);
+    }
+    if let Some(from) = &parsed.from_addr {
+        let lc = from.to_lowercase();
+        merged.retain(|h| {
+            h.row
+                .from_addr
+                .as_ref()
+                .is_some_and(|a| a.to_lowercase().contains(&lc))
+        });
+    }
+    if let Some(since) = parsed.since_unix_ns {
+        merged.retain(|h| h.row.date_unix_ns.is_some_and(|d| d >= since));
+    }
+    merged.truncate(limit);
+
+    Ok(merged)
 }
 
 fn rrf_merge(tiers: HashMap<&'static str, Vec<MessageRow>>, limit: usize) -> Vec<RankedHit> {

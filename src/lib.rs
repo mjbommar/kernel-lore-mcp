@@ -52,6 +52,7 @@ pub use embedding::{EmbeddingBuilder, EmbeddingMeta, EmbeddingReader};
 pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25};
 pub use router::{CursorPayload, ParsedQuery, RankedHit, parse_query, sign_cursor, verify_cursor};
 pub use state::State;
+pub use store::Store;
 pub use tid::{TidRow, rebuild as rebuild_tid};
 
 #[pymodule]
