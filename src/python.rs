@@ -120,6 +120,27 @@ impl PyReader {
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
 
+    /// Free-text BM25 search over prose bodies + subjects. Returns
+    /// `[{..., "_score": f32}, ...]` (score attached inside the row
+    /// dict under the `_score` key).
+    #[pyo3(signature = (query, limit=25))]
+    fn prose_search<'py>(
+        &self,
+        py: Python<'py>,
+        query: String,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let scored = py.detach(|| self.inner.prose_search(&query, limit))?;
+        scored
+            .iter()
+            .map(|(row, score)| {
+                let d = row_to_pydict(py, row)?;
+                d.set_item("_score", *score)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     /// Substring search over patch bodies via the trigram tier.
     ///
     /// Returns a list of row dicts (same shape as `fetch_message`).

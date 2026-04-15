@@ -44,4 +44,9 @@ class Reader:
         list: str | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
+    def prose_search(
+        self,
+        query: str,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
     def fetch_body(self, message_id: str) -> bytes | None: ...

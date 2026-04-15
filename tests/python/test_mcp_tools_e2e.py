@@ -182,3 +182,27 @@ async def test_lore_patch_search_rejects_short_needle(client: Client) -> None:
 
     with pytest.raises(ToolError):
         await client.call_tool("lore_patch_search", {"needle": "xy"})
+
+
+@pytest.mark.asyncio
+async def test_lore_search_bm25_finds_prose_term(client: Client) -> None:
+    # Our synthetic fixture has two messages with distinctive prose
+    # words: m1 says "Prose here explaining the change" and m2 says
+    # "More prose." Both contain the token "prose"; only m1 contains
+    # "explaining" and only m2 contains "More".
+    result = await client.call_tool("lore_search", {"query": "explaining"})
+    data = result.data
+    assert [h.message_id for h in data.results] == ["m1@x"]
+    assert data.query_tiers_hit == ["bm25"]
+    assert data.results[0].tier_provenance == ["bm25"]
+    assert data.results[0].score is not None
+
+
+@pytest.mark.asyncio
+async def test_lore_search_phrase_query_rejected(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    # Double-quoted phrase is rejected by the Rust BM25 tier because
+    # positions are off by design.
+    with pytest.raises(ToolError, match="phrase queries"):
+        await client.call_tool("lore_search", {"query": '"ACL bounds"'})

@@ -18,9 +18,11 @@
 //!   * cover-letter → patch touched-file propagation (ditto)
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use gix::ObjectId;
 
+use crate::bm25::BmWriter;
 use crate::error::{Error, Result};
 use crate::metadata::{self, MetadataBatch, MetadataRow};
 use crate::parse;
@@ -59,6 +61,25 @@ pub fn ingest_shard_unlocked(
     shard: &str,
     run_id: &str,
 ) -> Result<IngestStats> {
+    ingest_shard_with_bm25(data_dir, shard_path, list, shard, run_id, None)
+}
+
+/// Full-control variant: accepts an optional shared `BmWriter` so
+/// multi-shard binaries can fan out via rayon while still writing to
+/// a single tantivy index (tantivy's own index lock is exclusive).
+///
+/// - When `shared_bm25` is `Some(mutex)`, the caller is responsible
+///   for committing it once per run, after all shards finish.
+/// - When `None`, this function opens its own writer, commits, and
+///   drops it when the shard finishes.
+pub fn ingest_shard_with_bm25(
+    data_dir: &Path,
+    shard_path: &Path,
+    list: &str,
+    shard: &str,
+    run_id: &str,
+    shared_bm25: Option<&Mutex<BmWriter>>,
+) -> Result<IngestStats> {
     let state = State::new(data_dir)?;
     let store = Store::open(data_dir, list)?;
 
@@ -90,6 +111,15 @@ pub fn ingest_shard_unlocked(
 
     let mut batch = MetadataBatch::new();
     let mut trigram = TrigramBuilder::new();
+    // local_bm25 is Some when the caller didn't supply a shared
+    // writer (single-shard / Python path). We commit it ourselves at
+    // the end; multi-shard binaries hand us shared_bm25 and commit
+    // once outside.
+    let mut local_bm25: Option<BmWriter> = if shared_bm25.is_none() {
+        Some(BmWriter::open(data_dir)?)
+    } else {
+        None
+    };
     let mut stats = IngestStats::default();
 
     for info in walk {
@@ -125,6 +155,32 @@ pub fn ingest_shard_unlocked(
             trigram.add(&mid, patch_text.as_bytes())?;
         }
 
+        // Prose (body minus patch) + normalized subject go to BM25.
+        if !parsed.prose.is_empty() || parsed.subject_normalized.is_some() {
+            match (&mut local_bm25, shared_bm25) {
+                (Some(w), _) => {
+                    w.add(
+                        &mid,
+                        list,
+                        parsed.subject_normalized.as_deref(),
+                        &parsed.prose,
+                    )?;
+                }
+                (None, Some(mutex)) => {
+                    let mut w = mutex
+                        .lock()
+                        .map_err(|_| Error::State("shared bm25 writer poisoned".to_owned()))?;
+                    w.add(
+                        &mid,
+                        list,
+                        parsed.subject_normalized.as_deref(),
+                        &parsed.prose,
+                    )?;
+                }
+                (None, None) => {}
+            }
+        }
+
         let appended = store.append(data)?;
         let row = MetadataRow {
             list,
@@ -158,6 +214,13 @@ pub fn ingest_shard_unlocked(
         stats.trigram_segment_path = Some(seg.display().to_string());
     }
 
+    // BM25 commit: only if we own the writer. Shared-writer callers
+    // commit once at end-of-run.
+    if let Some(mut w) = local_bm25 {
+        let opstamp = w.commit()?;
+        stats.bm25_opstamp = Some(opstamp);
+    }
+
     state.save_last_indexed_oid(list, shard, &head_hex)?;
     state.bump_generation()?;
 
@@ -173,6 +236,7 @@ pub struct IngestStats {
     pub skipped_no_mid: u64,
     pub parquet_path: Option<String>,
     pub trigram_segment_path: Option<String>,
+    pub bm25_opstamp: Option<u64>,
 }
 
 fn hex(bytes: &[u8]) -> String {

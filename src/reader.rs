@@ -235,6 +235,38 @@ impl Reader {
         Ok(out)
     }
 
+    /// Free-text BM25 search over prose (body minus patch) +
+    /// subject_normalized. Returns ranked hits with their scores.
+    ///
+    /// Phrase queries (`"..."`) are rejected — positions are off by
+    /// design. Use `patch_search` for literal substrings in code.
+    pub fn prose_search(&self, query: &str, limit: usize) -> Result<Vec<(MessageRow, f32)>> {
+        use crate::bm25::BmReader;
+        let bm = BmReader::open(&self.data_dir)?;
+        let top = bm.search(query, limit)?;
+        if top.is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashMap<String, f32> =
+            top.iter().map(|(m, s)| (m.clone(), *s)).collect();
+
+        let mut rows = Vec::new();
+        self.scan(
+            |r| wanted.contains_key(&r.message_id),
+            |r| {
+                rows.push(r);
+                true
+            },
+        )?;
+        let mut scored: Vec<(MessageRow, f32)> = rows
+            .into_iter()
+            .filter_map(|r| wanted.get(&r.message_id).map(|s| (r, *s)))
+            .collect();
+        scored.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored)
+    }
+
     /// Substring search over patch content via the trigram tier,
     /// confirmed against the decompressed body.
     ///

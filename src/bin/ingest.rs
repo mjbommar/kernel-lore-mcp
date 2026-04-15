@@ -22,6 +22,7 @@
 //! daemonization. Cron invokes it periodically.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -81,11 +82,25 @@ fn main() -> Result<()> {
         .acquire_writer_lock()
         .context("another ingest process is running (writer.lock held)")?;
 
+    // Single shared BM25 writer for the whole run. tantivy's
+    // IndexWriter takes an exclusive directory lock; a per-shard
+    // writer would block every peer. Mutex-wrap and let rayon
+    // serialize bm25.add calls.
+    let bm25 = Mutex::new(_core::BmWriter::open(&data_dir).context("open BM25 writer")?);
+
     let start = Instant::now();
     let totals = shards
         .par_iter()
-        .map(|shard| ingest_one(&data_dir, shard, &run_id))
+        .map(|shard| ingest_one(&data_dir, shard, &run_id, &bm25))
         .collect::<Vec<_>>();
+
+    // Commit BM25 once, after all shards finish.
+    {
+        let mut w = bm25
+            .lock()
+            .map_err(|_| anyhow::anyhow!("bm25 writer mutex poisoned"))?;
+        w.commit().context("bm25 commit")?;
+    }
 
     let mut total_ingested: u64 = 0;
     let mut total_failed: u64 = 0;
@@ -130,14 +145,20 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn ingest_one(data_dir: &Path, shard: &ShardRef, run_id: &str) -> Result<_core::IngestStats> {
+fn ingest_one(
+    data_dir: &Path,
+    shard: &ShardRef,
+    run_id: &str,
+    bm25: &Mutex<_core::BmWriter>,
+) -> Result<_core::IngestStats> {
     let per_shard_run_id = format!("{run_id}-{}-{}", shard.list, shard.shard);
-    let stats = _core::ingest_shard_unlocked(
+    let stats = _core::ingest_shard_with_bm25(
         data_dir,
         &shard.path,
         &shard.list,
         &shard.shard,
         &per_shard_run_id,
+        Some(bm25),
     )
     .with_context(|| {
         format!(

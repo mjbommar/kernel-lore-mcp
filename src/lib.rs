@@ -44,7 +44,8 @@ mod trigram;
 // Library re-exports for the `kernel-lore-ingest` binary (and any
 // future internal tooling) so they don't have to name the module
 // paths.
-pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked};
+pub use bm25::BmWriter;
+pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25};
 pub use state::State;
 
 #[pymodule]

@@ -28,9 +28,20 @@ async def test_tools_list(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_lore_search_empty_response(client: Client) -> None:
-    result = await client.call_tool("lore_search", {"query": "test", "limit": 5})
-    # FastMCP returns the pydantic model instance as result.data when the
-    # tool is annotated with a BaseModel return type (see models.py).
+    # With no data ingested under the default data_dir, BM25 returns
+    # no rows — still a valid SearchResponse shape.
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["KLMCP_DATA_DIR"] = tmp
+        try:
+            result = await client.call_tool(
+                "lore_search", {"query": "unlikely_term_xyzzy", "limit": 5}
+            )
+        finally:
+            os.environ.pop("KLMCP_DATA_DIR", None)
+
     assert result.data is not None
     assert result.data.results == []
     assert result.data.next_cursor is None
