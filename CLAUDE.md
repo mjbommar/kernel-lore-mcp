@@ -10,7 +10,10 @@
 - **Legal posture:** [`LEGAL.md`](./LEGAL.md).
 - **Security policy:** [`SECURITY.md`](./SECURITY.md).
 - **Governance:** [`GOVERNANCE.md`](./GOVERNANCE.md).
-- **Next-phase plan (Phases 10–17, MCP-spec coverage + UX uplift):**
+- **Top-level 6-month roadmap (best-in-class kernel-research MCP, supersedes framing of the uplift plan):**
+  [`docs/plans/2026-04-14-best-in-class-kernel-mcp.md`](./docs/plans/2026-04-14-best-in-class-kernel-mcp.md).
+  Built on four research streams under [`docs/research/2026-04-14-*`](./docs/research/).
+- **MCP-surface detail (Phases 10–17, still authoritative for code-level scope):**
   [`docs/plans/2026-04-15-mcp-spec-coverage-and-uplift.md`](./docs/plans/2026-04-15-mcp-spec-coverage-and-uplift.md).
   Includes the full lessons-learned retro at the bottom.
 
