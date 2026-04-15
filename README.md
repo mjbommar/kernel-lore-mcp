@@ -12,20 +12,17 @@ everywhere. Every agent that asks us a question is one fewer
 agent scraping lore directly; fanout-to-one is the value
 proposition.
 
-## Quick start (10 minutes, zero accounts)
+## Quick start (5 minutes, zero accounts)
 
 ```sh
-# 1. prereqs
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain stable
+# 1. install — one command, pre-built abi3 wheel, no Rust toolchain required
+uv tool install kernel-lore-mcp
 uv tool install grokmirror
 
-# 2. clone + build (Rust extension + ingest CLI)
-git clone https://github.com/mjbommar/kernel-lore-mcp.git
+# 2. fetch the scripts + grokmirror configs (they live in the git repo,
+#    not in the wheel)
+git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
-uv sync
-uv run maturin develop --release
-cargo build --release --bin kernel-lore-ingest
 
 # 3. first sync — narrow scope, ~1.5 GB, 3-10 min
 export KLMCP_DATA_DIR=~/klmcp-data
@@ -35,23 +32,41 @@ KLMCP_GROKMIRROR_CONF_TEMPLATE="$PWD/scripts/grokmirror-personal.conf" \
     ./scripts/klmcp-grok-pull.sh
 
 # 4. first ingest — ~10-30 min
-./target/release/kernel-lore-ingest \
-    --data-dir "$KLMCP_DATA_DIR" \
-    --lore-mirror "$KLMCP_DATA_DIR/shards"
+kernel-lore-ingest --data-dir "$KLMCP_DATA_DIR" \
+                   --lore-mirror "$KLMCP_DATA_DIR/shards"
 
-# 5. confirm freshness
-./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
+# 5. confirm freshness (no HTTP server needed)
+kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # { "generation": >= 1, "freshness_ok": true, ... }
 
-# 6. verify the MCP surface (no API keys needed)
+# 6. verify the MCP surface — zero API cost
 ./scripts/agentic_smoke.sh local
 # PASS: 6/6 tools, 5/5 resource templates, 5/5 prompts.
 ```
 
 Then pick your agent and copy its snippet from
-[`docs/mcp/client-config.md`](./docs/mcp/client-config.md). All
-four clients (Claude Code, Codex, Cursor, Zed) work over stdio
-with the exact same server binary.
+[`docs/mcp/client-config.md`](./docs/mcp/client-config.md). All four
+clients (Claude Code, Codex, Cursor, Zed) work over stdio against
+the exact same server binary.
+
+### Install from source
+
+Contributing? Or want the faster rayon-fanout Rust ingest binary?
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain stable
+git clone https://github.com/mjbommar/kernel-lore-mcp.git
+cd kernel-lore-mcp
+uv sync
+uv run maturin develop --release
+# optional: build the native ingest binary for multi-shard fan-out
+cargo build --release --bin kernel-lore-ingest
+./target/release/kernel-lore-ingest --data-dir $KLMCP_DATA_DIR \
+    --lore-mirror $KLMCP_DATA_DIR/shards
+```
+
+### Going bigger
 
 Want fuller coverage? Swap `grokmirror-personal.conf` for
 `grokmirror.conf` to mirror all ~390 lists (~55 GB).

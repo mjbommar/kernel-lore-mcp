@@ -49,11 +49,18 @@ dev = [
 [project.scripts]
 kernel-lore-mcp = "kernel_lore_mcp.__main__:main"
 kernel-lore-embed = "kernel_lore_mcp.cli.embed:main"
+# Python wrapper over _core.ingest_shard so `uv tool install
+# kernel-lore-mcp` ships a working ingest CLI without requiring a
+# Rust toolchain. The rayon-fanout Rust binary at src/bin/ingest.rs
+# remains the fast path for hosted deploys.
+kernel-lore-ingest = "kernel_lore_mcp.cli.ingest:main"
 
 [project.urls]
 Homepage = "https://github.com/mjbommar/kernel-lore-mcp"
 Repository = "https://github.com/mjbommar/kernel-lore-mcp"
 Issues = "https://github.com/mjbommar/kernel-lore-mcp/issues"
+Documentation = "https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/runbook.md"
+Changelog = "https://github.com/mjbommar/kernel-lore-mcp/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["maturin>=1.13,<2.0"]

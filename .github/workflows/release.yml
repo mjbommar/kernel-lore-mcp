@@ -1,0 +1,153 @@
+# Release workflow — fires on `v*` tag push.
+#
+# Builds abi3 wheels for the three platforms we target
+# (linux-x86_64, linux-aarch64, macos-arm64), builds an sdist,
+# publishes to PyPI via OIDC Trusted Publisher (zero API tokens),
+# attaches wheels to a GitHub Release, and uses the CHANGELOG
+# section for that version as the release body.
+#
+# Configure the Trusted Publisher at
+#   https://pypi.org/manage/account/publishing/
+# with:
+#   owner   = mjbommar
+#   repo    = kernel-lore-mcp
+#   workflow = release.yml
+#   environment = pypi-release
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write          # upload assets + create GitHub Release
+  id-token: write          # OIDC token for PyPI trusted publishing
+
+jobs:
+  build-wheels:
+    name: wheel — ${{ matrix.target.name }}
+    runs-on: ${{ matrix.target.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - name: linux-x86_64
+            runs-on: ubuntu-latest
+            maturin-target: x86_64-unknown-linux-gnu
+            manylinux: "2_39"
+          - name: linux-aarch64
+            runs-on: ubuntu-latest
+            maturin-target: aarch64-unknown-linux-gnu
+            manylinux: "2_39"
+          - name: macos-arm64
+            runs-on: macos-14
+            maturin-target: aarch64-apple-darwin
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build wheel via maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target.maturin-target }}
+          args: --release --out dist --features abi3
+          manylinux: ${{ matrix.target.manylinux }}
+          # Cross-compile for aarch64 from an x86_64 runner.
+          docker-options: ${{ matrix.target.name == 'linux-aarch64' && '--platform=linux/arm64' || '' }}
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: wheel-${{ matrix.target.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  build-sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish-pypi:
+    name: publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-release
+      url: https://pypi.org/project/kernel-lore-mcp/
+    steps:
+      - name: Download all artifacts into dist/
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Publish via Trusted Publisher (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: false
+          print-hash: true
+
+  github-release:
+    name: create GitHub Release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          pattern: "*"
+          merge-multiple: true
+
+      - name: Extract CHANGELOG section for this tag
+        id: changelog
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"          # e.g. v0.1.0
+          version="${tag#v}"                # 0.1.0
+          # Pull everything between "## [<version>]" and the next "## ["
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; print; next }
+            grab && $0 ~ "^## \\[" { exit }
+            grab { print }
+          ' CHANGELOG.md > release-body.md
+          if [ ! -s release-body.md ]; then
+            echo "no CHANGELOG section for $version; falling back to tag name"
+            echo "Release $tag" > release-body.md
+          fi
+          echo "body_file=release-body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.changelog.outputs.body_file }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          make_latest: true
