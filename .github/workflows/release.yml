@@ -20,6 +20,14 @@ on:
   push:
     tags:
       - "v*"
+  # Manual trigger so we can re-run the wheel-matrix without cutting
+  # a new tag (useful for debugging a specific arch).
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Actually publish to PyPI + GitHub Release? (default: false — just build wheels)"
+        required: false
+        default: "false"
 
 permissions:
   contents: write          # upload assets + create GitHub Release
@@ -37,8 +45,13 @@ jobs:
             runs-on: ubuntu-latest
             maturin-target: x86_64-unknown-linux-gnu
             manylinux: "2_39"
+          # Native arm64 runner. Free on public repos since Oct 2024.
+          # Cross-compiling with zstd-sys's cc-rs build.rs needs the
+          # target-platform C toolchain which isn't in the default
+          # manylinux containers; running natively sidesteps the
+          # whole problem.
           - name: linux-aarch64
-            runs-on: ubuntu-latest
+            runs-on: ubuntu-24.04-arm
             maturin-target: aarch64-unknown-linux-gnu
             manylinux: "2_39"
           - name: macos-arm64
@@ -99,6 +112,13 @@ jobs:
   publish-pypi:
     name: publish to PyPI
     needs: [build-wheels, build-sdist]
+    # Publish on tag push, or on workflow_dispatch with publish=true.
+    # A plain workflow_dispatch (publish=false) only builds wheels for
+    # inspection — handy for debugging a specific arch without
+    # cutting a throwaway version.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true')
     runs-on: ubuntu-latest
     environment:
       name: pypi-release
@@ -124,6 +144,9 @@ jobs:
   github-release:
     name: create GitHub Release
     needs: publish-pypi
+    # Only fires for real tag pushes. workflow_dispatch runs never
+    # create a release (no tag to hang it off of).
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
