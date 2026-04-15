@@ -1,0 +1,42 @@
+[Unit]
+Description=kernel-lore-mcp: ingest mirrored shards into the three-tier index
+Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
+# Depends on a healthy mirror on disk. Does NOT require the mcp-server
+# to be running; query side reloads via generation-file mtime.
+After=klmcp-grokmirror.service
+
+[Service]
+Type=oneshot
+User=kernel-lore-mcp
+Group=kernel-lore-mcp
+EnvironmentFile=/etc/kernel-lore-mcp/env
+
+ExecStart=/usr/local/lib/kernel-lore-mcp/klmcp-ingest.sh
+
+# Ingest is the hot path — give it real CPU + memory.
+CPUQuota=400%
+MemoryMax=8G
+TasksMax=256
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/kernel-lore-mcp
+ReadOnlyPaths=/etc/kernel-lore-mcp
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+
+# If ingest crashes, don't auto-retry — the next grok-pull tick will
+# touch the trigger and re-fire us.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

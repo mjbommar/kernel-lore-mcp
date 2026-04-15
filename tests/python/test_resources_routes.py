@@ -103,6 +103,18 @@ def test_status_route_reports_generation_and_per_list(http_client: TestClient) -
     assert body["blind_spots_ref"] == "blind-spots://coverage"
 
 
+def test_status_route_reports_cadence_and_freshness(http_client: TestClient) -> None:
+    r = http_client.get("/status")
+    body = r.json()
+    # New fields added with the 5-min cadence work. Freshness should be
+    # OK (just-ingested; age << 3x interval).
+    assert body["configured_interval_seconds"] == 300  # default policy
+    assert body["last_ingest_age_seconds"] is not None
+    assert body["last_ingest_age_seconds"] >= 0
+    assert body["last_ingest_age_seconds"] < 3 * 300
+    assert body["freshness_ok"] is True
+
+
 def test_metrics_route_serves_prometheus_text(http_client: TestClient) -> None:
     r = http_client.get("/metrics")
     assert r.status_code == 200
@@ -112,3 +124,40 @@ def test_metrics_route_serves_prometheus_text(http_client: TestClient) -> None:
     # present in the registry's exposition.
     assert "kernel_lore_mcp_index_generation" in body
     assert "kernel_lore_mcp_tool_calls_total" in body
+
+
+def test_metrics_route_publishes_freshness_gauges(http_client: TestClient) -> None:
+    r = http_client.get("/metrics")
+    body = r.text
+    # Each gauge appears as a HELP + TYPE + value line.
+    assert "kernel_lore_mcp_last_ingest_age_seconds" in body
+    assert "kernel_lore_mcp_configured_interval_seconds" in body
+    assert "kernel_lore_mcp_freshness_ok" in body
+    # Configured interval should round-trip the policy default.
+    assert "kernel_lore_mcp_configured_interval_seconds 300" in body
+    # freshness_ok flips on after a live ingest.
+    assert "kernel_lore_mcp_freshness_ok 1.0" in body
+
+
+def test_status_route_reports_freshness_false_on_stale_data(
+    http_client: TestClient,
+) -> None:
+    """Dial the age back past 3x interval by backdating the generation
+    file's mtime; /status must report freshness_ok=False so monitoring
+    can alert.
+    """
+    import os as _os
+    import time as _time
+
+    from kernel_lore_mcp.config import Settings
+
+    data_dir = Settings().data_dir
+    gen_file = data_dir / "state" / "generation"
+    # 3x default interval + buffer.
+    stale_mtime = _time.time() - (3 * 300) - 60
+    _os.utime(gen_file, (stale_mtime, stale_mtime))
+    status_mod.clear_cache()
+
+    body = http_client.get("/status").json()
+    assert body["freshness_ok"] is False
+    assert body["last_ingest_age_seconds"] > 3 * 300

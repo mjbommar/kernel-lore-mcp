@@ -68,11 +68,27 @@ def _build_status(settings: Settings) -> dict[str, Any]:
     data_dir = settings.data_dir
     generation, last_ingest = _read_generation(data_dir)
     per_list = _per_list_shards(data_dir)
+
+    interval = settings.grokmirror_interval_seconds
+    last_ingest_age_seconds: int | None = None
+    freshness_ok: bool | None = None
+    if last_ingest is not None:
+        last_ingest_age_seconds = max(
+            0,
+            int((datetime.now(tz=UTC) - last_ingest).total_seconds()),
+        )
+        # 3x the configured interval is the "we should alert" threshold
+        # that pairs with the Prometheus gauge.
+        freshness_ok = last_ingest_age_seconds < 3 * interval
+
     return {
         "service": "kernel-lore-mcp",
         "version": _native_version(),
         "generation": generation,
         "last_ingest_utc": last_ingest.isoformat() if last_ingest else None,
+        "last_ingest_age_seconds": last_ingest_age_seconds,
+        "configured_interval_seconds": interval,
+        "freshness_ok": freshness_ok,
         "per_list": per_list,
         "blind_spots_ref": "blind-spots://coverage",
     }

@@ -1,0 +1,27 @@
+[Unit]
+Description=kernel-lore-mcp: 5-min grokmirror cadence
+Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
+Requires=klmcp-grokmirror.service
+
+[Timer]
+# First pull fires 60s after boot so the network settles.
+OnBootSec=60s
+
+# Repeat every KLMCP_GROKMIRROR_INTERVAL_SECONDS. Default 300 per
+# docs/ops/update-frequency.md. Override by editing the unit; the
+# default is the policy number.
+OnUnitActiveSec=300s
+
+# Jitter up to ±30s so a fleet of self-hosted instances doesn't
+# all hammer lore at :00, :05, :10, etc.
+RandomizedDelaySec=30s
+
+# Run missed triggers (e.g. after a reboot) exactly once, not a
+# catch-up flurry.
+AccuracySec=30s
+Persistent=true
+
+Unit=klmcp-grokmirror.service
+
+[Install]
+WantedBy=timers.target

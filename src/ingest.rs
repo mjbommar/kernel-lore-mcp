@@ -386,4 +386,180 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         // Generation only bumps on new data.
         assert_eq!(state.generation().unwrap(), 1);
     }
+
+    /// Append two fresh messages to an already-ingested shard and
+    /// re-ingest. Generation must bump exactly once; row count must
+    /// grow by two; metadata mtime must advance. This models the
+    /// common 5-min grokmirror cadence case.
+    #[test]
+    fn incremental_append_bumps_generation_and_rows() {
+        use crate::reader::Reader as CoreReader;
+
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let initial = sample_messages();
+        let initial_refs: Vec<&[u8]> = initial.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &initial_refs);
+
+        let data = tempdir().unwrap();
+        let first = ingest_shard(data.path(), &shard_dir, "linux-cifs", "0", "r1").unwrap();
+        assert_eq!(first.ingested, 2);
+        let gen_after_first = State::new(data.path()).unwrap().generation().unwrap();
+        assert_eq!(gen_after_first, 1);
+
+        // Append two new messages via a fresh working-tree clone.
+        let extra = vec![
+            b"From: Carol <carol@example.com>\r\n\
+Subject: [PATCH] ksmbd: third patch\r\n\
+Date: Mon, 14 Apr 2026 13:00:00 +0000\r\n\
+Message-ID: <m3@x>\r\n\
+\r\n\
+Prose.\r\n"
+                .to_vec(),
+            b"From: Dave <dave@example.com>\r\n\
+Subject: [PATCH] ksmbd: fourth patch\r\n\
+Date: Mon, 14 Apr 2026 14:00:00 +0000\r\n\
+Message-ID: <m4@x>\r\n\
+\r\n\
+Prose.\r\n"
+                .to_vec(),
+        ];
+        append_messages_to_bare(&shard_dir, &extra);
+
+        let second = ingest_shard(data.path(), &shard_dir, "linux-cifs", "0", "r2").unwrap();
+        assert_eq!(second.ingested, 2, "only the two new commits should ingest");
+        let gen_after_second = State::new(data.path()).unwrap().generation().unwrap();
+        assert_eq!(
+            gen_after_second,
+            gen_after_first + 1,
+            "generation bumps exactly once on incremental append"
+        );
+
+        // Reader sees all four messages without any explicit reload.
+        let reader = CoreReader::new(data.path());
+        for mid in ["m1@x", "m2@x", "m3@x", "m4@x"] {
+            assert!(
+                reader.fetch_message(mid).unwrap().is_some(),
+                "reader missing {mid:?} after incremental ingest"
+            );
+        }
+    }
+
+    /// If the recorded last-indexed OID is missing from the shard
+    /// (typical after public-inbox repack), the walker must fall
+    /// through to a full re-walk instead of aborting.
+    #[test]
+    fn dangling_oid_falls_back_to_full_rewalk() {
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let msgs = sample_messages();
+        let msg_refs: Vec<&[u8]> = msgs.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &msg_refs);
+
+        let data = tempdir().unwrap();
+        let _first = ingest_shard(data.path(), &shard_dir, "l", "0", "a").unwrap();
+
+        // Poison the state: claim we last indexed an OID that doesn't
+        // exist in this repo. The ingest path must detect that and
+        // fall back to rewalking from HEAD.
+        let state = State::new(data.path()).unwrap();
+        state
+            .save_last_indexed_oid("l", "0", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            .unwrap();
+
+        let second = ingest_shard(data.path(), &shard_dir, "l", "0", "b").unwrap();
+        // Fallback re-walks from HEAD and re-ingests every message.
+        // Dedup lives at query time (readers pick the freshest row
+        // for a given message_id), not at write time, so public-inbox
+        // v2's "message edit" semantics survive. The storage cost is
+        // bounded by shard-repack frequency and is negligible at our
+        // scale.
+        assert_eq!(
+            second.ingested, 2,
+            "fallback re-walk should re-ingest every commit"
+        );
+        let oid = state.last_indexed_oid("l", "0").unwrap().unwrap();
+        assert_ne!(
+            oid, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "OID must advance to the real HEAD after fallback re-walk"
+        );
+        // Generation bumps on the re-walk (new write happened).
+        assert_eq!(
+            state.generation().unwrap(),
+            2,
+            "fallback re-walk counts as one ingest"
+        );
+    }
+
+    /// Three consecutive ingests with no shard changes: generation
+    /// must stay flat after the first. Pins the contract that
+    /// grokmirror ticks with no changed shards cost zero writes.
+    #[test]
+    fn idle_ticks_do_not_bump_generation() {
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let msgs = sample_messages();
+        let msg_refs: Vec<&[u8]> = msgs.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &msg_refs);
+
+        let data = tempdir().unwrap();
+        ingest_shard(data.path(), &shard_dir, "l", "0", "a").unwrap();
+        ingest_shard(data.path(), &shard_dir, "l", "0", "b").unwrap();
+        ingest_shard(data.path(), &shard_dir, "l", "0", "c").unwrap();
+
+        let state = State::new(data.path()).unwrap();
+        assert_eq!(
+            state.generation().unwrap(),
+            1,
+            "idle ticks must not bump generation"
+        );
+    }
+
+    /// Append `messages` as one-per-commit atop an existing bare shard
+    /// via an intermediate working clone, then push back. Mimics the
+    /// grokmirror delta-packfile path.
+    fn append_messages_to_bare(shard_dir: &Path, messages: &[Vec<u8>]) {
+        let run = |args: &[&str], cwd: &Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "tester")
+                .env("GIT_AUTHOR_EMAIL", "t@e")
+                .env("GIT_COMMITTER_NAME", "tester")
+                .env("GIT_COMMITTER_EMAIL", "t@e")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+
+        let work = tempdir().unwrap();
+        run(
+            &[
+                "clone",
+                "-q",
+                shard_dir.to_str().unwrap(),
+                work.path().to_str().unwrap(),
+            ],
+            Path::new("/"),
+        );
+        // Let a bare source receive pushes.
+        run(
+            &["config", "receive.denyCurrentBranch", "updateInstead"],
+            shard_dir,
+        );
+        for (i, msg) in messages.iter().enumerate() {
+            std::fs::write(work.path().join("m"), msg).unwrap();
+            run(&["add", "m"], work.path());
+            run(
+                &["commit", "-q", "-m", &format!("appended {i}")],
+                work.path(),
+            );
+        }
+        run(&["push", "-q", "origin", "HEAD"], work.path());
+    }
 }

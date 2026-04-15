@@ -5,6 +5,7 @@
 - **Standards:** [`docs/standards/`](./docs/standards/).
 - **Reciprocity:** [`docs/architecture/reciprocity.md`](./docs/architecture/reciprocity.md).
 - **Threat model:** [`docs/ops/threat-model.md`](./docs/ops/threat-model.md).
+- **Update frequency / cadence policy:** [`docs/ops/update-frequency.md`](./docs/ops/update-frequency.md).
 - **Training retriever north star:** [`docs/research/training-retriever.md`](./docs/research/training-retriever.md).
 - **Deployment modes:** [`docs/architecture/deployment-modes.md`](./docs/architecture/deployment-modes.md).
 - **Legal posture:** [`LEGAL.md`](./LEGAL.md).

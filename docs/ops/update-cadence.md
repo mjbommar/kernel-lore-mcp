@@ -1,18 +1,36 @@
 # Ops — update cadence
 
+**See [`update-frequency.md`](./update-frequency.md) for the
+authoritative policy doc + cost analysis.** This file documents the
+per-stage cadence; the policy file documents the *why*.
+
 ## Pull cadence (lore → disk)
 
-- `grok-pull` cron at `*/10 * * * *` (every 10 minutes).
-- lore.kernel.org itself trails vger by 1–5 minutes, so p95 freshness
-  from send → our disk is ~15–20 minutes. Don't promise better.
+- `grok-pull` fires every **5 minutes** via the
+  `klmcp-grokmirror.timer` systemd unit (not cron — timer +
+  debounced path-trigger gives cleaner journal + restart semantics).
+- lore.kernel.org itself trails vger by 1–5 minutes; our tick adds
+  at most 5 min of jitter; ingest adds <1 min. End-to-end p50 ~5 min,
+  p95 ~11 min.
+- Self-hosters can override via `KLMCP_GROKMIRROR_INTERVAL_SECONDS`
+  (floor 60 s, ceiling 3600 s). Hosted instance runs the 300 s
+  default by policy.
 
 ## Ingestion cadence (disk → indices)
 
-- After every successful `grok-pull`, we invoke `_native.ingest.run_once`
-  synchronously in a single worker. Idempotent; overlapping runs
-  short-circuit via a filesystem lock.
-- Full ingestion of new commits since last run usually finishes in
-  seconds (lore produces <50k new messages/hour worst case).
+- `grok-pull`'s `post_update_hook` touches
+  `$KLMCP_DATA_DIR/state/grokpull.trigger`; the
+  `klmcp-ingest.path` unit watches that file and fires
+  `klmcp-ingest.service` exactly once per successful pull.
+- The ingest driver (`scripts/klmcp-ingest.sh`) enforces a minimum
+  `KLMCP_INGEST_DEBOUNCE_SECONDS` gap (default 30 s) between
+  consecutive runs regardless of trigger rate.
+- Single-writer invariant: ingest acquires an exclusive `flock` on
+  `state/writer.lock` (`src/state.rs::acquire_writer_lock`). A
+  racing ingest returns fast with "another ingest is already
+  running"; no deadlocks, no corruption.
+- Cost of one tick with ~17 new messages: ~200–500 ms of one vCPU.
+  Idle ticks (no changed shards) cost ~50 ms on disk stat alone.
 
 ## Index swap
 

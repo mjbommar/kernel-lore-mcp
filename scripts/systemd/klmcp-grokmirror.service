@@ -1,0 +1,48 @@
+[Unit]
+Description=kernel-lore-mcp: grokmirror pull from lore.kernel.org
+Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
+# Do not run while a manual ingest is active; otherwise unconstrained.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=kernel-lore-mcp
+Group=kernel-lore-mcp
+
+# Required: where shards, state, logs live. Set via an EnvironmentFile
+# (see /etc/kernel-lore-mcp/env) — keep secrets + paths out of unit
+# metadata so `systemctl cat` doesn't leak them.
+EnvironmentFile=/etc/kernel-lore-mcp/env
+
+ExecStart=/usr/local/lib/kernel-lore-mcp/klmcp-grok-pull.sh
+
+# Lock the cgroup so a runaway grok-pull can't starve queries.
+CPUQuota=100%
+MemoryMax=1G
+TasksMax=64
+
+# Sandboxing. None of grok-pull's work needs write access outside
+# KLMCP_DATA_DIR.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/kernel-lore-mcp
+ReadOnlyPaths=/etc/kernel-lore-mcp
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+
+# Crashes mean "skip this tick" — the timer will fire again in 5 min.
+Restart=no
+
+[Install]
+# Wanted-by the timer; not a boot-time service.
+WantedBy=multi-user.target

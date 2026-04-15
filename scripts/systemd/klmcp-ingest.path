@@ -1,0 +1,14 @@
+[Unit]
+Description=kernel-lore-mcp: fire ingest after grokmirror pull completes
+Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
+
+[Path]
+# Debounced path trigger: klmcp-grok-pull.sh touches this file on
+# every successful tick, this path-unit fires klmcp-ingest.service.
+# The ingest script itself carries a KLMCP_INGEST_DEBOUNCE_SECONDS
+# floor so racing pulls don't stampede writers.
+PathChanged=/var/lib/kernel-lore-mcp/state/grokpull.trigger
+Unit=klmcp-ingest.service
+
+[Install]
+WantedBy=multi-user.target

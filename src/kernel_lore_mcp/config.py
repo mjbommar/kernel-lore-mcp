@@ -38,7 +38,31 @@ class Settings(BaseSettings):
 
     rate_limit_per_ip_per_minute: int = Field(
         default=60,
-        description="Anonymous-tier cap. Bearer tokens lift this.",
+        description=(
+            "Per-IP cap. Same limit for every caller — no auth tier, "
+            "ever; see CLAUDE.md §Non-negotiable product constraints."
+        ),
+    )
+
+    grokmirror_interval_seconds: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        description=(
+            "Seconds between grokmirror pulls. Default 300 per "
+            "docs/ops/update-frequency.md. Floor 60, ceiling 3600 — "
+            "tighter than 60s risks kernel.org infra politeness; "
+            "looser than 1h breaks the freshness promise."
+        ),
+    )
+    ingest_debounce_seconds: int = Field(
+        default=30,
+        ge=0,
+        le=600,
+        description=(
+            "Minimum gap between consecutive ingest runs regardless "
+            "of grok-pull trigger rate. Prevents overlapping writers."
+        ),
     )
 
     cursor_signing_key: str | None = Field(

@@ -1,0 +1,31 @@
+# /etc/kernel-lore-mcp/env
+#
+# Env for every klmcp-* systemd unit. Copy this to
+# /etc/kernel-lore-mcp/env (mode 0640, root:kernel-lore-mcp) and
+# adjust. Keep it OUT of unit files so `systemctl cat` / journal
+# tags don't accidentally leak local paths.
+
+# Required: where shards, state, compressed store, and all three
+# indices live. Sized per CLAUDE.md operational contract (gp3
+# 16000/1000). Owner: kernel-lore-mcp:kernel-lore-mcp.
+KLMCP_DATA_DIR=/var/lib/kernel-lore-mcp
+
+# Optional: override the default grokmirror config path.
+# KLMCP_GROKMIRROR_CONF=/usr/local/etc/kernel-lore-mcp/grokmirror.conf
+
+# Optional: debounce floor on ingest. 30s covers the overlap between
+# consecutive grok-pull ticks in pathological cases.
+# KLMCP_INGEST_DEBOUNCE_SECONDS=30
+
+# Optional: rayon worker count for the shard walker.
+# KLMCP_INGEST_CONCURRENCY=8
+
+# Optional: bind for the public MCP server. Default 127.0.0.1.
+# Set to 0.0.0.0 explicitly for the hosted instance (behind nginx).
+# KLMCP_BIND=127.0.0.1
+# KLMCP_PORT=8080
+
+# HMAC key for opaque cursor signing. Server-SIDE secret; callers
+# never see it. Rotate by restarting klmcp-mcp with a new value.
+# Generate with: openssl rand -hex 32
+KLMCP_CURSOR_KEY=REPLACE_WITH_openssl_rand_hex_32

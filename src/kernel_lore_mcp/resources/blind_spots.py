@@ -29,8 +29,14 @@ and select subsystem maintainer git trees. It does NOT see:
   * CVE Project in-flight embargoes
   * any discussion off-list (IRC, private email, video calls)
 
-Freshness: lore trails vger by 1-5 minutes; our ingestion adds
-another 10-20 minutes p95. See /status for per-list timestamps.
+Freshness: lore trails vger by 1-5 minutes. kernel-lore-mcp polls
+lore via grokmirror every 5 minutes by default, adding tick jitter
+plus <1 min of ingest processing. End-to-end p50 is ~5 min, p95
+~11 min. Every response carries a populated `freshness` block
+(`as_of`, `lag_seconds`, `generation`) so callers can reason about
+staleness per-query. See /status for the currently-configured
+cadence and the last-sync delta; see docs/ops/update-frequency.md
+for the full cadence policy.
 """
 
 

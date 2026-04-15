@@ -67,8 +67,32 @@ INDEX_GENERATION = Gauge(
     registry=REGISTRY,
 )
 
+LAST_INGEST_AGE = Gauge(
+    "kernel_lore_mcp_last_ingest_age_seconds",
+    "Seconds since the last successful ingest commit. -1 if no ingest yet.",
+    registry=REGISTRY,
+)
+
+CONFIGURED_INTERVAL = Gauge(
+    "kernel_lore_mcp_configured_interval_seconds",
+    "Configured grokmirror pull interval.",
+    registry=REGISTRY,
+)
+
+FRESHNESS_OK = Gauge(
+    "kernel_lore_mcp_freshness_ok",
+    "1 if last-ingest-age < 3x configured interval, 0 otherwise, -1 if unknown.",
+    registry=REGISTRY,
+)
+
 
 async def metrics_endpoint(request: Request) -> Response:
-    INDEX_GENERATION.set(get_status().get("generation", 0))
+    status = get_status()
+    INDEX_GENERATION.set(status.get("generation", 0))
+    age = status.get("last_ingest_age_seconds")
+    LAST_INGEST_AGE.set(age if age is not None else -1)
+    CONFIGURED_INTERVAL.set(status.get("configured_interval_seconds", 0))
+    ok = status.get("freshness_ok")
+    FRESHNESS_OK.set(1 if ok is True else (0 if ok is False else -1))
     body = generate_latest(REGISTRY)
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)

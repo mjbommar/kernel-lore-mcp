@@ -1,0 +1,45 @@
+[Unit]
+Description=kernel-lore-mcp: FastMCP server (Streamable HTTP)
+Documentation=https://github.com/mjbommar/kernel-lore-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kernel-lore-mcp
+Group=kernel-lore-mcp
+EnvironmentFile=/etc/kernel-lore-mcp/env
+
+# Serve MCP over Streamable HTTP. Defaults to 127.0.0.1:8080 per
+# CLAUDE.md; set KLMCP_BIND=0.0.0.0 in /etc/kernel-lore-mcp/env to
+# expose publicly. nginx in front handles TLS + per-IP rate limits
+# (docs/mcp/transport-auth.md).
+ExecStart=/usr/local/bin/kernel-lore-mcp --transport http --host ${KLMCP_BIND:-127.0.0.1} --port ${KLMCP_PORT:-8080}
+
+# Readers hold no writer lock; fine to reload on sight of new
+# generation without coordinating with ingest.
+Restart=on-failure
+RestartSec=5s
+
+CPUQuota=200%
+MemoryMax=4G
+TasksMax=256
+
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+# Server reads data_dir; never writes.
+ReadOnlyPaths=/var/lib/kernel-lore-mcp /etc/kernel-lore-mcp
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+
+[Install]
+WantedBy=multi-user.target
