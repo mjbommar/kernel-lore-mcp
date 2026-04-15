@@ -69,6 +69,11 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         lore_substr_subject,
         lore_substr_trailers,
     )
+    from kernel_lore_mcp.tools.sampling_tools import (
+        lore_classify_patch,
+        lore_explain_review_status,
+        lore_summarize_thread,
+    )
     from kernel_lore_mcp.tools.search import lore_search
     from kernel_lore_mcp.tools.series import lore_series_timeline
     from kernel_lore_mcp.tools.thread import lore_thread
@@ -114,6 +119,17 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     # actionable ToolError when the index hasn't been built yet.
     mcp.tool(lore_nearest, annotations=ann("Semantic nearest-neighbour on free text"))
     mcp.tool(lore_similar, annotations=ann("Nearest-neighbour on a seed message-id"))
+
+    # Phase 12 — sampling-backed tools with graceful extractive
+    # fallback. `backend` on every response tells the agent which
+    # path fired (sampled / extractive) so downstream confidence
+    # stays honest.
+    mcp.tool(lore_summarize_thread, annotations=ann("Summarize a thread (LLM or extractive)"))
+    mcp.tool(lore_classify_patch, annotations=ann("Classify a patch into a fixed label set"))
+    mcp.tool(
+        lore_explain_review_status,
+        annotations=ann("Explain open reviewer concerns + trailers seen"),
+    )
 
     # Register blind_spots as an MCP resource — fetch once per session.
     @mcp.resource(

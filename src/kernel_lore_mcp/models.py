@@ -306,3 +306,57 @@ class ExplainPatchResponse(BaseModel):
     )
     freshness: Freshness
     blind_spots_ref: str = "blind-spots://coverage"
+
+
+class SummarizeThreadResponse(BaseModel):
+    """`lore_summarize_thread` — short prose summary of a conversation.
+
+    `backend` tells the agent whether the summary came from the
+    client's LLM (via `ctx.sample()`) or from a deterministic
+    extractive fallback. Both paths are honest; the fallback is not
+    a degradation, it is a different algorithm that uses no tokens.
+    """
+
+    root_message_id: str
+    summary: str
+    backend: str = Field(
+        description='Either "sampled" (client LLM via ctx.sample) or "extractive" (deterministic fallback).',
+    )
+    message_count: int
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class ClassifyPatchResponse(BaseModel):
+    """`lore_classify_patch` — {bugfix|feature|cleanup|doc|test|merge|revert|backport|security|unknown}."""
+
+    message_id: str
+    label: str
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description='Populated on the extractive backend via rule weights; None for "sampled".',
+    )
+    rationale: str
+    backend: str
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
+class ExplainReviewStatusResponse(BaseModel):
+    """`lore_explain_review_status` — open reviewer concerns + trailers seen.
+
+    `open_concerns` is a list of short sentences extracted or
+    generated from replies. `trailers_seen` is the union of
+    structured trailers (reviewed_by/acked_by/tested_by) across the
+    whole thread — the agent can use it to tell "reviewed but
+    not acked" states.
+    """
+
+    root_message_id: str
+    open_concerns: list[str] = Field(default_factory=list)
+    trailers_seen: dict[str, list[str]] = Field(default_factory=dict)
+    backend: str
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
