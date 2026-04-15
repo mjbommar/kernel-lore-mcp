@@ -86,7 +86,7 @@ async def test_lore_activity_by_file(client: Client) -> None:
 async def test_lore_activity_requires_file_or_function(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 
-    with pytest.raises(ToolError, match="lore_activity requires"):
+    with pytest.raises(ToolError, match="invalid_argument"):
         await client.call_tool("lore_activity", {})
 
 
@@ -107,7 +107,7 @@ async def test_lore_message_returns_prose_and_patch(client: Client) -> None:
 async def test_lore_message_not_found(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 
-    with pytest.raises(ToolError, match="not found"):
+    with pytest.raises(ToolError, match="not_found"):
         await client.call_tool("lore_message", {"message_id": "nope@x"})
 
 

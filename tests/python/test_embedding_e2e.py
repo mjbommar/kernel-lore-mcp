@@ -100,7 +100,7 @@ async def test_lore_similar_with_include_seed(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_lore_similar_unknown_mid_raises(client: Client) -> None:
-    with pytest.raises(ToolError, match="not present in the embedding index"):
+    with pytest.raises(ToolError, match="seed_not_in_embedding_index"):
         await client.call_tool("lore_similar", {"message_id": "does-not-exist@x"})
 
 
@@ -116,9 +116,9 @@ async def test_lore_nearest_requires_built_index(tmp_path: Path) -> None:
     os.environ["KLMCP_DATA_DIR"] = str(data_dir)
     try:
         async with Client(build_server()) as c:
-            with pytest.raises(ToolError, match="not built"):
+            with pytest.raises(ToolError, match="embedding_index_not_built"):
                 await c.call_tool("lore_nearest", {"query": "anything"})
-            with pytest.raises(ToolError, match="not built"):
+            with pytest.raises(ToolError, match="embedding_index_not_built"):
                 await c.call_tool("lore_similar", {"message_id": "anything"})
     finally:
         os.environ.pop("KLMCP_DATA_DIR", None)

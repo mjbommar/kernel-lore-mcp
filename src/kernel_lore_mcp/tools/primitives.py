@@ -22,16 +22,18 @@ import difflib
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.errors import invalid_argument, unknown_enum
+from kernel_lore_mcp.freshness import build_freshness
+from kernel_lore_mcp.kwic import build_snippet
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import (
     CountResponse,
     DiffResponse,
-    Freshness,
     RowsResponse,
+    Snippet,
 )
 
 _EQ_FIELDS = {
@@ -90,9 +92,31 @@ def _from_ns(ns: int | None) -> datetime | None:
     return datetime.fromtimestamp(ns / 1_000_000_000, tz=UTC)
 
 
-def _rows_to_response(rows: list, *, tier: str) -> RowsResponse:
-    hits = [row_to_search_hit(r, tier_provenance=[tier]) for r in rows]
-    return RowsResponse(results=hits, total=len(hits), freshness=Freshness())
+def _subject_snippet(row: dict, needle: str) -> Snippet | None:
+    subject = row.get("subject_raw") or row.get("subject_normalized") or ""
+    return build_snippet(subject, needle, case_insensitive=True)
+
+
+def _trailer_snippet(row: dict, name: str, value_substring: str) -> Snippet | None:
+    key = name.lower().replace("-", "_")
+    values = row.get(key) or []
+    for value in values:
+        snippet = build_snippet(str(value), value_substring, case_insensitive=True)
+        if snippet is not None:
+            return snippet
+    return None
+
+
+def _rows_to_response(rows: list, *, tier: str, reader, snippet_for=None) -> RowsResponse:
+    hits = [
+        row_to_search_hit(
+            r,
+            tier_provenance=[tier],
+            snippet=snippet_for(r) if snippet_for is not None else None,
+        )
+        for r in rows
+    ]
+    return RowsResponse(results=hits, total=len(hits), freshness=build_freshness(reader))
 
 
 async def lore_eq(
@@ -117,16 +141,19 @@ async def lore_eq(
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
-    """`WHERE field = value` exact-equality scan over one structured column."""
+    """`WHERE field = value` exact-equality scan over one structured column.
+
+    Cost: cheap — expected p95 50 ms (one-column metadata scan).
+    """
     if field not in _EQ_FIELDS:
-        raise ToolError(f"unknown field {field!r}; see tool description for the supported set")
+        raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
 
     from kernel_lore_mcp import _core
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.eq, field, value, since_unix_ns, list, limit)
-    return _rows_to_response(rows, tier="metadata")
+    return _rows_to_response(rows, tier="metadata", reader=reader)
 
 
 async def lore_in_list(
@@ -138,18 +165,26 @@ async def lore_in_list(
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
-    """`WHERE field IN (values)` set-membership over one structured column."""
+    """`WHERE field IN (values)` set-membership over one structured column.
+
+    Cost: cheap — expected p95 50 ms.
+    """
     if field not in _EQ_FIELDS:
-        raise ToolError(f"unknown field {field!r}")
+        raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
     if not values:
-        raise ToolError("values must be a non-empty list")
+        raise invalid_argument(
+            name="values",
+            reason="must be a non-empty list",
+            value=values,
+            example='["alice@example.com", "bob@example.com"]',
+        )
 
     from kernel_lore_mcp import _core
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.in_list, field, values, since_unix_ns, list, limit)
-    return _rows_to_response(rows, tier="metadata")
+    return _rows_to_response(rows, tier="metadata", reader=reader)
 
 
 async def lore_count(
@@ -164,9 +199,11 @@ async def lore_count(
 
     Cheap relative to materializing rows; lets agents budget without
     pulling 10k rows just to know the size.
+
+    Cost: cheap — expected p95 40 ms (aggregate only, no row materialization).
     """
     if field not in _EQ_FIELDS:
-        raise ToolError(f"unknown field {field!r}")
+        raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
 
     from kernel_lore_mcp import _core
 
@@ -180,7 +217,7 @@ async def lore_count(
         latest_unix_ns=summary["latest_unix_ns"],
         earliest_utc=_from_ns(summary["earliest_unix_ns"]),
         latest_utc=_from_ns(summary["latest_unix_ns"]),
-        freshness=Freshness(),
+        freshness=build_freshness(reader),
     )
 
 
@@ -199,13 +236,21 @@ async def lore_substr_subject(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
-    """Case-insensitive byte substring scan over `subject_raw`."""
+    """Case-insensitive byte substring scan over `subject_raw`.
+
+    Cost: cheap — expected p95 80 ms (metadata column scan, no trigram).
+    """
     from kernel_lore_mcp import _core
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.substr_subject, needle, list, since_unix_ns, limit)
-    return _rows_to_response(rows, tier="metadata")
+    return _rows_to_response(
+        rows,
+        tier="metadata",
+        reader=reader,
+        snippet_for=lambda r: _subject_snippet(r, needle),
+    )
 
 
 async def lore_substr_trailers(
@@ -230,9 +275,17 @@ async def lore_substr_trailers(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
-    """Substring scan inside one named trailer column."""
+    """Substring scan inside one named trailer column.
+
+    Cost: cheap — expected p95 80 ms.
+    """
     if name.lower() not in _TRAILER_NAMES:
-        raise ToolError(f"unknown trailer name {name!r}")
+        raise unknown_enum(
+            field_name="name",
+            bad_value=name,
+            valid=_TRAILER_NAMES,
+            code="unknown_trailer_name",
+        )
 
     from kernel_lore_mcp import _core
 
@@ -241,7 +294,12 @@ async def lore_substr_trailers(
     rows = await asyncio.to_thread(
         reader.substr_trailers, name, value_substring, list, since_unix_ns, limit
     )
-    return _rows_to_response(rows, tier="metadata")
+    return _rows_to_response(
+        rows,
+        tier="metadata",
+        reader=reader,
+        snippet_for=lambda r: _trailer_snippet(r, name, value_substring),
+    )
 
 
 async def lore_regex(
@@ -278,9 +336,18 @@ async def lore_regex(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200)] = 100,
 ) -> RowsResponse:
-    """DFA-only regex scan over one of {subject, from_addr, body_prose, patch}."""
+    """DFA-only regex scan over one of {subject, from_addr, body_prose, patch}.
+
+    Cost: expensive — expected p95 1500 ms on prose/patch; 200 ms on subject/from.
+    Prefer a substring or equality primitive first if you know the string literal.
+    """
     if field not in _REGEX_FIELDS:
-        raise ToolError(f"unknown regex field {field!r}")
+        raise unknown_enum(
+            field_name="field",
+            bad_value=field,
+            valid=_REGEX_FIELDS,
+            code="unknown_regex_field",
+        )
 
     from kernel_lore_mcp import _core
 
@@ -296,7 +363,9 @@ async def lore_regex(
         limit,
     )
     return _rows_to_response(
-        rows, tier="metadata" if field in {"subject", "from_addr"} else "trigram"
+        rows,
+        tier="metadata" if field in {"subject", "from_addr"} else "trigram",
+        reader=reader,
     )
 
 
@@ -308,11 +377,24 @@ async def lore_diff(
         Field(description='View to diff: "patch", "prose", or "raw".'),
     ] = "patch",
 ) -> DiffResponse:
-    """Generalized message-vs-message unified diff."""
+    """Generalized message-vs-message unified diff.
+
+    Cost: moderate — expected p95 300 ms (two body fetches + difflib).
+    """
     if a == b:
-        raise ToolError("a and b must be different message-ids")
+        raise invalid_argument(
+            name="a",
+            reason="a and b must be different message-ids",
+            value=a,
+            example='{"a": "m1@x", "b": "m2@x"}',
+        )
     if mode not in {"patch", "prose", "raw"}:
-        raise ToolError(f"unknown diff mode {mode!r}")
+        raise unknown_enum(
+            field_name="mode",
+            bad_value=mode,
+            valid={"patch", "prose", "raw"},
+            code="unknown_diff_mode",
+        )
 
     from kernel_lore_mcp import _core
 
@@ -333,5 +415,5 @@ async def lore_diff(
         b=row_to_search_hit(result["b"], tier_provenance=["metadata"]),
         mode=mode,
         diff=diff_text,
-        freshness=Freshness(),
+        freshness=build_freshness(reader),
     )

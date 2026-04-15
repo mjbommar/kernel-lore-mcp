@@ -8,8 +8,9 @@ from typing import Annotated
 from pydantic import Field
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_timeline_entry
-from kernel_lore_mcp.models import Freshness, SeriesTimelineResponse
+from kernel_lore_mcp.models import SeriesTimelineResponse
 
 
 async def lore_series_timeline(
@@ -18,6 +19,8 @@ async def lore_series_timeline(
     """Given any message-id, return sibling versions of the same series
     (matched by normalized subject + from_addr + list), ordered by
     `(series_version, series_index)`.
+
+    Cost: cheap — expected p95 50 ms (metadata grouping).
     """
     from kernel_lore_mcp import _core
 
@@ -25,4 +28,4 @@ async def lore_series_timeline(
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.series_timeline, message_id)
     entries = [row_to_timeline_entry(r) for r in rows]
-    return SeriesTimelineResponse(entries=entries, freshness=Freshness())
+    return SeriesTimelineResponse(entries=entries, freshness=build_freshness(reader))

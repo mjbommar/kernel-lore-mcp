@@ -91,8 +91,12 @@ async def client(tmp_path: Path) -> AsyncIterator[Client]:
 @pytest.mark.asyncio
 async def test_lore_thread_walks_full_conversation(client: Client) -> None:
     # Seeding from m3 must reach m1 and m2 via in_reply_to /
-    # references walking.
-    result = await client.call_tool("lore_thread", {"message_id": "m3@x"})
+    # references walking. Request 'detailed' to also assert on
+    # body population — concise mode skips bodies on purpose.
+    result = await client.call_tool(
+        "lore_thread",
+        {"message_id": "m3@x", "response_format": "detailed"},
+    )
     data = result.data
     mids = [m.hit.message_id for m in data.messages]
     assert set(mids) == {"m1@x", "m2@x", "m3@x"}
@@ -117,7 +121,7 @@ async def test_lore_patch_returns_diff_text(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_lore_patch_rejects_message_with_no_patch(client: Client) -> None:
-    with pytest.raises(ToolError, match="no patch payload"):
+    with pytest.raises(ToolError, match="not_a_patch"):
         await client.call_tool("lore_patch", {"message_id": "m3@x"})
 
 
@@ -137,7 +141,7 @@ async def test_lore_patch_diff_compares_versions(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_lore_patch_diff_rejects_same_mid(client: Client) -> None:
-    with pytest.raises(ToolError, match="must be different"):
+    with pytest.raises(ToolError, match="invalid_argument"):
         await client.call_tool("lore_patch_diff", {"a": "m1@x", "b": "m1@x"})
 
 

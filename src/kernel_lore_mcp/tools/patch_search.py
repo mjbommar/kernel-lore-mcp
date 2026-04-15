@@ -13,8 +13,10 @@ from typing import Annotated
 from pydantic import Field
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.freshness import build_freshness
+from kernel_lore_mcp.kwic import build_snippet_from_body
 from kernel_lore_mcp.mapping import row_to_search_hit
-from kernel_lore_mcp.models import Freshness, SearchResponse
+from kernel_lore_mcp.models import SearchResponse
 
 
 async def lore_patch_search(
@@ -34,17 +36,24 @@ async def lore_patch_search(
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200)] = 50,
 ) -> SearchResponse:
-    """Literal-substring search over patch bodies; returns confirmed hits only."""
+    """Literal-substring search over patch bodies; returns confirmed hits only.
+
+    Cost: moderate — expected p95 300 ms (trigram candidate + real-match confirm).
+    """
     from kernel_lore_mcp import _core
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.patch_search, needle, list, limit)
-    hits = [row_to_search_hit(r, tier_provenance=["trigram"]) for r in rows]
+    hits = []
+    for r in rows:
+        body = await asyncio.to_thread(reader.fetch_body, r["message_id"])
+        snippet = build_snippet_from_body(body, needle, r.get("body_sha256"))
+        hits.append(row_to_search_hit(r, tier_provenance=["trigram"], snippet=snippet))
     return SearchResponse(
         results=hits,
         next_cursor=None,
         query_tiers_hit=["trigram"] if hits else [],
         default_applied=[],
-        freshness=Freshness(),
+        freshness=build_freshness(reader),
     )

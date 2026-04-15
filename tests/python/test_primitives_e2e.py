@@ -68,7 +68,7 @@ async def test_eq_on_touched_file_set_membership(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_eq_unknown_field_rejected(client: Client) -> None:
-    with pytest.raises(ToolError, match="unknown field"):
+    with pytest.raises(ToolError, match="unknown_field_value"):
         await client.call_tool("lore_eq", {"field": "nonsense", "value": "x"})
 
 
@@ -117,7 +117,7 @@ async def test_substr_trailers_finds_via_fixes_substring(client: Client) -> None
 
 @pytest.mark.asyncio
 async def test_substr_trailers_unknown_name_rejected(client: Client) -> None:
-    with pytest.raises(ToolError, match="unknown trailer name"):
+    with pytest.raises(ToolError, match="unknown_trailer_name"):
         await client.call_tool(
             "lore_substr_trailers",
             {"name": "nonsense", "value_substring": "x"},
@@ -187,7 +187,7 @@ async def test_diff_patch_mode_emits_unified(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_diff_rejects_same_mid(client: Client) -> None:
-    with pytest.raises(ToolError, match="must be different"):
+    with pytest.raises(ToolError, match="invalid_argument"):
         await client.call_tool(
             "lore_diff",
             {"a": "m1@x", "b": "m1@x", "mode": "patch"},
@@ -196,7 +196,7 @@ async def test_diff_rejects_same_mid(client: Client) -> None:
 
 @pytest.mark.asyncio
 async def test_diff_unknown_mode_rejected(client: Client) -> None:
-    with pytest.raises(ToolError, match="unknown diff mode"):
+    with pytest.raises(ToolError, match="unknown_diff_mode"):
         await client.call_tool(
             "lore_diff",
             {"a": "m1@x", "b": "m2@x", "mode": "wat"},

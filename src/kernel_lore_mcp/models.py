@@ -14,8 +14,28 @@ from pydantic import BaseModel, Field
 
 
 class Freshness(BaseModel):
-    """Freshness envelope attached to discovery responses."""
+    """Freshness envelope attached to discovery responses.
 
+    `as_of` + `lag_seconds` are populated from the generation-file
+    mtime on every request; `generation` mirrors the monotonic counter
+    so reruns of the same query can detect drift. `last_ingest_utc` is
+    an alias for `as_of` kept for wire-compat with earlier clients.
+    """
+
+    as_of: datetime | None = Field(
+        default=None,
+        description="Server-side timestamp the responding index was last committed.",
+    )
+    lag_seconds: int | None = Field(
+        default=None,
+        ge=0,
+        description="Seconds between the index commit and now — an upper bound on ingest lag.",
+    )
+    generation: int | None = Field(
+        default=None,
+        ge=0,
+        description="Monotonic ingest-generation counter. Bumps at every committed ingest.",
+    )
     last_ingest_utc: datetime | None = None
     oldest_list_last_updated: datetime | None = None
     stale_lists: list[str] = Field(

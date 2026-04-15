@@ -71,34 +71,47 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.series import lore_series_timeline
     from kernel_lore_mcp.tools.thread import lore_thread
 
-    read_only = {"readOnlyHint": True, "idempotentHint": True}
+    # Every tool shares the same four-annotation shape. Corpus grows
+    # over time as new mail arrives (`openWorldHint=true`); none of
+    # our tools mutate state (`readOnlyHint=true`, `destructiveHint=
+    # false`); rerunning a tool against the same generation returns
+    # the same result (`idempotentHint=true`). Per-tool `title` is
+    # what changes — it's shown to users in tool pickers.
+    def ann(title: str) -> dict[str, object]:
+        return {
+            "title": title,
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": True,
+        }
 
     # Higher-level / orchestrating tools.
-    mcp.tool(lore_search, annotations=read_only)
-    mcp.tool(lore_activity, annotations=read_only)
-    mcp.tool(lore_message, annotations=read_only)
-    mcp.tool(lore_expand_citation, annotations=read_only)
-    mcp.tool(lore_series_timeline, annotations=read_only)
-    mcp.tool(lore_patch_search, annotations=read_only)
-    mcp.tool(lore_thread, annotations=read_only)
-    mcp.tool(lore_patch, annotations=read_only)
-    mcp.tool(lore_patch_diff, annotations=read_only)
-    mcp.tool(lore_explain_patch, annotations=read_only)
+    mcp.tool(lore_search, annotations=ann("Search lore (fused tiers)"))
+    mcp.tool(lore_activity, annotations=ann("File / function activity over lore"))
+    mcp.tool(lore_message, annotations=ann("Fetch one message (prose + patch split)"))
+    mcp.tool(lore_expand_citation, annotations=ann("Expand Message-ID / SHA / CVE"))
+    mcp.tool(lore_series_timeline, annotations=ann("Sibling versions of a patch series"))
+    mcp.tool(lore_patch_search, annotations=ann("Literal substring search in patch bodies"))
+    mcp.tool(lore_thread, annotations=ann("Walk a full conversation thread"))
+    mcp.tool(lore_patch, annotations=ann("Raw patch text for one message"))
+    mcp.tool(lore_patch_diff, annotations=ann("Diff two patch versions of a series"))
+    mcp.tool(lore_explain_patch, annotations=ann("One-call deep view of a patch"))
 
     # Low-level retrieval primitives. Agents stack these themselves
     # when they want one well-defined query against one tier.
-    mcp.tool(lore_eq, annotations=read_only)
-    mcp.tool(lore_in_list, annotations=read_only)
-    mcp.tool(lore_count, annotations=read_only)
-    mcp.tool(lore_substr_subject, annotations=read_only)
-    mcp.tool(lore_substr_trailers, annotations=read_only)
-    mcp.tool(lore_regex, annotations=read_only)
-    mcp.tool(lore_diff, annotations=read_only)
+    mcp.tool(lore_eq, annotations=ann("Exact-equality scan on a column"))
+    mcp.tool(lore_in_list, annotations=ann("Set-membership scan on a column"))
+    mcp.tool(lore_count, annotations=ann("Count + distinct-authors + date range"))
+    mcp.tool(lore_substr_subject, annotations=ann("Case-insensitive substring on subject"))
+    mcp.tool(lore_substr_trailers, annotations=ann("Substring inside a named trailer"))
+    mcp.tool(lore_regex, annotations=ann("DFA-only regex scan"))
+    mcp.tool(lore_diff, annotations=ann("Message-vs-message diff (patch / prose / raw)"))
 
     # Embedding tier (Phase 8). Both tools fail loudly with an
     # actionable ToolError when the index hasn't been built yet.
-    mcp.tool(lore_nearest, annotations=read_only)
-    mcp.tool(lore_similar, annotations=read_only)
+    mcp.tool(lore_nearest, annotations=ann("Semantic nearest-neighbour on free text"))
+    mcp.tool(lore_similar, annotations=ann("Nearest-neighbour on a seed message-id"))
 
     # Register blind_spots as an MCP resource — fetch once per session.
     @mcp.resource(

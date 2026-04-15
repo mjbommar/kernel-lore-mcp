@@ -92,6 +92,39 @@ impl Reader {
         &self.data_dir
     }
 
+    /// Current index generation counter. Mirrors `State::generation()`;
+    /// duplicated here so query-path callers don't need the full
+    /// ingest-side `State` wrapper.
+    pub fn generation(&self) -> Result<u64> {
+        let path = self.data_dir.join("state").join("generation");
+        match fs::read_to_string(&path) {
+            Ok(s) => s
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| crate::error::Error::State(format!("generation parse: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Last-mutation time of the generation file, in nanoseconds since
+    /// the Unix epoch (UTC). `None` if the file has never been written
+    /// (fresh data_dir).
+    pub fn generation_mtime_ns(&self) -> Result<Option<i64>> {
+        let path = self.data_dir.join("state").join("generation");
+        match fs::metadata(&path) {
+            Ok(md) => {
+                let mtime = md.modified()?;
+                let dur = mtime
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| crate::error::Error::State(format!("mtime pre-epoch: {e}")))?;
+                Ok(Some(dur.as_nanos() as i64))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Enumerate every `.parquet` file under `<data_dir>/metadata/`.
     fn parquet_files(&self) -> Result<Vec<PathBuf>> {
         let root = self.data_dir.join("metadata");

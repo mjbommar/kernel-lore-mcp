@@ -22,13 +22,14 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated
 
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.embedding import DEFAULT_MODEL, Embedder, FastembedEmbedder, l2_normalize
+from kernel_lore_mcp.errors import LoreError
+from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import cite_key, lore_url
-from kernel_lore_mcp.models import Freshness, NearestHit, NearestResponse
+from kernel_lore_mcp.models import NearestHit, NearestResponse
 
 
 @lru_cache(maxsize=4)
@@ -69,7 +70,10 @@ async def lore_nearest(
     ],
     k: Annotated[int, Field(ge=1, le=200)] = 25,
 ) -> NearestResponse:
-    """Semantic nearest-neighbour search."""
+    """Semantic nearest-neighbour search.
+
+    Cost: expensive — expected p95 2000 ms (fastembed model + HNSW ANN).
+    """
     from kernel_lore_mcp import _core
 
     settings = Settings()
@@ -77,16 +81,20 @@ async def lore_nearest(
     index_model = await asyncio.to_thread(reader.embedding_model)
     index_dim = await asyncio.to_thread(reader.embedding_dim)
     if index_model is None or index_dim is None:
-        raise ToolError(
-            "embedding index not built yet — run `kernel-lore-embed --data-dir <path>` "
-            "to bootstrap, then retry"
+        raise LoreError(
+            "embedding_index_not_built",
+            "the embedding index has not been built for this data_dir.",
+            valid_example="run `kernel-lore-embed --data-dir <path>` to bootstrap, then retry.",
+            retry_after_seconds=60,
         )
 
     embedder = await asyncio.to_thread(_embedder_for, index_model)
     if embedder.dim != index_dim:
-        raise ToolError(
-            f"embedder dim {embedder.dim} != index dim {index_dim} (model "
-            f"{index_model!r}); index needs a rebuild"
+        raise LoreError(
+            "embedding_dim_mismatch",
+            f"embedder dim {embedder.dim} does not match the index dim {index_dim}.",
+            echoed_input={"embedder_model": index_model},
+            valid_example="rebuild the index with `kernel-lore-embed --model <same>`.",
         )
 
     [vec] = await asyncio.to_thread(embedder.embed, [query])
@@ -102,7 +110,7 @@ async def lore_nearest(
         results=rows,
         model=index_model,
         dim=index_dim,
-        freshness=Freshness(),
+        freshness=build_freshness(reader),
     )
 
 
@@ -126,7 +134,10 @@ async def lore_similar(
         ),
     ] = False,
 ) -> NearestResponse:
-    """Find messages most similar to a known message-id."""
+    """Find messages most similar to a known message-id.
+
+    Cost: moderate — expected p95 200 ms (HNSW ANN only; no embedder).
+    """
     from kernel_lore_mcp import _core
 
     settings = Settings()
@@ -134,15 +145,22 @@ async def lore_similar(
     index_model = await asyncio.to_thread(reader.embedding_model)
     index_dim = await asyncio.to_thread(reader.embedding_dim)
     if index_model is None or index_dim is None:
-        raise ToolError(
-            "embedding index not built yet — run `kernel-lore-embed --data-dir <path>` "
-            "to bootstrap, then retry"
+        raise LoreError(
+            "embedding_index_not_built",
+            "the embedding index has not been built for this data_dir.",
+            valid_example="run `kernel-lore-embed --data-dir <path>` to bootstrap, then retry.",
+            retry_after_seconds=60,
         )
 
     over_k = k + (0 if include_seed else 1)
     hits = await asyncio.to_thread(reader.nearest_to_mid, message_id, over_k)
     if not hits:
-        raise ToolError(f"message_id {message_id!r} not present in the embedding index")
+        raise LoreError(
+            "seed_not_in_embedding_index",
+            f"message_id {message_id!r} is not present in the embedding index.",
+            echoed_input={"message_id": message_id},
+            valid_example="call `kernel-lore-embed` to re-index, or pick a message the index already covers.",
+        )
 
     rows: list[NearestHit] = []
     for mid, score in hits:
@@ -158,7 +176,7 @@ async def lore_similar(
         results=rows,
         model=index_model,
         dim=index_dim,
-        freshness=Freshness(),
+        freshness=build_freshness(reader),
     )
 
 

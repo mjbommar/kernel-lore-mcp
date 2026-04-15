@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 from typing import Annotated
 
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.errors import not_found
+from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit, row_to_timeline_entry
-from kernel_lore_mcp.models import ExplainPatchResponse, Freshness
+from kernel_lore_mcp.models import ExplainPatchResponse
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 
@@ -23,13 +24,17 @@ async def lore_explain_patch(
     message_id: Annotated[str, Field(min_length=1, max_length=512)],
     max_downstream: Annotated[int, Field(ge=0, le=200)] = 25,
 ) -> ExplainPatchResponse:
+    """One-call deep view of a single patch (prose + patch + series + replies).
+
+    Cost: expensive — expected p95 800 ms (four composed operations).
+    """
     from kernel_lore_mcp import _core
 
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
     row = await asyncio.to_thread(reader.fetch_message, message_id)
     if row is None:
-        raise ToolError(f"message_id {message_id!r} not found")
+        raise not_found(what="message", message_id=message_id)
 
     body = await asyncio.to_thread(reader.fetch_body, message_id)
     prose: str | None = None
@@ -60,5 +65,5 @@ async def lore_explain_patch(
         patch=patch,
         series=series,
         downstream=downstream[:max_downstream],
-        freshness=Freshness(),
+        freshness=build_freshness(reader),
     )

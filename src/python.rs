@@ -487,6 +487,21 @@ impl PyReader {
         Ok(result)
     }
 
+    /// Current index generation counter. Bumps at every ingest commit;
+    /// the Python freshness helper pairs this with `generation_mtime_ns`
+    /// to produce a user-visible `as_of` timestamp + `lag_seconds`.
+    fn generation(&self, py: Python<'_>) -> PyResult<u64> {
+        let gen_val = py.detach(|| self.inner.generation())?;
+        Ok(gen_val)
+    }
+
+    /// Last-mutation time of the generation file (ns since Unix epoch,
+    /// UTC). `None` when the data_dir has never been ingested into.
+    fn generation_mtime_ns(&self, py: Python<'_>) -> PyResult<Option<i64>> {
+        let ns = py.detach(|| self.inner.generation_mtime_ns())?;
+        Ok(ns)
+    }
+
     /// Embedding-index dim, used by the Python tool to verify the
     /// query embedder matches the indexed embedder.
     fn embedding_dim(&self, py: Python<'_>) -> PyResult<Option<u32>> {

@@ -19,13 +19,16 @@ prose remain rejected by the BM25 tier.
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
-from kernel_lore_mcp.models import Freshness, SearchResponse
+from kernel_lore_mcp.models import SearchResponse
+
+_CONCISE_HITS = 10
 
 
 async def lore_search(
@@ -44,7 +47,20 @@ async def lore_search(
     ],
     limit: Annotated[int, Field(ge=1, le=200)] = 25,
     cursor: Annotated[str | None, Field(description="HMAC-signed pagination cursor.")] = None,
+    response_format: Annotated[
+        Literal["concise", "detailed"],
+        Field(
+            description=(
+                "'concise' (default) caps the returned hits at 10 for a fast "
+                "agent-budget-friendly summary; 'detailed' returns up to `limit`."
+            ),
+        ),
+    ] = "concise",
 ) -> SearchResponse:
+    """Fused router search across metadata + trigram + BM25 tiers (RRF).
+
+    Cost: moderate — expected p95 300 ms on the typical synthetic corpus.
+    """
     _ = cursor  # TODO(phase-5d): cursor consumption (router signs them already)
 
     from kernel_lore_mcp import _core
@@ -52,6 +68,9 @@ async def lore_search(
     settings = Settings()
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.router_search, query, limit)
+    total_rows = len(rows)
+    if response_format == "concise":
+        rows = rows[:_CONCISE_HITS]
 
     hits = []
     tiers_seen: set[str] = set()
@@ -67,10 +86,14 @@ async def lore_search(
         hit.score = row.get("_score")
         hits.append(hit)
 
+    default_applied: list[str] = []
+    if response_format == "concise" and total_rows > _CONCISE_HITS:
+        default_applied.append(f"response_format=concise (showing top {_CONCISE_HITS})")
     return SearchResponse(
         results=hits,
         next_cursor=None,
         query_tiers_hit=sorted(tiers_seen),
-        default_applied=[],
-        freshness=Freshness(),
+        default_applied=default_applied,
+        truncated_by_candidate_cap=(response_format == "concise" and total_rows > _CONCISE_HITS),
+        freshness=build_freshness(reader),
     )

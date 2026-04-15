@@ -16,6 +16,7 @@ from kernel_lore_mcp.models import (
     PatchStats,
     SearchHit,
     SeriesTimelineEntry,
+    Snippet,
 )
 
 LORE_URL_PREFIX = "https://lore.kernel.org"
@@ -64,12 +65,20 @@ def _patch_stats(row: dict[str, Any]) -> PatchStats | None:
 
 
 def row_to_search_hit(
-    row: dict[str, Any], *, tier_provenance: list[str], is_exact_match: bool = True
+    row: dict[str, Any],
+    *,
+    tier_provenance: list[str],
+    is_exact_match: bool = True,
+    snippet: Snippet | None = None,
 ) -> SearchHit:
     """The canonical row→hit mapping. `tier_provenance` says which tier
     produced the hit; for v0.5 metadata-only queries it's
     `["metadata"]`. v1+ may set `["metadata", "bm25"]` etc. when
     merged results arrive from multiple tiers.
+
+    `snippet` is passed through unchanged when the caller has a real
+    needle + source text to build KWIC context from; otherwise stays
+    `None` rather than fabricating an offset.
     """
     subject = row.get("subject_normalized") or row.get("subject_raw") or ""
     return SearchHit(
@@ -87,7 +96,7 @@ def row_to_search_hit(
         series_version=row.get("series_version") or None,
         series_index=_series_index_str(row),
         patch_stats=_patch_stats(row),
-        snippet=None,
+        snippet=snippet,
         score=None,
         tier_provenance=tier_provenance,
         is_exact_match=is_exact_match,
