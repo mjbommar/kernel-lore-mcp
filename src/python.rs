@@ -120,6 +120,22 @@ impl PyReader {
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
 
+    /// Substring search over patch bodies via the trigram tier.
+    ///
+    /// Returns a list of row dicts (same shape as `fetch_message`).
+    /// `limit` is enforced after confirmation; newest-first.
+    #[pyo3(signature = (needle, list=None, limit=100))]
+    fn patch_search<'py>(
+        &self,
+        py: Python<'py>,
+        needle: String,
+        list: Option<String>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py.detach(|| self.inner.patch_search(&needle, list.as_deref(), limit))?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
     /// Fetch the raw uncompressed message body by Message-ID.
     ///
     /// Point-looks-up the metadata row, then streams the zstd frame

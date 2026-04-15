@@ -148,3 +148,37 @@ async def test_lore_series_timeline(client: Client) -> None:
     assert data.entries[0].message_id == "m1@x"
     assert data.entries[0].series_version == 3
     assert data.entries[0].series_index == "1/2"
+
+
+@pytest.mark.asyncio
+async def test_lore_patch_search_finds_function_name(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_patch_search",
+        {"needle": "smb_check_perm_dacl"},
+    )
+    data = result.data
+    assert len(data.results) == 1
+    hit = data.results[0]
+    assert hit.message_id == "m1@x"
+    assert hit.tier_provenance == ["trigram"]
+    assert data.query_tiers_hit == ["trigram"]
+
+
+@pytest.mark.asyncio
+async def test_lore_patch_search_returns_empty_when_no_match(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_patch_search",
+        {"needle": "does_not_appear_in_any_patch"},
+    )
+    data = result.data
+    assert data.results == []
+    assert data.query_tiers_hit == []
+
+
+@pytest.mark.asyncio
+async def test_lore_patch_search_rejects_short_needle(client: Client) -> None:
+    # Pydantic min_length=3; FastMCP surfaces validation as ToolError.
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError):
+        await client.call_tool("lore_patch_search", {"needle": "xy"})

@@ -235,6 +235,76 @@ impl Reader {
         Ok(out)
     }
 
+    /// Substring search over patch content via the trigram tier,
+    /// confirmed against the decompressed body.
+    ///
+    /// `needle` is a literal byte string. Matches use byte-exact
+    /// comparison (no case folding). Returns at most `limit` rows
+    /// newest-first.
+    ///
+    /// `list` (optional) restricts both the trigram segments scanned
+    /// and the metadata lookup to one list.
+    pub fn patch_search(
+        &self,
+        needle: &str,
+        list: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lists = match list {
+            Some(l) => vec![l.to_owned()],
+            None => list_trigram_lists(&self.data_dir)?,
+        };
+
+        // Gather candidates across all (list, segment) trigram indices.
+        let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for lst in &lists {
+            for seg_dir in crate::trigram::list_segments(&self.data_dir, lst)? {
+                let seg = crate::trigram::SegmentReader::open(&seg_dir)?;
+                for mid in seg.candidates_for_substring(needle.as_bytes()) {
+                    candidates.insert(mid.to_owned());
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut hits = Vec::new();
+        let list_filter = list.map(str::to_owned);
+        let needle_bytes = needle.as_bytes().to_owned();
+        self.scan(
+            |r| {
+                if let Some(ref lst) = list_filter {
+                    if &r.list != lst {
+                        return false;
+                    }
+                }
+                candidates.contains(&r.message_id)
+            },
+            |r| {
+                hits.push(r);
+                true
+            },
+        )?;
+
+        // Confirm: decompress + byte-scan. Dropping ambiguous hits.
+        let mut confirmed = Vec::new();
+        for row in hits {
+            let store = crate::store::Store::open(&self.data_dir, &row.list)?;
+            let body = store.read_at(0, row.body_offset)?;
+            if memchr::memmem::find(&body, &needle_bytes).is_some() {
+                confirmed.push(row);
+            }
+        }
+
+        confirmed.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        confirmed.truncate(limit);
+        Ok(confirmed)
+    }
+
     /// Fetch the raw uncompressed body bytes for a given message-id.
     ///
     /// Does a point lookup over the metadata tier to find the
@@ -288,6 +358,24 @@ impl Reader {
         out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
         Ok(out)
     }
+}
+
+fn list_trigram_lists(data_dir: &Path) -> Result<Vec<String>> {
+    let root = data_dir.join("trigram");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                out.push(name.to_owned());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 // ---- internals ----
@@ -726,5 +814,25 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let rows = r.expand_citation("<m2@x>", 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m2@x");
+    }
+
+    #[test]
+    fn patch_search_finds_function_name() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        // m1 contains `smb_check_perm_dacl` in its hunk header; m2
+        // contains `smb2_create`. Both are in patch bodies, so both
+        // should be findable.
+        let m1 = r.patch_search("smb_check_perm_dacl", None, 10).unwrap();
+        assert_eq!(m1.len(), 1);
+        assert_eq!(m1[0].message_id, "m1@x");
+
+        let m2 = r.patch_search("smb2_create", None, 10).unwrap();
+        assert_eq!(m2.len(), 1);
+        assert_eq!(m2[0].message_id, "m2@x");
+
+        let none = r.patch_search("never_appears_anywhere", None, 10).unwrap();
+        assert!(none.is_empty());
     }
 }

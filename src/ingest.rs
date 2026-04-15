@@ -26,6 +26,7 @@ use crate::metadata::{self, MetadataBatch, MetadataRow};
 use crate::parse;
 use crate::state::State;
 use crate::store::Store;
+use crate::trigram::{SegmentBuilder as TrigramBuilder, segment_dir as trigram_segment_dir};
 
 /// Ingest one public-inbox shard end-to-end.
 ///
@@ -88,6 +89,7 @@ pub fn ingest_shard_unlocked(
         .map_err(|e| Error::Gix(format!("rev_walk: {e}")))?;
 
     let mut batch = MetadataBatch::new();
+    let mut trigram = TrigramBuilder::new();
     let mut stats = IngestStats::default();
 
     for info in walk {
@@ -112,9 +114,15 @@ pub fn ingest_shard_unlocked(
         }
 
         let parsed = parse::parse_message(data);
-        if parsed.message_id.is_none() {
+        let Some(mid) = parsed.message_id.clone() else {
             stats.skipped_no_mid += 1;
             continue;
+        };
+
+        // Patch goes to trigram tier BEFORE we consume `parsed` into the
+        // metadata row.
+        if let Some(patch_text) = parsed.patch.as_deref() {
+            trigram.add(&mid, patch_text.as_bytes())?;
         }
 
         let appended = store.append(data)?;
@@ -142,6 +150,14 @@ pub fn ingest_shard_unlocked(
     let rb = batch.finish()?;
     let parquet_path = metadata::write_parquet(data_dir, list, run_id, &rb)?;
     stats.parquet_path = Some(parquet_path.display().to_string());
+
+    // Trigram segment — only finalize if we indexed at least one patch.
+    if !trigram.is_empty() {
+        let seg = trigram_segment_dir(data_dir, list, run_id);
+        trigram.finalize(&seg)?;
+        stats.trigram_segment_path = Some(seg.display().to_string());
+    }
+
     state.save_last_indexed_oid(list, shard, &head_hex)?;
     state.bump_generation()?;
 
@@ -156,6 +172,7 @@ pub struct IngestStats {
     pub skipped_empty: u64,
     pub skipped_no_mid: u64,
     pub parquet_path: Option<String>,
+    pub trigram_segment_path: Option<String>,
 }
 
 fn hex(bytes: &[u8]) -> String {

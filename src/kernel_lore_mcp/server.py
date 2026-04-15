@@ -50,6 +50,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.activity import lore_activity
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.message import lore_message
+    from kernel_lore_mcp.tools.patch_search import lore_patch_search
     from kernel_lore_mcp.tools.search import lore_search
     from kernel_lore_mcp.tools.series import lore_series_timeline
 
@@ -60,6 +61,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(lore_message, annotations=read_only)
     mcp.tool(lore_expand_citation, annotations=read_only)
     mcp.tool(lore_series_timeline, annotations=read_only)
+    mcp.tool(lore_patch_search, annotations=read_only)
 
     # TODO(phase-3/4): lore_patch, lore_thread, lore_patch_diff,
     # lore_explain_patch once the trigram + BM25 tiers land.
