@@ -115,6 +115,70 @@ impl Reader {
         Ok(out)
     }
 
+    /// Collect every row in the metadata tier into `out`. Used by the
+    /// tid-rebuild pass which needs the full corpus in memory.
+    pub fn scan_all(&self, out: &mut Vec<MessageRow>) -> Result<()> {
+        self.scan(
+            |_| true,
+            |r| {
+                out.push(r);
+                true
+            },
+        )
+    }
+
+    /// Read the tid side-table at `<data_dir>/tid/tid.parquet` into a
+    /// `message_id -> tid` map. Returns empty if the side-table
+    /// hasn't been built yet.
+    pub fn tid_lookup(&self) -> Result<std::collections::HashMap<String, String>> {
+        let path = self.data_dir.join("tid").join("tid.parquet");
+        if !path.exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let file = File::open(&path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+        let mut out = std::collections::HashMap::new();
+        for batch in reader {
+            let batch = batch?;
+            let mid = downcast_string(&batch, "message_id")?;
+            let tid = downcast_string(&batch, "tid")?;
+            for i in 0..batch.num_rows() {
+                out.insert(mid.value(i).to_owned(), tid.value(i).to_owned());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Read the tid side-table propagated_files / propagated_functions
+    /// columns into a `message_id -> (files, functions)` map.
+    #[allow(clippy::type_complexity)]
+    pub fn propagated_lookup(
+        &self,
+    ) -> Result<std::collections::HashMap<String, (Vec<String>, Vec<String>)>> {
+        let path = self.data_dir.join("tid").join("tid.parquet");
+        if !path.exists() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let file = File::open(&path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+        let mut out = std::collections::HashMap::new();
+        for batch in reader {
+            let batch = batch?;
+            let mid = downcast_string(&batch, "message_id")?;
+            let files = downcast_list(&batch, "propagated_files")?;
+            let funcs = downcast_list(&batch, "propagated_functions")?;
+            for i in 0..batch.num_rows() {
+                out.insert(
+                    mid.value(i).to_owned(),
+                    (list_strings(&files, i), list_strings(&funcs, i)),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// Apply `visit` to every row matching `filter`. Short-circuits when
     /// `visit` returns false.
     fn scan<F, V>(&self, mut filter: F, mut visit: V) -> Result<()>

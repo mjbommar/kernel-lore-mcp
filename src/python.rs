@@ -22,6 +22,7 @@ use pyo3::types::PyDict;
 use crate::ingest;
 use crate::reader::{MessageRow, Reader as CoreReader};
 use crate::router;
+use crate::tid;
 
 /// Ingest one public-inbox shard. Releases the GIL for the whole walk.
 ///
@@ -52,6 +53,18 @@ pub fn py_ingest_shard<'py>(
     d.set_item("skipped_empty", stats.skipped_empty)?;
     d.set_item("skipped_no_mid", stats.skipped_no_mid)?;
     d.set_item("parquet_path", stats.parquet_path)?;
+    Ok(d)
+}
+
+/// Rebuild the tid side-table from the metadata tier. Returns the
+/// dest path + row count.
+#[pyfunction]
+#[pyo3(name = "rebuild_tid")]
+pub fn py_rebuild_tid<'py>(py: Python<'py>, data_dir: PathBuf) -> PyResult<Bound<'py, PyDict>> {
+    let (path, n) = py.detach(|| tid::rebuild(&data_dir))?;
+    let d = PyDict::new(py);
+    d.set_item("path", path.display().to_string())?;
+    d.set_item("rows", n)?;
     Ok(d)
 }
 

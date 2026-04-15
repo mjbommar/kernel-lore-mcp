@@ -102,6 +102,16 @@ fn main() -> Result<()> {
         w.commit().context("bm25 commit")?;
     }
 
+    // Rebuild the tid side-table over the entire metadata corpus.
+    // Cheap relative to ingest; runs after every multi-shard run so
+    // cover-letters always carry their patches' touched_files.
+    let tid_result = _core::rebuild_tid(&data_dir).context("rebuild tid side-table")?;
+    tracing::info!(
+        rows = tid_result.1,
+        path = %tid_result.0.display(),
+        "tid rebuild done"
+    );
+
     let mut total_ingested: u64 = 0;
     let mut total_failed: u64 = 0;
     for (shard, result) in shards.iter().zip(totals.iter()) {

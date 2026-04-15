@@ -39,6 +39,7 @@ mod router;
 mod schema;
 mod state;
 mod store;
+mod tid;
 mod trigram;
 
 // Library re-exports for the `kernel-lore-ingest` binary (and any
@@ -48,11 +49,13 @@ pub use bm25::BmWriter;
 pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25};
 pub use router::{CursorPayload, ParsedQuery, RankedHit, parse_query, sign_cursor, verify_cursor};
 pub use state::State;
+pub use tid::{TidRow, rebuild as rebuild_tid};
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_ingest_shard, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_rebuild_tid, m)?)?;
     m.add_class::<crate::python::PyReader>()?;
     Ok(())
 }
