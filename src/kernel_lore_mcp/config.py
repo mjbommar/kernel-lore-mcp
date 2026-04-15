@@ -1,6 +1,10 @@
 """Runtime configuration via environment variables or .env.
 
 Env prefix: `KLMCP_`.
+
+`get_settings()` returns the process-wide singleton. `build_server`
+calls `set_settings(s)` once at startup; all tools call
+`get_settings()` instead of constructing `Settings()` from env.
 """
 
 from __future__ import annotations
@@ -80,3 +84,20 @@ class Settings(BaseSettings):
         default=5 * 1024 * 1024,
         description="Per-response byte cap (lore_thread / lore_patch).",
     )
+
+
+# Process-wide singleton. Set once by build_server(); read by tools
+# via get_settings(). Avoids re-parsing env on every request and
+# makes build_server(settings=...) meaningful.
+_singleton: Settings | None = None
+
+
+def set_settings(s: Settings) -> None:
+    global _singleton
+    _singleton = s
+
+
+def get_settings() -> Settings:
+    if _singleton is not None:
+        return _singleton
+    return Settings()

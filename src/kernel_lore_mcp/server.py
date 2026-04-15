@@ -50,7 +50,10 @@ p95 ~11 min from vger to our index.
 
 def build_server(settings: Settings | None = None) -> FastMCP:
     """Construct the FastMCP app with all v0.5 tools registered."""
+    from kernel_lore_mcp.config import set_settings
+
     settings = settings or Settings()
+    set_settings(settings)
     mcp: FastMCP = FastMCP(name="kernel-lore", instructions=INSTRUCTIONS)
 
     # Explicit tool registration.

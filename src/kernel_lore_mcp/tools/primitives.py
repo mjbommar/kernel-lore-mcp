@@ -23,7 +23,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import invalid_argument, unknown_enum
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.kwic import build_snippet
@@ -154,7 +154,7 @@ async def lore_eq(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.eq, field, value, since_unix_ns, list, limit)
     return _rows_to_response(rows, tier="metadata", reader=reader)
@@ -185,7 +185,7 @@ async def lore_in_list(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.in_list, field, values, since_unix_ns, list, limit)
     return _rows_to_response(rows, tier="metadata", reader=reader)
@@ -211,7 +211,7 @@ async def lore_count(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     summary = await run_with_timeout(reader.count, field, value, since_unix_ns, list)
     return CountResponse(
@@ -246,7 +246,7 @@ async def lore_substr_subject(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.substr_subject, needle, list, since_unix_ns, limit)
     return _rows_to_response(
@@ -293,7 +293,7 @@ async def lore_substr_trailers(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(
         reader.substr_trailers, name, value_substring, list, since_unix_ns, limit
@@ -355,7 +355,7 @@ async def lore_regex(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(
         reader.regex,
@@ -402,7 +402,7 @@ async def lore_diff(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     result = await run_with_timeout(reader.diff, a, b, mode)
     diff_text = "".join(

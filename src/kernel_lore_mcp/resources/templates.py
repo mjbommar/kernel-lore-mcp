@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from fastmcp.exceptions import ResourceError
 from fastmcp.resources import ResourceContent, ResourceResult
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.tools.message import _split_prose_patch
 
 if TYPE_CHECKING:
@@ -49,7 +49,7 @@ def _decode(body: bytes) -> str:
 async def _fetch_message_body(mid: str) -> str:
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     body = await asyncio.to_thread(reader.fetch_body, mid)
     if body is None:
@@ -60,7 +60,7 @@ async def _fetch_message_body(mid: str) -> str:
 async def _fetch_thread_text(mid: str) -> str:
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await asyncio.to_thread(reader.thread, mid, 500)
     if not rows:
@@ -78,7 +78,7 @@ async def _fetch_thread_text(mid: str) -> str:
 async def _fetch_patch_text(mid: str) -> str:
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     row = await asyncio.to_thread(reader.fetch_message, mid)
     if row is None:

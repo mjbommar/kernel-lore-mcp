@@ -90,7 +90,7 @@ def row_to_search_hit(
         from_name=row.get("from_name"),
         subject=subject,
         subject_tags=list(row.get("subject_tags") or []),
-        date=_date_from_ns(row.get("date_unix_ns")) or datetime.fromtimestamp(0, tz=UTC),
+        date=_date_from_ns(row.get("date_unix_ns")),
         has_patch=bool(row.get("has_patch")),
         is_cover_letter=bool(row.get("is_cover_letter")),
         series_version=row.get("series_version") or None,

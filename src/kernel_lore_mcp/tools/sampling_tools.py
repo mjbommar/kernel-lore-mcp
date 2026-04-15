@@ -28,7 +28,7 @@ from typing import Annotated
 from fastmcp import Context
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.models import (
@@ -218,7 +218,7 @@ async def lore_summarize_thread(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.thread, message_id, 500)
     if not rows:
@@ -273,7 +273,7 @@ async def lore_classify_patch(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     row = await run_with_timeout(reader.fetch_message, message_id)
     if row is None:
@@ -354,7 +354,7 @@ async def lore_explain_review_status(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.thread, message_id, 500)
     if not rows:

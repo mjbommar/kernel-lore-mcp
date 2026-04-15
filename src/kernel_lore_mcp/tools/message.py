@@ -6,7 +6,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError, not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
@@ -15,6 +15,11 @@ from kernel_lore_mcp.timeout import run_with_timeout
 
 
 def _split_prose_patch(body: str) -> tuple[str | None, str | None]:
+    # Handle body that *starts* with `diff --git ` (no leading newline)
+    # as well as the common mid-body case. The Rust reader's
+    # split_prose_and_patch handles both; this Python side must match.
+    if body.startswith("diff --git "):
+        return None, (body or None)
     marker = "\ndiff --git "
     idx = body.find(marker)
     if idx < 0:
@@ -31,7 +36,7 @@ async def lore_message(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     row = await run_with_timeout(reader.fetch_message, message_id)
     if row is None:

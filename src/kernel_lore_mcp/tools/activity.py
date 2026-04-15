@@ -10,7 +10,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_activity_row
 from kernel_lore_mcp.models import ActivityResponse
@@ -63,7 +63,7 @@ async def lore_activity(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(
         reader.activity,

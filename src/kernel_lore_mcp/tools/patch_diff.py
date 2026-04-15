@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError, invalid_argument, not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
@@ -77,7 +77,7 @@ async def lore_patch_diff(
 
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     row_a, patch_a = await _fetch_patch(reader, a)
     row_b, patch_b = await _fetch_patch(reader, b)

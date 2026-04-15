@@ -578,6 +578,20 @@ impl PyReader {
             .collect()
     }
 
+    /// Return every row in the metadata tier. Optional list + since
+    /// filters. Exposed for the embedding-bootstrap CLI so it doesn't
+    /// need to hack through substr_subject("").
+    #[pyo3(signature = (list=None, since_unix_ns=None))]
+    fn scan_all<'py>(
+        &self,
+        py: Python<'py>,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let rows = py.detach(|| self.inner.all_rows(list.as_deref(), since_unix_ns))?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    }
+
     /// Embedding-index dim, used by the Python tool to verify the
     /// query embedder matches the indexed embedder.
     fn embedding_dim(&self, py: Python<'_>) -> PyResult<Option<u32>> {

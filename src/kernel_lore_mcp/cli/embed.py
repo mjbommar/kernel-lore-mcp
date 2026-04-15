@@ -151,20 +151,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _scan_all(reader) -> list[dict]:
-    """Pull every metadata row by walking expand_citation('') ... no.
-
-    The reader exposes specific queries; for "give me everything" we
-    use eq() with a sentinel field that always passes is awkward.
-    Cheap correct approach: walk all known message-ids via the
-    metadata files directly. We don't have a public scan_all on the
-    Python side, so we reconstruct it via lore_substr_subject('') —
-    the empty substring matches every subject_raw.
-    """
-    # The empty needle would normally be invalid; substring scans
-    # accept it (every string contains "" and substr_subject is
-    # case-insensitive against subject_raw which is always non-null
-    # for parsed messages). We use limit=10**9 to mean "everything".
-    return reader.substr_subject("", None, None, 10**9)
+    """Pull every metadata row from the corpus."""
+    return reader.scan_all()
 
 
 def _row_to_text(row: dict, reader, prose_max_chars: int) -> str | None:

@@ -72,7 +72,13 @@ class SearchHit(BaseModel):
     from_name: str | None
     subject: str
     subject_tags: list[str] = Field(default_factory=list)
-    date: datetime
+    date: datetime | None = Field(
+        default=None,
+        description=(
+            "Message date (UTC). None when the RFC822 Date header was "
+            "missing and no commit-date fallback was available."
+        ),
+    )
     has_patch: bool
     is_cover_letter: bool = False
     series_version: int | None = None

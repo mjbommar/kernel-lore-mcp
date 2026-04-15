@@ -23,7 +23,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.embedding import DEFAULT_MODEL, Embedder, FastembedEmbedder, l2_normalize
 from kernel_lore_mcp.errors import LoreError
 from kernel_lore_mcp.freshness import build_freshness
@@ -76,7 +76,7 @@ async def lore_nearest(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     index_model = await run_with_timeout(reader.embedding_model)
     index_dim = await run_with_timeout(reader.embedding_dim)
@@ -140,7 +140,7 @@ async def lore_similar(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     index_model = await run_with_timeout(reader.embedding_model)
     index_dim = await run_with_timeout(reader.embedding_dim)

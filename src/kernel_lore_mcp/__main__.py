@@ -80,19 +80,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_serve(args: argparse.Namespace) -> int:
+    from kernel_lore_mcp.config import Settings
     from kernel_lore_mcp.server import build_server
 
     configure_logging(transport=args.transport, level=args.log_level)
-    mcp = build_server()
+    settings = Settings()
+    mcp = build_server(settings)
     if args.transport == "stdio":
         mcp.run(transport="stdio")
         return 0
 
-    host = args.host or os.environ.get("KLMCP_BIND", "127.0.0.1")
+    # CLI args override settings; settings override env defaults.
+    host = args.host or settings.bind
+    port = args.port if args.port != 8080 else settings.port
     if args.uds:
         mcp.run(transport="http", uds=args.uds)
     else:
-        mcp.run(transport="http", host=host, port=args.port)
+        mcp.run(transport="http", host=host, port=port)
     return 0
 
 

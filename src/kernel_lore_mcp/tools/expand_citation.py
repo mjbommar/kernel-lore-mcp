@@ -6,7 +6,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import ExpandCitationResponse
@@ -30,7 +30,7 @@ async def lore_expand_citation(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.expand_citation, token, limit)
     hits = [row_to_search_hit(r, tier_provenance=["metadata"]) for r in rows]

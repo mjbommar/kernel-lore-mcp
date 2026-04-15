@@ -10,7 +10,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError, not_found
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
@@ -28,7 +28,7 @@ async def lore_patch(
     """
     from kernel_lore_mcp import _core
 
-    settings = Settings()
+    settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     row = await run_with_timeout(reader.fetch_message, message_id)
     if row is None:

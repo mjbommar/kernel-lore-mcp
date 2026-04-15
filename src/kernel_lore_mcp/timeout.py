@@ -17,7 +17,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
 
 
@@ -34,7 +34,7 @@ async def run_with_timeout[T](
     """
     from kernel_lore_mcp.routes.metrics import record_tool_call
 
-    settings = Settings()
+    settings = get_settings()
     ms = timeout_ms or settings.query_wall_clock_ms
     tool_name = getattr(fn, "__name__", str(fn))
     started = time.monotonic()
