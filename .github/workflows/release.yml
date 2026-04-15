@@ -60,9 +60,13 @@ jobs:
         with:
           target: ${{ matrix.target.maturin-target }}
           args: --release --out dist --features abi3
+          # For linux targets, maturin-action auto-selects the
+          # matching manylinux container (x86_64 or aarch64) from
+          # the `manylinux` key. Do NOT pass --platform=linux/arm64
+          # via docker-options — it overrides the action's own
+          # image selection and falls back to a container that
+          # lacks the cross toolchain (aarch64-linux-gnu-gcc).
           manylinux: ${{ matrix.target.manylinux }}
-          # Cross-compile for aarch64 from an x86_64 runner.
-          docker-options: ${{ matrix.target.name == 'linux-aarch64' && '--platform=linux/arm64' || '' }}
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v5
