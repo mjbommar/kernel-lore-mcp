@@ -10,6 +10,9 @@ from __future__ import annotations
 from fastmcp import FastMCP
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.resources.blind_spots import BLIND_SPOTS_URI, blind_spots_text
+from kernel_lore_mcp.routes.metrics import metrics_endpoint
+from kernel_lore_mcp.routes.status import status_endpoint
 
 INSTRUCTIONS = """\
 Search and retrieve messages from the Linux kernel mailing list archives
@@ -31,7 +34,7 @@ Tools:
     wired to real indices in Phase 3/4.
 
 Coverage is lore public archives only. The MCP resource
-`blind_spots://coverage` enumerates what is NOT visible (private
+`blind-spots://coverage` enumerates what is NOT visible (private
 security@kernel.org queue, distro vendor backports, syzbot pre-public,
 research-shop pipelines, CVE in-flight embargoes). Fetch it once per
 session; do not re-fetch per call.
@@ -63,8 +66,21 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(lore_series_timeline, annotations=read_only)
     mcp.tool(lore_patch_search, annotations=read_only)
 
-    # TODO(phase-3/4): lore_patch, lore_thread, lore_patch_diff,
-    # lore_explain_patch once the trigram + BM25 tiers land.
-    # TODO(phase-2): register blind_spots resource + /status route.
+    # Register blind_spots as an MCP resource — fetch once per session.
+    @mcp.resource(
+        uri=BLIND_SPOTS_URI,
+        name="coverage",
+        description="What this index does NOT contain (embargoed queues, distro backports, etc).",
+        mime_type="text/plain",
+    )
+    def _blind_spots() -> str:
+        return blind_spots_text()
+
+    # Non-MCP HTTP routes. Accessible only when transport=http.
+    mcp.custom_route("/status", methods=["GET"])(status_endpoint)
+    mcp.custom_route("/metrics", methods=["GET"])(metrics_endpoint)
+
+    # TODO(phase-5+): lore_thread, lore_patch, lore_patch_diff,
+    # lore_explain_patch once the router lands.
     _ = settings
     return mcp

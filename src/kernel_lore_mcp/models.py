@@ -93,7 +93,7 @@ class SearchResponse(BaseModel):
     truncated_by_candidate_cap: bool = False
     freshness: Freshness
     blind_spots_ref: str = Field(
-        default="blind_spots://coverage",
+        default="blind-spots://coverage",
         description="MCP resource pointer. Fetch once, not per response.",
     )
 
@@ -133,7 +133,7 @@ class ActivityResponse(BaseModel):
     total: int = Field(description="Row count after filtering (not capped by limit).")
     default_applied: list[str] = Field(default_factory=list)
     freshness: Freshness
-    blind_spots_ref: str = "blind_spots://coverage"
+    blind_spots_ref: str = "blind-spots://coverage"
 
 
 class MessageResponse(BaseModel):
@@ -145,7 +145,7 @@ class MessageResponse(BaseModel):
     body_sha256: str
     body_length: int
     freshness: Freshness
-    blind_spots_ref: str = "blind_spots://coverage"
+    blind_spots_ref: str = "blind-spots://coverage"
 
 
 class SeriesTimelineEntry(BaseModel):
@@ -163,10 +163,10 @@ class SeriesTimelineEntry(BaseModel):
 class SeriesTimelineResponse(BaseModel):
     entries: list[SeriesTimelineEntry]
     freshness: Freshness
-    blind_spots_ref: str = "blind_spots://coverage"
+    blind_spots_ref: str = "blind-spots://coverage"
 
 
 class ExpandCitationResponse(BaseModel):
     results: list[SearchHit]
     freshness: Freshness
-    blind_spots_ref: str = "blind_spots://coverage"
+    blind_spots_ref: str = "blind-spots://coverage"

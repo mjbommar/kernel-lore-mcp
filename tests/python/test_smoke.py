@@ -46,4 +46,4 @@ async def test_lore_search_empty_response(client: Client) -> None:
     assert result.data.results == []
     assert result.data.next_cursor is None
     # Outputs carry the contract fields we care about in CLAUDE.md.
-    assert result.data.blind_spots_ref == "blind_spots://coverage"
+    assert result.data.blind_spots_ref == "blind-spots://coverage"
