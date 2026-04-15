@@ -31,6 +31,13 @@ against their own lore mirror.
 A single public instance we operate. Free. Streamable HTTP only.
 Accepts stdio-style MCP over HTTP from remote clients.
 
+**The hosted instance uses no authentication.** No API keys, no
+OAuth, no bearer tokens — same posture as local self-host. See
+CLAUDE.md § "Non-negotiable product constraints" for the reasoning:
+every agent pointed at kernel-lore-mcp is one fewer agent scraping
+lore directly, and the whole point of hosting it is to make
+integration frictionless.
+
 Extra runtime policy gates on top of the local posture:
 
 1. **Embargo quarantine.** Messages matching the rules in
@@ -46,13 +53,15 @@ Extra runtime policy gates on top of the local posture:
 3. **Redaction honoring.** Lore-upstream redactions propagate on
    next reindex. Direct redaction requests processed within 72 h
    of receipt ([`../../LEGAL.md`](../../LEGAL.md)).
-4. **`lore_activity` at file granularity is gated behind a free
-   API key.** The tool's full surface (who-touched-what by file,
-   grouped by series, with trailer chains) is a scraping
-   amplifier if left wide-open; we rate-limit it per-key. The
-   key is free — fill a form, receive a key, no approval queue.
-   Coarser-granularity queries (list-wide, thread-wide) stay
-   anonymous.
+4. **Per-IP rate limits.** nginx `limit_req_zone` at 60/min/ip,
+   `burst=30 nodelay`. Same limit for every caller. IPv6 truncated
+   to /64 so /128 sweeps don't trivially escape the quota. Abusive
+   sources get absorbed by the limit — no key to revoke, no
+   partner tier to gate, no business logic keyed on identity.
+   The rate limit is generous by design: fanout-to-one means we're
+   replacing N lore-scraping agents with 1 MCP request each, so
+   our aggregate cost to the kernel infrastructure goes DOWN as
+   adoption goes up.
 
 ## Same binary, runtime switch
 
@@ -61,7 +70,7 @@ env-driven). Proposed:
 
 ```
 KLMCP_MODE=local     # default
-KLMCP_MODE=hosted    # enables embargo quarantine + key-gated tools
+KLMCP_MODE=hosted    # enables embargo quarantine + rate limits
 ```
 
 No feature flag hides the code paths. A hosted instance that

@@ -64,8 +64,26 @@ become our public CI, turning every PR into a credibility artifact.
 
 Each stream independently flagged these; the intersection is binding.
 
-- **No OAuth 2.1 / DCR.** Anonymous read-only is the *right* posture for a
-  public lore mirror. Document the rationale; don't treat it as a gap.
+- **No authentication of any kind, ever.** No API keys, no OAuth 2.1, no DCR,
+  no bearer tokens, no login flow. The server is anonymous read-only on every
+  deployment — local, public, and every instance in between. Anything that
+  would require a caller to hold a secret is rejected at design time. This is
+  a **product constraint, not a posture choice**: we deliberately lower the
+  barrier so every developer's agent can talk to a kernel-lore MCP without
+  paperwork, without a key rotation story, without a shared-secret footgun.
+- **Production hosting is the same public-read-only server as local.** No tiered
+  access, no rate-gated "pro" endpoints, no "authenticated users get more."
+  If a data source we integrate requires auth against its upstream (KCIDB
+  BigQuery, GitHub API, etc.), that auth lives in the server's own deployment
+  config — **never exposed to callers**.
+- **We REDUCE load on lore.kernel.org; we do not add to it.** Every agent
+  pointed at a kernel-lore-mcp instance is one fewer agent that would
+  otherwise scrape `lore.kernel.org` directly. Fanout-to-one is the value
+  proposition. Do not apologize for integrating; the hosted instance + every
+  self-hosted instance together subtract traffic from lore, not add to it.
+  The server ingests via grokmirror (the sanctioned upstream mirror protocol)
+  and serves the indexed corpus, so there is zero additional HTTP pressure
+  on `lore.kernel.org` per MCP query. That's the point.
 - **No server-side sampling** as load-bearing — client support is sparse.
   Ship sampling-based tools only when they gracefully fall back to extractive.
 - **No elicitation round-trips** on required params — every query can be

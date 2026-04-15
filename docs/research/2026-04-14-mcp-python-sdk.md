@@ -16,10 +16,13 @@ HTTP transport, anonymous + rate-limited auth for v1.
   sunsetting SSE endpoints through June 2026. Streamable HTTP is
   what Claude Code, Claude.ai Connectors, Cursor, Codex, and Zed
   all speak.
-- Auth: MCP Nov 2025 spec mandates OAuth 2.1 + PKCE for
-  user-scoped servers. Read-only archive with no user-scoped data
-  is fine anonymous + per-IP rate limit. Revisit if we want
-  first-class claude.ai Connector listing.
+- Auth: **permanently anonymous, no exceptions.** MCP Nov 2025 spec
+  mandates OAuth 2.1 + PKCE for user-scoped servers; we are not a
+  user-scoped server and will never become one. Read-only archive,
+  per-IP rate limit only. OAuth is REJECTED on principle — see
+  CLAUDE.md § "Non-negotiable product constraints". This does not
+  block claude.ai Connector listing; it just means we never get the
+  per-user OAuth-gated listing tier, which we do not want anyway.
 
 ## Known gotchas encoded into the scaffold
 

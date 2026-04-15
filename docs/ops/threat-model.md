@@ -22,21 +22,26 @@ through us to evade lore-side rate limits.
 - Publish snapshot bundles so new self-hosters bootstrap from us
   rather than fan out on lore. → _pending_. See
   [`../architecture/reciprocity.md`](../architecture/reciprocity.md).
-- Per-IP + per-API-key rate limits on the hosted instance. →
-  _pending (Phase 2)._
+- Per-IP rate limit on the hosted instance (60/min, IPv6 /64
+  bucket). No API-key gate — see CLAUDE.md § "Non-negotiable product
+  constraints". → _pending (Phase 2)._
 
 ## 2. Rate-limit evasion
 
-**Threat.** Client rotates IPs / keys / User-Agents to blow past
+**Threat.** Client rotates IPs / User-Agents to blow past
 hosted-instance limits.
 
 **Mitigations.**
 - fail2ban on 429 signal at nginx. → _pending (Phase 4)._
-- API keys tied to `lore_activity` file-granularity queries; the
-  expensive surface is not anonymous. → _pending (Phase 2)._ See
-  [`../architecture/deployment-modes.md`](../architecture/deployment-modes.md).
 - Per-query wall-clock cap 5 s (regex DoS + resource). →
   _pending (Phase 4)._
+- `lore_activity` at file-granularity uses the same anonymous
+  rate limit as every other tool. The threat budget: if someone
+  wants the "who touched fs/smb/ in the last 90 days" view at
+  scale they will get it from raw lore + a GitHub dump anyway;
+  we only lose when we make the legit users' path harder than
+  the scraping path. See
+  [`../architecture/deployment-modes.md`](../architecture/deployment-modes.md).
 
 ## 3. Embargo leakage
 

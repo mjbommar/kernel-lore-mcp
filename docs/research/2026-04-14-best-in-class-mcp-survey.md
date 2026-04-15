@@ -75,8 +75,8 @@ Anthropic reference servers, Vercel + Cloudflare Workers ecosystem).
 
 - **Median.** API key in env/query.
 - **Top-quartile.** OAuth 2.1 + Dynamic Client Registration (RFC 7591). Linear, Atlassian, Cloudflare, Notion. Stripe layers restricted keys.
-- **Us.** Anonymous public read-only — appropriate for a public corpus.
-- **Gap.** None today. OAuth 2.1 + DCR if hosted instance ever accepts embargoed material.
+- **Us.** **No authentication, ever — product constraint, not posture.** Same anonymous surface on every deployment (local, hosted, everywhere). See CLAUDE.md § "Non-negotiable product constraints".
+- **Gap.** None. OAuth is a *rejected* requirement — deliberately not on any roadmap. The value proposition is zero-friction agent integration; a login flow contradicts that. If a hosted instance ever accepted embargoed material the answer would be "don't accept embargoed material", not "add OAuth."
 
 ## 11. Pagination
 
@@ -177,7 +177,7 @@ A server hitting ≥30 sits top 10%. Our count: **9.5/36**. `[we]` = already hit
 
 ### Transport & auth
 22. [we] Streamable HTTP (not SSE).
-23. [ ] OAuth 2.1 + DCR **or** documented anonymous-read rationale.
+23. [we] Anonymous-read posture documented — no auth, ever (CLAUDE.md §"Non-negotiable product constraints"). OAuth 2.1 + DCR explicitly REJECTED on principle, not deferred.
 24. [we] stdio mode: nothing to stdout outside framing.
 
 ### Pagination & scale
@@ -224,7 +224,7 @@ A server hitting ≥30 sits top 10%. Our count: **9.5/36**. `[we]` = already hit
 - Our **data model** is already ahead of top-quartile (stable `message_id`, `cite_key`, `body_sha256`, tier_provenance, HMAC cursors). What's missing is MCP-surface plumbing to **expose** it.
 - Biggest unforced error: freshness (item 30) — <100 LOC, no competitor does it well except FreshProbe, and we already have the generation counter.
 - Public scorecards are becoming table-stakes for credibility. Publishing an `mcp-eval` harness + 20-query scorecard is disproportionate reputation leverage.
-- **Resist OAuth 2.1.** Anonymous read-only is the *right* posture for a public lore mirror; document it, don't treat it as a gap.
+- **Reject OAuth 2.1.** Not "resist, someday maybe" — reject on principle. No auth, ever, on any deployment. Every agent that hits our MCP is one fewer agent scraping lore directly; friction at our door pushes them back to the raw lore HTTP surface, which is the opposite of what we want.
 
 ## Sources
 

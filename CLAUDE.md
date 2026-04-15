@@ -38,6 +38,26 @@ This is infrastructure, not a product. Be conservative. Be correct.
 Do not over-engineer. Do not under-engineer. Full design rationale
 lives in `docs/architecture/`. Execution contract in `TODO.md`.
 
+## Non-negotiable product constraints
+
+1. **No authentication, ever.** No API keys, no OAuth, no bearer
+   tokens, no login flow. Anonymous read-only is the posture on
+   every deployment — local, hosted, every instance in between.
+   This keeps the barrier to agent integration at zero. Any tool /
+   resource / prompt that would require the caller to hold a secret
+   is rejected at design time.
+2. **We reduce load on lore.kernel.org; we never add to it.** The
+   server ingests via `grokmirror` (the sanctioned upstream mirror
+   protocol) and serves the indexed corpus. Every agent pointed at
+   a kernel-lore-mcp instance is one fewer agent that would
+   otherwise scrape lore directly. Fanout-to-one is the value
+   proposition. Do not apologize for integrating — the hosted +
+   self-hosted instances together subtract traffic from lore.
+3. **Any upstream credential (e.g. KCIDB BigQuery, GitHub API for
+   data ingestion) lives in the server's deployment config and is
+   never exposed to callers.** Callers never need an upstream
+   account to use our MCP.
+
 ## Stack (April 2026, pinned on purpose)
 
 | Component | Version | Notes |
@@ -309,4 +329,7 @@ metadata tier is for.
   git2-rs. Do not add FastAPI for v1. Do not hold the GIL across
   heavy Rust calls. Do not write logs to stdout in stdio mode.
   Do not return bare dicts from MCP tools. Do not use the
-  side-effect-import tool registration pattern. These are decided.
+  side-effect-import tool registration pattern. Do not add
+  authentication of any kind (API keys, OAuth, bearer tokens) —
+  this is the same MCP server whether it's running on localhost
+  or the public instance. These are decided.

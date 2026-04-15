@@ -125,8 +125,10 @@ Articles are CC-BY-SA **after** 1-week subscriber window. RSS at
 `lwn.net/headlines/rss`. Scraping during embargo violates norms. Post-window
 text reusable with attribution. **Cost:** M. **Value:** 4 — LWN's kernel index
 + article-to-patch annotations are uniquely valuable. **Mode:** ingest
-post-embargo + headlines feed; link-only during embargo. **Take a subscription
-before scraping.**
+post-embargo + headlines feed; link-only during embargo. **Operator-side
+subscription only** — the LWN credential lives in the server's deployment
+env, callers never need an LWN account to query our MCP. See CLAUDE.md §
+"Non-negotiable product constraints" point 3.
 
 ## Tier 5 — Write-adjacent docs
 

@@ -28,7 +28,7 @@ bottom; if you only have five minutes, skip there first.
 | Static resources            | YES — 1 | `blind-spots://coverage` |
 | Resource templates (RFC 6570) | NO | `add_template` / `@mcp.resource("uri://{p}")` |
 | Prompts (`@mcp.prompt`)     | NO | Server-provided slash commands w/ args |
-| Sampling (`ctx.sample`)     | NO | Server asks the *client* LLM — no API key needed |
+| Sampling (`ctx.sample`)     | NO | Server asks the *client* LLM — we hold zero keys, caller holds zero keys |
 | Elicitation (`ctx.elicit`)  | NO | Server asks user for structured input mid-call |
 | Progress (`ctx.report_progress`) | NO | Long-running tools feel snappier |
 | Logging (`ctx.info` etc.)   | NO | Per-call logs surface in the client UI |

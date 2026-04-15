@@ -29,34 +29,46 @@ mcp.run(transport="http", host="0.0.0.0", port=8080)
 Default bind is `127.0.0.1`. **Always pass `host="0.0.0.0"` in the
 hosted path.** This has bitten other FastMCP deploys.
 
-## Auth (v1)
+## Auth — permanently anonymous read-only
 
-Anonymous + per-IP rate limit. Fine for a public read-only archive.
+**There is no authentication. There will never be authentication.**
+This is a product constraint, not a posture choice (see CLAUDE.md §
+"Non-negotiable product constraints"):
 
-- nginx in front handles `limit_req_zone` at 60/min/ip.
-- Optional `Authorization: Bearer <token>` lifts the IP ceiling for
-  known partners (handled in a thin FastAPI middleware — not
-  strictly MCP).
+- **No API keys.** Not as a query string, not as a header, not lifted
+  by an env var. Don't add one to "temporarily gate" a new tool
+  either — build the tool safely for anonymous use or don't ship it.
+- **No OAuth 2.1, no PKCE, no DCR.** Do not layer it in a v2 "if we
+  ever want claude.ai Connectors." The claude.ai Connector story is
+  solved for us by the fact that any developer can point their agent
+  at a self-hosted instance — no gate at all is better than even the
+  friction of a login flow for a public read-only mirror.
+- **No Bearer "partner token" lift.** Do not add a rate-limit bypass
+  keyed on a shared secret; that's an API key with different naming.
+  The per-IP limit is the only lever.
 - **No user accounts, no session state, no per-user data.** All
   responses deterministic given (query, index snapshot).
+- **Upstream credentials (KCIDB BigQuery, GitHub API for ingestion,
+  LWN feed, etc.) live in the server's deployment env and never
+  touch the caller.** The caller's MCP request never carries a
+  secret, inbound or outbound.
 
-## Auth (v2, conditional)
+### Rate limiting
 
-If we want first-class claude.ai Connector listing, layer OAuth
-2.1 + PKCE per the MCP June 2025 auth spec:
-
-- Client-ID Metadata Documents (CIMD) for dynamic registration.
-- Split MCP server (us) from authorization server (WorkOS / Stytch
-  / Scalekit — don't roll our own).
-- Tokens are still read-only scopes; we never write.
-
-Skip for v1.
+- nginx in front handles `limit_req_zone` at 60/min/ip, `burst=30`
+  `nodelay`. Same limit every caller, everywhere.
+- IPv6 handled via `$binary_remote_addr` truncation (/64) so we
+  don't trivially allow /128 sweeps.
+- 429 responses carry a `Retry-After` header so agents back off.
+- The rate limit is generous by design — fanout-to-one means every
+  agent pointed at us is one fewer scraping lore directly, so a
+  mild per-IP limit is the right safety valve, not a paywall.
 
 ## CORS
 
 - Allow-origin `*` on GET endpoints. Allow-headers: standard MCP.
 - Allow-methods: GET, POST (MCP uses POST for `tools/call`), OPTIONS.
-- No cookies — strictly Bearer or anonymous.
+- No cookies — strictly anonymous, every request.
 
 ## TLS
 
