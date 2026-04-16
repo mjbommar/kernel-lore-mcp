@@ -69,10 +69,14 @@ pub struct MetadataBatch {
     tested_by: ListBuilder<StringBuilder>,
     co_developed_by: ListBuilder<StringBuilder>,
     reported_by: ListBuilder<StringBuilder>,
+    suggested_by: ListBuilder<StringBuilder>,
+    helped_by: ListBuilder<StringBuilder>,
+    assisted_by: ListBuilder<StringBuilder>,
     fixes: ListBuilder<StringBuilder>,
     link: ListBuilder<StringBuilder>,
     closes: ListBuilder<StringBuilder>,
     cc_stable: ListBuilder<StringBuilder>,
+    trailers_json: StringBuilder,
     body_segment_id: UInt32Builder,
     body_offset: UInt64Builder,
     body_length: UInt64Builder,
@@ -120,10 +124,14 @@ impl MetadataBatch {
             tested_by: ListBuilder::new(StringBuilder::new()),
             co_developed_by: ListBuilder::new(StringBuilder::new()),
             reported_by: ListBuilder::new(StringBuilder::new()),
+            suggested_by: ListBuilder::new(StringBuilder::new()),
+            helped_by: ListBuilder::new(StringBuilder::new()),
+            assisted_by: ListBuilder::new(StringBuilder::new()),
             fixes: ListBuilder::new(StringBuilder::new()),
             link: ListBuilder::new(StringBuilder::new()),
             closes: ListBuilder::new(StringBuilder::new()),
             cc_stable: ListBuilder::new(StringBuilder::new()),
+            trailers_json: StringBuilder::new(),
             body_segment_id: UInt32Builder::new(),
             body_offset: UInt64Builder::new(),
             body_length: UInt64Builder::new(),
@@ -185,10 +193,16 @@ impl MetadataBatch {
         append_list(&mut self.tested_by, &row.parsed.tested_by);
         append_list(&mut self.co_developed_by, &row.parsed.co_developed_by);
         append_list(&mut self.reported_by, &row.parsed.reported_by);
+        append_list(&mut self.suggested_by, &row.parsed.suggested_by);
+        append_list(&mut self.helped_by, &row.parsed.helped_by);
+        append_list(&mut self.assisted_by, &row.parsed.assisted_by);
         append_list(&mut self.fixes, &row.parsed.fixes);
         append_list(&mut self.link, &row.parsed.link);
         append_list(&mut self.closes, &row.parsed.closes);
         append_list(&mut self.cc_stable, &row.parsed.cc_stable);
+        // Catch-all: serialize the full trailers map as JSON.
+        let tj = serde_json::to_string(&row.parsed.trailers).unwrap_or_default();
+        self.trailers_json.append_value(&tj);
 
         self.body_segment_id.append_value(row.offset.segment_id);
         self.body_offset.append_value(row.offset.offset);
@@ -231,10 +245,14 @@ impl MetadataBatch {
             Arc::new(self.tested_by.finish()),
             Arc::new(self.co_developed_by.finish()),
             Arc::new(self.reported_by.finish()),
+            Arc::new(self.suggested_by.finish()),
+            Arc::new(self.helped_by.finish()),
+            Arc::new(self.assisted_by.finish()),
             Arc::new(self.fixes.finish()),
             Arc::new(self.link.finish()),
             Arc::new(self.closes.finish()),
             Arc::new(self.cc_stable.finish()),
+            Arc::new(self.trailers_json.finish()),
             Arc::new(self.body_segment_id.finish()),
             Arc::new(self.body_offset.finish()),
             Arc::new(self.body_length.finish()),

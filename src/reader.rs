@@ -68,6 +68,10 @@ pub struct MessageRow {
     pub link: Vec<String>,
     pub closes: Vec<String>,
     pub cc_stable: Vec<String>,
+    pub suggested_by: Vec<String>,
+    pub helped_by: Vec<String>,
+    pub assisted_by: Vec<String>,
+    pub trailers_json: Option<String>,
     pub body_segment_id: u32,
     pub body_offset: u64,
     pub body_length: u64,
@@ -1290,6 +1294,7 @@ fn is_cve_id(s: &str) -> bool {
 ///
 /// This is the one place we map column names → indices. If you add a
 /// column to the schema, add it here.
+#[allow(clippy::needless_borrow)]
 fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
     let schema = batch.schema();
     let get = |name: &str| -> Result<&dyn Array> {
@@ -1306,19 +1311,19 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
     let list = downcast_string(batch, sc::COL_LIST)?;
     let shard = downcast_string(batch, sc::COL_SHARD)?;
     let commit_oid = downcast_string(batch, sc::COL_COMMIT_OID)?;
-    let from_addr = downcast_string_opt(batch, sc::COL_FROM_ADDR)?;
-    let from_name = downcast_string_opt(batch, sc::COL_FROM_NAME)?;
-    let subject_raw = downcast_string_opt(batch, sc::COL_SUBJECT_RAW)?;
-    let subject_normalized = downcast_string_opt(batch, sc::COL_SUBJECT_NORMALIZED)?;
+    let from_addr = downcast_string(batch, sc::COL_FROM_ADDR)?;
+    let from_name = downcast_string(batch, sc::COL_FROM_NAME)?;
+    let subject_raw = downcast_string(batch, sc::COL_SUBJECT_RAW)?;
+    let subject_normalized = downcast_string(batch, sc::COL_SUBJECT_NORMALIZED)?;
     let subject_tags = downcast_list(batch, sc::COL_SUBJECT_TAGS)?;
     let date = batch
         .column(schema.index_of(sc::COL_DATE).unwrap())
         .as_any()
         .downcast_ref::<TimestampNanosecondArray>()
         .cloned();
-    let in_reply_to = downcast_string_opt(batch, sc::COL_IN_REPLY_TO)?;
+    let in_reply_to = downcast_string(batch, sc::COL_IN_REPLY_TO)?;
     let references = downcast_list(batch, sc::COL_REFERENCES)?;
-    let tid = downcast_string_opt(batch, sc::COL_TID)?;
+    let tid = downcast_string_opt(batch, sc::COL_TID);
     let series_version = downcast_u32(batch, sc::COL_SERIES_VERSION)?;
     let series_index = downcast_u32(batch, sc::COL_SERIES_INDEX)?;
     let series_total = downcast_u32(batch, sc::COL_SERIES_TOTAL)?;
@@ -1339,6 +1344,10 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
     let link_trailers = downcast_list(batch, sc::COL_LINK)?;
     let closes = downcast_list(batch, sc::COL_CLOSES)?;
     let cc_stable = downcast_list(batch, sc::COL_CC_STABLE)?;
+    let suggested_by = downcast_list_opt(batch, sc::COL_SUGGESTED_BY);
+    let helped_by = downcast_list_opt(batch, sc::COL_HELPED_BY);
+    let assisted_by = downcast_list_opt(batch, sc::COL_ASSISTED_BY);
+    let trailers_json = downcast_string_opt(batch, sc::COL_TRAILERS_JSON);
     // body_segment_id was added after v0.1.0; older Parquet files
     // lack it. Default to segment 0 for backward compat.
     let body_segment_id = downcast_u32_opt(batch, sc::COL_BODY_SEGMENT_ID);
@@ -1362,7 +1371,13 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
             date_unix_ns: date.as_ref().filter(|a| !a.is_null(i)).map(|a| a.value(i)),
             in_reply_to: opt_string(&in_reply_to, i),
             references: list_strings(&references, i),
-            tid: opt_string(&tid, i),
+            tid: tid.as_ref().and_then(|a| {
+                if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_owned())
+                }
+            }),
             series_version: series_version.value(i),
             series_index: if series_index.is_null(i) {
                 None
@@ -1403,6 +1418,25 @@ fn materialize_batch(batch: &RecordBatch) -> Result<Vec<MessageRow>> {
             link: list_strings(&link_trailers, i),
             closes: list_strings(&closes, i),
             cc_stable: list_strings(&cc_stable, i),
+            suggested_by: suggested_by
+                .as_ref()
+                .map(|a| list_strings(a, i))
+                .unwrap_or_default(),
+            helped_by: helped_by
+                .as_ref()
+                .map(|a| list_strings(a, i))
+                .unwrap_or_default(),
+            assisted_by: assisted_by
+                .as_ref()
+                .map(|a| list_strings(a, i))
+                .unwrap_or_default(),
+            trailers_json: trailers_json.as_ref().and_then(|a| {
+                if a.is_null(i) {
+                    None
+                } else {
+                    Some(a.value(i).to_owned())
+                }
+            }),
             body_segment_id: body_segment_id.as_ref().map(|a| a.value(i)).unwrap_or(0),
             body_offset: body_offset.value(i),
             body_length: body_length.value(i),
@@ -1425,8 +1459,25 @@ fn downcast_string<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringA
         .ok_or_else(|| Error::State(format!("column {name} not utf8")))
 }
 
-fn downcast_string_opt(batch: &RecordBatch, name: &str) -> Result<StringArray> {
-    Ok(downcast_string(batch, name)?.clone())
+/// Returns `None` when the column doesn't exist (backward compat for
+/// columns added after v0.1.0).
+fn downcast_string_opt(batch: &RecordBatch, name: &str) -> Option<StringArray> {
+    let idx = batch.schema().index_of(name).ok()?;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .cloned()
+}
+
+/// Returns `None` when the column doesn't exist (backward compat).
+fn downcast_list_opt(batch: &RecordBatch, name: &str) -> Option<ListArray> {
+    let idx = batch.schema().index_of(name).ok()?;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .cloned()
 }
 
 fn downcast_bool(batch: &RecordBatch, name: &str) -> Result<BooleanArray> {

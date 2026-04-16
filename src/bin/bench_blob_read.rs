@@ -66,8 +66,7 @@ fn main() {
 
     // Phase 3: read all blobs via git2
     eprintln!("--- git2 blob read ({} blobs) ---", oids.len());
-    let git2_repo =
-        git2::Repository::open_bare(&shard_path).expect("git2 open");
+    let git2_repo = git2::Repository::open_bare(&shard_path).expect("git2 open");
     let t2 = Instant::now();
     let mut git2_bytes: u64 = 0;
     for (_, gix_oid) in &oids {

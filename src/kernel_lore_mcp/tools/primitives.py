@@ -59,6 +59,9 @@ _EQ_FIELDS = {
     "tested_by",
     "co_developed_by",
     "reported_by",
+    "suggested_by",
+    "helped_by",
+    "assisted_by",
     "fixes",
     "link",
     "closes",
@@ -84,6 +87,13 @@ _TRAILER_NAMES = {
     "co_developed_by",
     "reported-by",
     "reported_by",
+    "suggested-by",
+    "suggested_by",
+    "helped-by",
+    "helped_by",
+    "assisted-by",
+    "assisted_by",
+    "co-authored-by",
 }
 
 

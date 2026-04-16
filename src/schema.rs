@@ -49,10 +49,14 @@ pub const COL_ACKED_BY: &str = "acked_by";
 pub const COL_TESTED_BY: &str = "tested_by";
 pub const COL_CO_DEVELOPED_BY: &str = "co_developed_by";
 pub const COL_REPORTED_BY: &str = "reported_by";
+pub const COL_SUGGESTED_BY: &str = "suggested_by";
+pub const COL_HELPED_BY: &str = "helped_by";
+pub const COL_ASSISTED_BY: &str = "assisted_by";
 pub const COL_FIXES: &str = "fixes";
 pub const COL_LINK: &str = "link";
 pub const COL_CLOSES: &str = "closes";
 pub const COL_CC_STABLE: &str = "cc_stable";
+pub const COL_TRAILERS_JSON: &str = "trailers_json";
 pub const COL_BODY_SEGMENT_ID: &str = "body_segment_id";
 pub const COL_BODY_OFFSET: &str = "body_offset";
 pub const COL_BODY_LENGTH: &str = "body_length";
@@ -105,10 +109,17 @@ pub fn metadata_schema() -> Arc<Schema> {
         Field::new(COL_TESTED_BY, utf8_list.clone(), true),
         Field::new(COL_CO_DEVELOPED_BY, utf8_list.clone(), true),
         Field::new(COL_REPORTED_BY, utf8_list.clone(), true),
+        Field::new(COL_SUGGESTED_BY, utf8_list.clone(), true),
+        Field::new(COL_HELPED_BY, utf8_list.clone(), true),
+        Field::new(COL_ASSISTED_BY, utf8_list.clone(), true),
         Field::new(COL_FIXES, utf8_list.clone(), true),
         Field::new(COL_LINK, utf8_list.clone(), true),
         Field::new(COL_CLOSES, utf8_list.clone(), true),
         Field::new(COL_CC_STABLE, utf8_list, true),
+        // Catch-all: full trailers BTreeMap as JSON so any trailer
+        // (including ones invented after this schema was written)
+        // is queryable without a schema migration.
+        Field::new(COL_TRAILERS_JSON, DataType::Utf8, true),
         Field::new(COL_BODY_SEGMENT_ID, DataType::UInt32, false),
         Field::new(COL_BODY_OFFSET, DataType::UInt64, false),
         Field::new(COL_BODY_LENGTH, DataType::UInt64, false),
