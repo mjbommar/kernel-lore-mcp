@@ -84,7 +84,8 @@ Shipped:
 - Full MCP surface: 19 tools (search, primitives, sampling-backed
   summarize/classify/explain), 5 RFC-6570 resource templates, 5
   slash-command prompts, populated KWIC snippets, freshness
-  marker on every response, HMAC-signed pagination cursors.
+  marker on every response. (HMAC-signed pagination cursors are
+  designed but not yet wired through tool responses — v0.2.0.)
 - stdio + Streamable HTTP transports; no SSE.
 - `/status` + `/metrics` (Prometheus) with freshness_ok signal.
 - systemd units for hosted deploy; 5-min grokmirror cadence

@@ -111,7 +111,10 @@ def get_status(settings: Settings | None = None) -> dict[str, Any]:
     tests with different tmp_paths) don't cross-contaminate. TTL
     comes from `settings.freshness_cache_ttl_seconds`.
     """
-    settings = settings or Settings()
+    if settings is None:
+        from kernel_lore_mcp.config import get_settings
+
+        settings = get_settings()
     cache_key = str(settings.data_dir)
     ttl = settings.freshness_cache_ttl_seconds
     now = time.monotonic()

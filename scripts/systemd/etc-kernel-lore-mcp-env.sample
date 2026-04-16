@@ -28,4 +28,4 @@ KLMCP_DATA_DIR=/var/lib/kernel-lore-mcp
 # HMAC key for opaque cursor signing. Server-SIDE secret; callers
 # never see it. Rotate by restarting klmcp-mcp with a new value.
 # Generate with: openssl rand -hex 32
-KLMCP_CURSOR_KEY=REPLACE_WITH_openssl_rand_hex_32
+KLMCP_CURSOR_SIGNING_KEY=REPLACE_WITH_openssl_rand_hex_32

@@ -144,7 +144,7 @@ sudo install -o root -g root -m 0644 \
 sudo install -o root -g kernel-lore-mcp -m 0640 \
     scripts/systemd/etc-kernel-lore-mcp-env.sample \
     /etc/kernel-lore-mcp/env
-sudoedit /etc/kernel-lore-mcp/env  # set KLMCP_CURSOR_KEY at minimum
+sudoedit /etc/kernel-lore-mcp/env  # set KLMCP_CURSOR_SIGNING_KEY at minimum
 ```
 
 Generate the cursor HMAC key (server-side secret; callers never see
@@ -152,7 +152,7 @@ it — see [`../mcp/transport-auth.md`](../mcp/transport-auth.md)):
 
 ```sh
 openssl rand -hex 32
-# paste into /etc/kernel-lore-mcp/env:KLMCP_CURSOR_KEY
+# paste into /etc/kernel-lore-mcp/env:KLMCP_CURSOR_SIGNING_KEY
 ```
 
 ## 4. Enable + start

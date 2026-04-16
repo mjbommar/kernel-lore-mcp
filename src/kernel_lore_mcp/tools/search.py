@@ -46,7 +46,16 @@ async def lore_search(
         ),
     ],
     limit: Annotated[int, Field(ge=1, le=200)] = 25,
-    cursor: Annotated[str | None, Field(description="HMAC-signed pagination cursor.")] = None,
+    cursor: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Reserved for future HMAC-signed pagination. Currently "
+                "ignored; always returns next_cursor=None. Do not build "
+                "on this field until it ships."
+            ),
+        ),
+    ] = None,
     response_format: Annotated[
         Literal["concise", "detailed"],
         Field(

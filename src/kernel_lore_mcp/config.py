@@ -89,6 +89,13 @@ class Settings(BaseSettings):
 # Process-wide singleton. Set once by build_server(); read by tools
 # via get_settings(). Avoids re-parsing env on every request and
 # makes build_server(settings=...) meaningful.
+#
+# KNOWN LIMITATION: if two FastMCP instances with different data_dirs
+# exist in one process, the later build_server() call retargets the
+# singleton. This is acceptable for production (one server per process)
+# but means tests that build multiple servers must call set_settings()
+# between them. A proper fix would require FastMCP to support per-
+# server dependency injection, which it currently doesn't.
 _singleton: Settings | None = None
 
 
