@@ -61,7 +61,9 @@ pub fn ingest_shard_unlocked(
     shard: &str,
     run_id: &str,
 ) -> Result<IngestStats> {
-    ingest_shard_with_bm25(data_dir, shard_path, list, shard, run_id, None, None)
+    // Default: build BM25 inline (backward compat for the Python
+    // single-shard path). The Rust binary uses skip_bm25=true.
+    ingest_shard_with_bm25(data_dir, shard_path, list, shard, run_id, None, None, false)
 }
 
 /// Full-control variant: accepts optional shared writers so
@@ -80,6 +82,15 @@ pub fn ingest_shard_unlocked(
 ///   goes stale and the returned `StoreOffset` can point at the
 ///   wrong frame.
 /// - When `None`, this function opens its own `Store`.
+///
+/// `skip_bm25`: when true (the default for the hot-path ingest),
+/// the BM25 tier is not written. This makes ingest ~12x faster
+/// because tantivy tokenization + segment management dominates
+/// per-message cost. The BM25 index is built separately via
+/// `rebuild_bm25()` after the hot path finishes.
+///
+/// `shared_bm25` / `shared_store`: see earlier docs.
+#[allow(clippy::too_many_arguments)]
 pub fn ingest_shard_with_bm25(
     data_dir: &Path,
     shard_path: &Path,
@@ -88,6 +99,7 @@ pub fn ingest_shard_with_bm25(
     run_id: &str,
     shared_bm25: Option<&Mutex<BmWriter>>,
     shared_store: Option<&Mutex<Store>>,
+    skip_bm25: bool,
 ) -> Result<IngestStats> {
     let state = State::new(data_dir)?;
     let owned_store;
@@ -127,11 +139,11 @@ pub fn ingest_shard_with_bm25(
 
     let mut batch = MetadataBatch::new();
     let mut trigram = TrigramBuilder::new();
-    // local_bm25 is Some when the caller didn't supply a shared
-    // writer (single-shard / Python path). We commit it ourselves at
-    // the end; multi-shard binaries hand us shared_bm25 and commit
-    // once outside.
-    let mut local_bm25: Option<BmWriter> = if shared_bm25.is_none() {
+    // local_bm25 is Some when (a) the caller didn't supply a shared
+    // writer AND (b) skip_bm25 is false. When skip_bm25 is true, no
+    // BM25 work happens at all — the index is built separately via
+    // rebuild_bm25().
+    let mut local_bm25: Option<BmWriter> = if !skip_bm25 && shared_bm25.is_none() {
         Some(BmWriter::open(data_dir)?)
     } else {
         None
@@ -175,7 +187,8 @@ pub fn ingest_shard_with_bm25(
         }
 
         // Prose (body minus patch) + normalized subject go to BM25.
-        if !parsed.prose.is_empty() || parsed.subject_normalized.is_some() {
+        // Skipped when skip_bm25 is true (the hot-path default).
+        if !skip_bm25 && (!parsed.prose.is_empty() || parsed.subject_normalized.is_some()) {
             match (&mut local_bm25, shared_bm25) {
                 (Some(w), _) => {
                     w.add(
@@ -281,6 +294,56 @@ fn hex(bytes: &[u8]) -> String {
         s.push(HEX[(b & 0x0f) as usize] as char);
     }
     s
+}
+
+/// Rebuild the BM25 index from the compressed store + metadata.
+///
+/// Reads every message body from the store, splits prose/patch,
+/// and batch-adds to tantivy. This is the deferred pass that runs
+/// after the hot-path ingest (which skips BM25 for speed).
+///
+/// Idempotent: each call rebuilds the entire BM25 index from
+/// scratch. Safe to run while the MCP server is serving queries —
+/// tantivy's reader reload picks up the new segments on the next
+/// query boundary.
+pub fn rebuild_bm25(data_dir: &Path) -> Result<u64> {
+    use crate::reader::Reader;
+
+    let reader = Reader::new(data_dir);
+    let mut writer = BmWriter::open(data_dir)?;
+
+    let mut rows = Vec::new();
+    reader.scan_all(&mut rows)?;
+
+    let mut count: u64 = 0;
+    for row in &rows {
+        let body = reader.fetch_body(&row.message_id)?;
+        let Some(body) = body else { continue };
+
+        let text = std::str::from_utf8(&body).unwrap_or("");
+
+        // Split prose from patch — same logic as the Python side.
+        let prose = if text.starts_with("diff --git ") {
+            ""
+        } else if let Some(idx) = text.find("\ndiff --git ") {
+            &text[..idx + 1]
+        } else {
+            text
+        };
+
+        let subject = row
+            .subject_normalized
+            .as_deref()
+            .or(row.subject_raw.as_deref());
+
+        if !prose.is_empty() || subject.is_some() {
+            writer.add(&row.message_id, &row.list, subject, prose)?;
+            count += 1;
+        }
+    }
+
+    writer.commit()?;
+    Ok(count)
 }
 
 #[cfg(test)]

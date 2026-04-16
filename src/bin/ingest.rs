@@ -51,6 +51,23 @@ fn main() -> Result<()> {
         .data_dir
         .or_else(|| std::env::var_os("KLMCP_DATA_DIR").map(PathBuf::from))
         .context("--data-dir or KLMCP_DATA_DIR required")?;
+
+    std::fs::create_dir_all(&data_dir)?;
+
+    // --rebuild-bm25: standalone BM25 rebuild from existing store.
+    // Doesn't need --lore-mirror or the writer lock (reads only).
+    if args.rebuild_bm25_only {
+        tracing::info!(data_dir = %data_dir.display(), "rebuilding BM25 from store");
+        let start = Instant::now();
+        let count = _core::rebuild_bm25(&data_dir).context("rebuild_bm25 failed")?;
+        tracing::info!(
+            docs = count,
+            elapsed_secs = start.elapsed().as_secs_f64(),
+            "BM25 rebuild complete"
+        );
+        return Ok(());
+    }
+
     let lore_mirror = args
         .lore_mirror
         .or_else(|| std::env::var_os("KLMCP_LORE_MIRROR_DIR").map(PathBuf::from))
@@ -82,11 +99,22 @@ fn main() -> Result<()> {
         .acquire_writer_lock()
         .context("another ingest process is running (writer.lock held)")?;
 
-    // Single shared BM25 writer for the whole run. tantivy's
-    // IndexWriter takes an exclusive directory lock; a per-shard
-    // writer would block every peer. Mutex-wrap and let rayon
-    // serialize bm25.add calls.
-    let bm25 = Mutex::new(_core::BmWriter::open(&data_dir).context("open BM25 writer")?);
+    let skip_bm25 = !args.with_bm25;
+    if skip_bm25 {
+        tracing::info!(
+            "BM25 deferred (default). Run --rebuild-bm25 after ingest to build the prose index."
+        );
+    }
+
+    // Single shared BM25 writer for the whole run. Only opened when
+    // --with-bm25 is set; otherwise skipped entirely for speed.
+    let bm25 = if !skip_bm25 {
+        Some(Mutex::new(
+            _core::BmWriter::open(&data_dir).context("open BM25 writer")?,
+        ))
+    } else {
+        None
+    };
 
     // One shared Store per list. When a list has multiple shards
     // (e.g. lkml has 19), every shard in that list MUST serialize
@@ -106,12 +134,12 @@ fn main() -> Result<()> {
     let start = Instant::now();
     let totals = shards
         .par_iter()
-        .map(|shard| ingest_one(&data_dir, shard, &run_id, &bm25, &stores))
+        .map(|shard| ingest_one(&data_dir, shard, &run_id, &bm25, &stores, skip_bm25))
         .collect::<Vec<_>>();
 
-    // Commit BM25 once, after all shards finish.
-    {
-        let mut w = bm25
+    // Commit BM25 once, after all shards finish (only if BM25 was built).
+    if let Some(ref bm25_mutex) = bm25 {
+        let mut w = bm25_mutex
             .lock()
             .map_err(|_| anyhow::anyhow!("bm25 writer mutex poisoned"))?;
         w.commit().context("bm25 commit")?;
@@ -181,21 +209,24 @@ fn ingest_one(
     data_dir: &Path,
     shard: &ShardRef,
     run_id: &str,
-    bm25: &Mutex<_core::BmWriter>,
+    bm25: &Option<Mutex<_core::BmWriter>>,
     stores: &std::collections::HashMap<String, Mutex<_core::Store>>,
+    skip_bm25: bool,
 ) -> Result<_core::IngestStats> {
     let per_shard_run_id = format!("{run_id}-{}-{}", shard.list, shard.shard);
     let shared_store = stores
         .get(&shard.list)
         .ok_or_else(|| anyhow::anyhow!("no shared store for list {:?}", shard.list))?;
+    let shared_bm25 = bm25.as_ref();
     let stats = _core::ingest_shard_with_bm25(
         data_dir,
         &shard.path,
         &shard.list,
         &shard.shard,
         &per_shard_run_id,
-        Some(bm25),
+        shared_bm25,
         Some(shared_store),
+        skip_bm25,
     )
     .with_context(|| {
         format!(
@@ -256,6 +287,8 @@ struct Args {
     lore_mirror: Option<PathBuf>,
     list: Option<String>,
     run_id: Option<String>,
+    with_bm25: bool,
+    rebuild_bm25_only: bool,
 }
 
 fn parse_args() -> Args {
@@ -269,14 +302,18 @@ fn parse_args() -> Args {
             "--lore-mirror" => args.lore_mirror = it.next().map(PathBuf::from),
             "--list" => args.list = it.next(),
             "--run-id" => args.run_id = it.next(),
+            "--with-bm25" => args.with_bm25 = true,
+            "--rebuild-bm25" => args.rebuild_bm25_only = true,
             "--help" | "-h" => {
                 println!(
                     "kernel-lore-ingest\n\
                      \n\
-                     --data-dir PATH     (or $KLMCP_DATA_DIR)\n\
-                     --lore-mirror PATH  (or $KLMCP_LORE_MIRROR_DIR)\n\
-                     --list NAME         optional: restrict to one list\n\
-                     --run-id STRING     optional: stable id for this run\n"
+                     --data-dir PATH       (or $KLMCP_DATA_DIR)\n\
+                     --lore-mirror PATH    (or $KLMCP_LORE_MIRROR_DIR)\n\
+                     --list NAME           optional: restrict to one list\n\
+                     --run-id STRING       optional: stable id for this run\n\
+                     --with-bm25           build BM25 inline (slower; default: skip)\n\
+                     --rebuild-bm25        ONLY rebuild BM25 from existing store, then exit\n"
                 );
                 std::process::exit(0);
             }

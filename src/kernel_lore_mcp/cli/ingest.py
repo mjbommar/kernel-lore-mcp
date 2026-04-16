@@ -61,6 +61,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--log-level",
         default=os.environ.get("KLMCP_LOG_LEVEL", "INFO"),
     )
+    p.add_argument(
+        "--with-bm25",
+        action="store_true",
+        default=False,
+        help=(
+            "Build BM25 inline (slower). Default: skip BM25 for ~12x "
+            "faster ingest; run --rebuild-bm25 afterward."
+        ),
+    )
+    p.add_argument(
+        "--rebuild-bm25",
+        action="store_true",
+        default=False,
+        help="ONLY rebuild BM25 from the existing store, then exit.",
+    )
     return p
 
 
@@ -97,11 +112,33 @@ def main(argv: list[str] | None = None) -> int:
     if not args.data_dir:
         print("ERROR: --data-dir or KLMCP_DATA_DIR required", file=sys.stderr)
         return 2
+
+    data_dir = Path(args.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    # --rebuild-bm25: standalone BM25 rebuild from existing store.
+    if args.rebuild_bm25:
+        logging.basicConfig(
+            level=getattr(logging, args.log_level.upper(), logging.INFO),
+            stream=sys.stderr,
+            format="[%(asctime)s] %(message)s",
+        )
+        log = logging.getLogger("kernel-lore-ingest")
+        log.info("rebuilding BM25 from store at %s", data_dir)
+        started = time.monotonic()
+        from kernel_lore_mcp import _core
+
+        count = _core.rebuild_bm25(data_dir)
+        log.info(
+            "BM25 rebuild complete: %d docs, %.1fs",
+            count,
+            time.monotonic() - started,
+        )
+        return 0
+
     if not args.lore_mirror:
         print("ERROR: --lore-mirror or KLMCP_LORE_MIRROR_DIR required", file=sys.stderr)
         return 2
-
-    data_dir = Path(args.data_dir)
     lore_mirror = Path(args.lore_mirror)
     data_dir.mkdir(parents=True, exist_ok=True)
 

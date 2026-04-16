@@ -49,7 +49,9 @@ mod trigram;
 // paths.
 pub use bm25::BmWriter;
 pub use embedding::{EmbeddingBuilder, EmbeddingMeta, EmbeddingReader};
-pub use ingest::{IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25};
+pub use ingest::{
+    IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25, rebuild_bm25,
+};
 pub use router::{CursorPayload, ParsedQuery, RankedHit, parse_query, sign_cursor, verify_cursor};
 pub use state::State;
 pub use store::Store;
@@ -60,6 +62,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_ingest_shard, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_rebuild_tid, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_rebuild_bm25, m)?)?;
     m.add_function(wrap_pyfunction!(
         crate::python::py_build_embedding_index,
         m

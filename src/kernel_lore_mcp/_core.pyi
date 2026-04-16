@@ -30,6 +30,7 @@ class TidRebuildResult(TypedDict):
     rows: int
 
 def rebuild_tid(data_dir: str | PathLike[str]) -> TidRebuildResult: ...
+def rebuild_bm25(data_dir: str | PathLike[str]) -> int: ...
 
 class EmbeddingMeta(TypedDict):
     model: str

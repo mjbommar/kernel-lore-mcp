@@ -69,6 +69,15 @@ pub fn py_rebuild_tid<'py>(py: Python<'py>, data_dir: PathBuf) -> PyResult<Bound
     Ok(d)
 }
 
+/// Rebuild the BM25 index from the compressed store + metadata.
+/// Returns the number of docs indexed.
+#[pyfunction]
+#[pyo3(name = "rebuild_bm25")]
+pub fn py_rebuild_bm25(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let count = py.detach(|| ingest::rebuild_bm25(&data_dir))?;
+    Ok(count)
+}
+
 /// Build (or rebuild) the embedding index. Caller passes parallel
 /// lists of message-ids and L2-normalized f32 vectors (one row each).
 /// The Python side runs the actual embedding model (fastembed) and

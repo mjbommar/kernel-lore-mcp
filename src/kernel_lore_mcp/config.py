@@ -85,6 +85,17 @@ class Settings(BaseSettings):
         description="Per-response byte cap (lore_thread / lore_patch).",
     )
 
+    defer_bm25: bool = Field(
+        default=True,
+        description=(
+            "When true (default), the hot-path ingest skips BM25 "
+            "indexing for ~12x faster ingest. Run `kernel-lore-ingest "
+            "--rebuild-bm25` separately to build the prose search "
+            "index. When false, BM25 is built inline (slower but "
+            "single-pass)."
+        ),
+    )
+
 
 # Process-wide singleton. Set once by build_server(); read by tools
 # via get_settings(). Avoids re-parsing env on every request and
