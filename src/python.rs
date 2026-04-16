@@ -664,10 +664,14 @@ fn row_to_pydict<'py>(py: Python<'py>, r: &MessageRow) -> PyResult<Bound<'py, Py
     d.set_item("tested_by", &r.tested_by)?;
     d.set_item("co_developed_by", &r.co_developed_by)?;
     d.set_item("reported_by", &r.reported_by)?;
+    d.set_item("suggested_by", &r.suggested_by)?;
+    d.set_item("helped_by", &r.helped_by)?;
+    d.set_item("assisted_by", &r.assisted_by)?;
     d.set_item("fixes", &r.fixes)?;
     d.set_item("link", &r.link)?;
     d.set_item("closes", &r.closes)?;
     d.set_item("cc_stable", &r.cc_stable)?;
+    d.set_item("trailers_json", &r.trailers_json)?;
     d.set_item("body_segment_id", r.body_segment_id)?;
     d.set_item("body_offset", r.body_offset)?;
     d.set_item("body_length", r.body_length)?;
