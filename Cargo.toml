@@ -96,6 +96,13 @@ hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 
+# Bulk blob reads from packfiles. libgit2's C packfile code is
+# ~10-50x faster than gix's pure-Rust delta-chain resolution on
+# large packed repos. Used only for the ingest blob-read step;
+# gix handles rev-walk, fetch, and everything else.
+# !Sync is fine — each rayon thread gets its own Repository.
+git2 = { version = "0.20", default-features = false }
+
 # anyhow ONLY for the reindex binary; library code uses thiserror.
 anyhow = "1"
 
@@ -125,3 +132,11 @@ opt-level = 3
 debug = 1
 panic = "abort"
 strip = "symbols"
+
+[[bin]]
+name = "bench-blob-read"
+path = "src/bin/bench_blob_read.rs"
+
+[[bin]]
+name = "bench-ingest-stages"
+path = "src/bin/bench_ingest_stages.rs"

@@ -111,8 +111,16 @@ pub fn ingest_shard_with_bm25(
         }
     };
 
-    let repo = gix::open(shard_path)
+    let mut repo = gix::open(shard_path)
         .map_err(|e| Error::Gix(format!("open {}: {e}", shard_path.display())))?;
+
+    // Set a large object cache so the packfile decompression cache
+    // stays warm across the walk. The default is 64 entries which
+    // thrashes on repos with 60k+ objects. 256 MB cache is generous
+    // but transforms pack-heavy reads from ~50 ms/blob to ~1 ms/blob.
+    // This is the equivalent of git's cat-file --batch keeping its
+    // mmaps warm for the lifetime of the process.
+    repo.object_cache_size(256 * 1024 * 1024);
 
     let head_id: ObjectId = repo
         .head_id()

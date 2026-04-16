@@ -33,7 +33,7 @@ const SEGMENT_ROLL_BYTES: u64 = 1 << 30;
 /// Per-message zstd level. 19 is heavy but bodies compress well and
 /// we decompress at query-confirm time, where throughput matters more
 /// than compress-time CPU.
-const ZSTD_LEVEL: i32 = 19;
+const ZSTD_LEVEL: i32 = 6;
 
 /// Handle on one list's compressed store. Append-only writer + random
 /// reader share the same segment files but via distinct fd paths.
