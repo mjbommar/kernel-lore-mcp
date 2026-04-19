@@ -113,6 +113,72 @@ pub struct OverDb {
     conn: Connection,
 }
 
+/// Read-side connection fanout. `rusqlite::Connection` is `!Sync`,
+/// but SQLite in WAL mode lets N independent connections read the
+/// same file concurrently with zero lock contention. The old
+/// `Arc<Mutex<OverDb>>` serialized every query on a single
+/// connection; this structure opens a small fixed number of
+/// connections up front and picks an uncontended one per query.
+///
+/// Design notes:
+///   * Fixed pool, N connections opened eagerly at Reader startup.
+///     Cheap amortized — each connection costs ~200 MB cache header
+///     space, but SQLite's mmap and OS page cache are shared.
+///   * `with_conn` probes each slot with `try_lock`; on all-busy it
+///     blocks on a round-robin target. No condition variables, no
+///     spin loops, no dependencies.
+///   * Not a general-purpose pool — no idle timeout, no max-lifetime,
+///     no health check. The MCP server is single-process and dies on
+///     unrecoverable SQLite errors anyway; growth/shrink would add
+///     complexity with no observable benefit for our shape of load.
+pub struct OverDbPool {
+    conns: Vec<std::sync::Mutex<OverDb>>,
+    next: std::sync::atomic::AtomicUsize,
+}
+
+impl OverDbPool {
+    /// Open `size` independent read-side connections. Each runs the
+    /// full `OverDb::open` sequence (WAL + pragmas + schema-version
+    /// check). `size` must be > 0.
+    pub fn open(path: &Path, size: usize) -> Result<Self> {
+        let size = size.max(1);
+        let mut conns = Vec::with_capacity(size);
+        for _ in 0..size {
+            conns.push(std::sync::Mutex::new(OverDb::open(path)?));
+        }
+        Ok(Self {
+            conns,
+            next: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    /// Run `f` against one of the pool connections. First tries each
+    /// slot non-blocking; falls back to blocking on a round-robin
+    /// target when every connection is in use.
+    pub fn with_conn<T, F>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&OverDb) -> Result<T>,
+    {
+        for conn in &self.conns {
+            if let Ok(guard) = conn.try_lock() {
+                return f(&guard);
+            }
+        }
+        let idx = self
+            .next
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.conns.len();
+        let guard = self.conns[idx]
+            .lock()
+            .map_err(|_| Error::State("over.db pool mutex poisoned".to_owned()))?;
+        f(&guard)
+    }
+
+    pub fn size(&self) -> usize {
+        self.conns.len()
+    }
+}
+
 impl OverDb {
     /// Open or create `over.db` at `path`. On creation, runs the
     /// schema migration. On open of an existing DB, verifies that

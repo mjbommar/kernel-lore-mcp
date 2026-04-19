@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use arrow::array::{
     Array, BooleanArray, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
@@ -31,9 +31,22 @@ use arrow::array::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::error::{Error, Result};
-use crate::over::OverDb;
+use crate::over::{OverDb, OverDbPool};
 use crate::schema as sc;
 use crate::state::State;
+
+/// Default over.db read-side connection fanout. 3 connections give
+/// meaningful concurrency on a 4-vCPU deploy (the `r7g.xlarge` per
+/// CLAUDE.md) without the per-connection cache overhead (~200 MB
+/// each) piling up. Tunable via `KLMCP_OVER_POOL_SIZE` if a future
+/// deployment needs more.
+fn over_pool_size() -> usize {
+    std::env::var("KLMCP_OVER_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(3)
+}
 
 /// One row's worth of metadata, flattened for consumption.
 #[derive(Debug, Clone, Default)]
@@ -107,7 +120,7 @@ const MAX_PATCH_CANDIDATES: usize = 100_000;
 
 pub struct Reader {
     data_dir: PathBuf,
-    over: Option<Arc<Mutex<OverDb>>>,
+    over: Option<Arc<OverDbPool>>,
     /// Per-list read-only Store cache. Patch-search confirmation and
     /// prose-body fetches re-open the same per-list Store on every
     /// query; `Store::open` does `fs::create_dir_all` + `SegmentWriter`
@@ -127,19 +140,21 @@ impl Reader {
         let data_dir = data_dir.as_ref().to_owned();
         let over_path = data_dir.join("over.db");
         let over = if over_path.exists() && Self::over_db_is_current(&data_dir) {
-            match OverDb::open(&over_path) {
-                Ok(db) => {
+            let pool_size = over_pool_size();
+            match OverDbPool::open(&over_path, pool_size) {
+                Ok(pool) => {
                     tracing::debug!(
                         path = %over_path.display(),
+                        pool_size,
                         "Reader: over.db tier enabled"
                     );
-                    Some(Arc::new(Mutex::new(db)))
+                    Some(Arc::new(pool))
                 }
                 Err(e) => {
                     tracing::warn!(
                         path = %over_path.display(),
                         error = %e,
-                        "Reader: over.db present but failed to open; falling back to Parquet scan"
+                        "Reader: over.db present but failed to open pool; falling back to Parquet scan"
                     );
                     None
                 }
@@ -273,27 +288,20 @@ impl Reader {
 
     /// Borrow the optional over.db handle. `None` when the data dir
     /// has no `over.db` (graceful fallback to the legacy Parquet scan).
-    fn over_db(&self) -> Option<&Arc<Mutex<OverDb>>> {
+    fn over_db(&self) -> Option<&Arc<OverDbPool>> {
         self.over.as_ref()
     }
 
-    /// Run `f` against the over.db handle if one is available, holding
-    /// the mutex only for the duration of the closure. Returns `None`
-    /// when the over.db tier is disabled, leaving the caller to fall
-    /// through to the Parquet scan path. Mutex poisoning is treated
-    /// as "tier broken" — log + fall through.
+    /// Run `f` against one of the over.db pool connections. Returns
+    /// `None` when the tier is disabled; callers fall through to the
+    /// Parquet scan path. A pool mutex-poison is propagated as
+    /// `Some(Err(...))` so it surfaces rather than silently skipping.
     fn with_over<T, F>(&self, f: F) -> Option<Result<T>>
     where
         F: FnOnce(&OverDb) -> Result<T>,
     {
-        let handle = self.over.as_ref()?;
-        match handle.lock() {
-            Ok(guard) => Some(f(&guard)),
-            Err(_) => {
-                tracing::warn!("over.db mutex poisoned; falling back to Parquet scan");
-                None
-            }
-        }
+        let pool = self.over.as_ref()?;
+        Some(pool.with_conn(f))
     }
 
     pub fn data_dir(&self) -> &Path {
