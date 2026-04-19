@@ -17,30 +17,24 @@ proposition.
 ```sh
 # 1. install — one command, pre-built abi3 wheel, no Rust toolchain required
 uv tool install kernel-lore-mcp
-uv tool install grokmirror
 
-# 2. fetch the scripts + grokmirror configs (they live in the git repo,
-#    not in the wheel)
-git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
-cd kernel-lore-mcp
-
-# 3. first sync — narrow scope, ~1.5 GB, 3-10 min
+# 2. first sync — manifest fetch + gix fetch + ingest in one process
+#    under one writer lock. ~10-30 min depending on include scope.
 export KLMCP_DATA_DIR=~/klmcp-data
 mkdir -p "$KLMCP_DATA_DIR"
-KLMCP_GROKMIRROR_CONF_TEMPLATE="$PWD/scripts/grokmirror-personal.conf" \
-    KLMCP_POST_PULL_HOOK="$PWD/scripts/post-pull-hook.sh" \
-    ./scripts/klmcp-grok-pull.sh
+kernel-lore-sync \
+    --data-dir "$KLMCP_DATA_DIR" \
+    --with-over \
+    --include '/lkml/*' --include '/linux-cifs/*' --include '/netdev/*'
+# Omit --include to mirror all 390 shards (~100+ GB first run).
 
-# 4. first ingest — ~10-30 min
-kernel-lore-ingest --data-dir "$KLMCP_DATA_DIR" \
-                   --lore-mirror "$KLMCP_DATA_DIR/shards"
-
-# 5. confirm freshness (no HTTP server needed)
+# 3. confirm freshness (no HTTP server needed)
 kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # { "generation": >= 1, "freshness_ok": true, ... }
 
-# 6. verify the MCP surface — zero API cost
-./scripts/agentic_smoke.sh local
+# 4. verify the MCP surface — zero API cost
+git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
+cd kernel-lore-mcp && ./scripts/agentic_smoke.sh local
 # PASS: 6/6 tools, 5/5 resource templates, 5/5 prompts.
 ```
 
@@ -51,7 +45,7 @@ the exact same server binary.
 
 ### Install from source
 
-Contributing? Or want the faster rayon-fanout Rust ingest binary?
+Contributing? Building a custom binary?
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
@@ -60,18 +54,17 @@ git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
-# optional: build the native ingest binary for multi-shard fan-out
-cargo build --release --bin kernel-lore-ingest
-./target/release/kernel-lore-ingest --data-dir $KLMCP_DATA_DIR \
-    --lore-mirror $KLMCP_DATA_DIR/shards
+cargo build --release --bin kernel-lore-sync --bin kernel-lore-ingest
+./target/release/kernel-lore-sync --data-dir $KLMCP_DATA_DIR --with-over
 ```
 
 ### Going bigger
 
-Want fuller coverage? Swap `grokmirror-personal.conf` for
-`grokmirror.conf` to mirror all ~390 lists (~55 GB).
+Want fuller coverage? Drop `--include` flags to mirror all ~390
+lists (~100+ GB first run).
 
-Want production-grade systemd deployment?
+Want production-grade systemd deployment (single `klmcp-sync.timer`
+replacing the pre-v0.2.0 grokmirror + ingest pair)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
 ## Status — April 2026
@@ -79,8 +72,13 @@ Want production-grade systemd deployment?
 Shipped:
 
 - Ingest pipeline — gix + mail-parser + metadata/trigram/BM25/
-  embedding tiers. Incremental from grokmirror shards; dangling-OID
-  safe; single-writer flock.
+  embedding tiers. Incremental; dangling-OID safe; single-writer
+  flock.
+- **v0.2.0 `kernel-lore-sync`** — one Rust binary that internalized
+  the legacy `grokmirror` + separate-ingest two-process chain.
+  HTTPS manifest fetch, gix smart-HTTP clone-or-fetch (rayon-
+  fanned across shards), ingest, tid rebuild, generation bump —
+  all under one writer lock so there's no trigger/debounce race.
 - Full MCP surface: 19 tools (search, primitives, sampling-backed
   summarize/classify/explain), 5 RFC-6570 resource templates, 5
   slash-command prompts, populated KWIC snippets, freshness
@@ -88,8 +86,8 @@ Shipped:
   designed but not yet wired through tool responses — v0.2.0.)
 - stdio + Streamable HTTP transports; no SSE.
 - `/status` + `/metrics` (Prometheus) with freshness_ok signal.
-- systemd units for hosted deploy; 5-min grokmirror cadence
-  (docs/ops/update-frequency.md).
+- systemd units for hosted deploy; 5-min `klmcp-sync.timer`
+  cadence (docs/ops/update-frequency.md).
 - Live-tested against real `claude --print` and `codex exec`
   every commit via `scripts/agentic_smoke.sh`.
 
@@ -124,7 +122,9 @@ metadata point lookups and predicate scans; **trigram** (`fst` +
 instant-distance) for "more like this." Rust core via
 PyO3 0.28 does the heavy lifting; Python + FastMCP 3.2 serves
 MCP over stdio + Streamable HTTP. Ingestion is incremental from
-grokmirror-managed public-inbox git shards via gix. The
+public-inbox git shards pulled via `kernel-lore-sync` (gix smart-
+HTTP + lore manifest-diff), replacing the pre-v0.2.0 grokmirror
+dependency. The
 zstd-compressed raw store is the source of truth; all four
 tiers rebuild from it.
 

@@ -5,7 +5,17 @@
 [`threat-model.md`](./threat-model.md),
 [`reciprocity.md`](../architecture/reciprocity.md).
 
-**TL;DR:** ingest every 5 minutes via `grokmirror`. Costs us
+**Note on terminology (v0.2.0):** the *wire protocol* we speak to
+lore — `manifest.js.gz` + git smart-HTTP fetch — is the grokmirror
+protocol; the *client* we use has changed. Through v0.1.x we
+shelled out to the `grokmirror` Python tool. Since v0.2.0 we run
+our own `kernel-lore-sync` binary that implements the same three
+primitives (manifest fetch, fingerprint diff, gix fetch) in one
+atomic process. The cadence, costs, and rate-limiting all still
+apply; read "grokmirror" in this doc as "the grokmirror-protocol
+client we ship." The legacy path stays documented in runbook §0Z.
+
+**TL;DR:** ingest every 5 minutes via `kernel-lore-sync`. Costs us
 ~20 GB/month of egress from kernel.org, ≤0.2% of one vCPU, ~12 MB/day
 of local disk. Costs kernel.org under 0.2% of their monthly lore
 egress. In exchange, a single well-adopted agent integration
@@ -159,13 +169,17 @@ surface one-by-one, adoption of kernel-lore-mcp is
 
 ## Operator knobs
 
-- `KLMCP_GROKMIRROR_INTERVAL_SECONDS` — cadence (default `300`).
-  Self-hosters may tighten this for their own corpus if they want
-  lower lag on specific lists; the hosted instance runs 300 by
-  policy.
-- `KLMCP_INGEST_DEBOUNCE_SECONDS` — minimum gap between ingest
-  runs, regardless of grok-pull trigger rate (default `30`). Prevents
-  overlapping writers from fighting over the flock.
+- **systemd timer `OnUnitActiveSec`** (in `klmcp-sync.timer`;
+  default `300s`) — cadence. Self-hosters can tighten for their own
+  corpus; the hosted instance holds at 300 by policy. Override via
+  a drop-in, not by editing the shipped unit.
+- `KLMCP_MANIFEST_URL` — upstream manifest location (default
+  `https://lore.kernel.org/manifest.js.gz`). Override to point at
+  a mirror or a different public-inbox instance.
+- **`writer.lock` flock** replaces the old `KLMCP_INGEST_DEBOUNCE_
+  SECONDS` knob. `kernel-lore-sync` tries to acquire the lock at
+  start; overlapping invocations fail the flock and exit cleanly
+  without touching state — no debounce math required.
 - `KLMCP_INGEST_CONCURRENCY` — rayon worker count for the shard
   walker (default `min(8, num_cores)`). Tune down on small boxes.
 

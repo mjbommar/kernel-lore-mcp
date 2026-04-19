@@ -1,5 +1,10 @@
 [Unit]
-Description=kernel-lore-mcp: grokmirror pull from lore.kernel.org
+# LEGACY (pre-v0.2.0): the `kernel-lore-sync` binary replaces this
+# unit plus klmcp-ingest.{path,service}. See runbook §0Z and
+# docs/plans/2026-04-15-internalize-grokmirror.md. New deployments
+# should enable klmcp-sync.timer instead; this file is kept for
+# operators who prefer the battle-tested external grokmirror path.
+Description=kernel-lore-mcp: grokmirror pull from lore.kernel.org (LEGACY, pre-v0.2.0)
 Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
 # Do not run while a manual ingest is active; otherwise unconstrained.
 After=network-online.target

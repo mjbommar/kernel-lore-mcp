@@ -21,38 +21,44 @@ questions. Skip §1+ entirely.
 ```sh
 # 0A.1 — prereqs
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-uv tool install grokmirror
+# No grokmirror install step — v0.2.0's kernel-lore-sync internalizes
+# manifest fetch + gix fetch + ingest in one binary. Legacy grokmirror
+# path is still documented in §0Z for operators who prefer it.
 
 # 0A.2 — clone + build
 git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
-cargo build --release --bin kernel-lore-ingest
+cargo build --release --bin kernel-lore-sync
 
 # 0A.3 — pick a data dir (any path)
 export KLMCP_DATA_DIR=~/klmcp-data
 mkdir -p "$KLMCP_DATA_DIR"
 
-# 0A.4 — first sync: ~1.5 GB, 3-10 minutes. Only 5 lists to keep
-# it small. Widen later by editing scripts/grokmirror-personal.conf.
-KLMCP_GROKMIRROR_CONF_TEMPLATE="$PWD/scripts/grokmirror-personal.conf" \
-    KLMCP_POST_PULL_HOOK="$PWD/scripts/post-pull-hook.sh" \
-    ./scripts/klmcp-grok-pull.sh
-
-# 0A.5 — first ingest: ~10-30 minutes depending on corpus size.
-./target/release/kernel-lore-ingest \
+# 0A.4 — first sync: fetches lore manifest (~390 shards), filters to
+# a smaller slice via --include, clones changed shards, ingests them,
+# bumps generation. One atomic process under one writer lock.
+# ~10-30 min depending on which lists you include.
+./target/release/kernel-lore-sync \
     --data-dir "$KLMCP_DATA_DIR" \
-    --lore-mirror "$KLMCP_DATA_DIR/shards"
+    --with-over \
+    --include '/lkml/*' \
+    --include '/linux-cifs/*' \
+    --include '/netdev/*'
+# Drop --include entirely to mirror all 390 shards (will take hours
+# and ~100+ GB of disk on the first run).
 
-# 0A.5b — (optional, recommended) build over.db so metadata point
-# lookups and `f:` / `list:` predicates run in milliseconds instead
-# of seconds. Skip if you only ingested a tiny corpus; required for
-# anything close to lore scale. ~2 min per million rows; ~30 min
-# for a full 17.6M-row corpus. Disk: ~19 GB at full corpus size.
+# 0A.5b — over.db has already been written incrementally by the
+# sync in 0A.4 (because we passed --with-over). If you skipped that
+# flag or want to rebuild from scratch from the metadata Parquet,
+# use kernel-lore-build-over:
+#
+#   cargo build --release --bin kernel-lore-build-over
+#   ./target/release/kernel-lore-build-over --data-dir "$KLMCP_DATA_DIR"
+#
+# ~2 min per million rows; ~30 min for a full 17.6M-row corpus.
 # Atomic via tempfile+rename — safe to ctrl-C.
-cargo build --release --bin kernel-lore-build-over
-./target/release/kernel-lore-build-over --data-dir "$KLMCP_DATA_DIR"
 
 # 0A.6 — confirm the index is live (no HTTP needed)
 ./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
@@ -73,34 +79,44 @@ KLMCP_DATA_DIR = "..." }`. No auth, no port, no systemd.
 
 Two approaches for personal dev:
 
-1. **Manual "top-up before I work":** run the pull + ingest lines
-   from 0A.4 and 0A.5 whenever you want a fresh index. Takes a few
-   seconds once the initial cold-start is done.
-2. **cron:** add a 5-min cron entry that runs both steps. Good
-   enough; no need for systemd on a single-user laptop.
+1. **Manual "top-up before I work":** re-run the sync command from
+   0A.4 whenever you want a fresh index. Steady-state sync is
+   seconds (manifest diff is a single HTTP GET + JSON compare; only
+   changed shards fetch).
+2. **cron:** add a 5-min cron entry. No grokmirror / trigger file
+   dance — one command, one writer lock:
 
    ```crontab
    */5 * * * * cd /home/you/kernel-lore-mcp && \
-       KLMCP_DATA_DIR=/home/you/klmcp-data \
-       KLMCP_GROKMIRROR_CONF_TEMPLATE=/home/you/kernel-lore-mcp/scripts/grokmirror-personal.conf \
-       KLMCP_POST_PULL_HOOK=/home/you/kernel-lore-mcp/scripts/post-pull-hook.sh \
-       ./scripts/klmcp-grok-pull.sh && \
-       ./target/release/kernel-lore-ingest --data-dir "$KLMCP_DATA_DIR" \
-           --lore-mirror "$KLMCP_DATA_DIR/shards" >> /home/you/klmcp-data/logs/cron.log 2>&1
+       ./target/release/kernel-lore-sync \
+           --data-dir /home/you/klmcp-data \
+           --with-over \
+           --include '/lkml/*' --include '/netdev/*' \
+           >> /home/you/klmcp-data/logs/cron.log 2>&1
    ```
 
 If you ever want the full systemd treatment (multi-user box,
 monitoring, alerts), proceed to §1.
 
+### 0Z. Legacy grokmirror path (still supported)
+
+The pre-v0.2.0 shape (external grokmirror + separate ingest) is
+kept documented in
+[`docs/plans/2026-04-15-internalize-grokmirror.md`](../plans/2026-04-15-internalize-grokmirror.md)
+and the `scripts/klmcp-grok-pull.sh` / `scripts/post-pull-hook.sh`
+helpers still work. Prefer `kernel-lore-sync` for new deployments;
+the legacy path will be removed in v0.3.0.
+
 ## 0. What you are deploying
 
-Three systemd units that together keep a local `lore.kernel.org`
-mirror + four-tier index + MCP server running:
+Two systemd units that together keep a local `lore.kernel.org`
+mirror + four-tier index + MCP server running (v0.2.0 shape —
+replaces the pre-v0.2.0 three-unit chain):
 
-- `klmcp-grokmirror.timer` → `klmcp-grokmirror.service` — pulls
-  via grokmirror every 5 minutes.
-- `klmcp-ingest.path` → `klmcp-ingest.service` — re-ingests on
-  every successful pull (debounced 30 s).
+- `klmcp-sync.timer` → `klmcp-sync.service` — one binary that
+  fetches the lore manifest, diffs against local fingerprints,
+  gix-fetches changed shards, ingests them, and bumps the
+  generation marker under one writer lock. Default cadence 5 min.
 - `klmcp-mcp.service` — serves MCP over stdio or Streamable HTTP.
 
 Everything is anonymous read-only. No API keys, no OAuth, no login.
@@ -110,8 +126,9 @@ See CLAUDE.md § "Non-negotiable product constraints" for why.
 
 ```sh
 sudo apt-get install -y \
-    git python3-venv python3-pip build-essential curl \
-    grokmirror nginx
+    git python3-venv python3-pip build-essential curl nginx
+# No grokmirror package needed — kernel-lore-sync does manifest
+# fetch + git fetch in-process via ureq + gix.
 sudo useradd --system --home /var/lib/kernel-lore-mcp \
     --shell /usr/sbin/nologin kernel-lore-mcp
 sudo install -d -o kernel-lore-mcp -g kernel-lore-mcp -m 0755 \
@@ -126,28 +143,26 @@ git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
+cargo build --release \
+    --bin kernel-lore-sync \
+    --bin kernel-lore-ingest
 sudo install -o root -g root -m 0755 \
     .venv/bin/kernel-lore-mcp /usr/local/bin/
 sudo install -o root -g root -m 0755 \
-    .venv/bin/kernel-lore-ingest /usr/local/bin/
+    target/release/kernel-lore-sync /usr/local/bin/
+sudo install -o root -g root -m 0755 \
+    target/release/kernel-lore-ingest /usr/local/bin/
 ```
 
 ## 3. Drop the scripts + systemd units
 
 ```sh
-sudo install -o root -g root -m 0755 \
-    scripts/klmcp-grok-pull.sh \
-    scripts/klmcp-ingest.sh \
-    scripts/post-pull-hook.sh \
-    /usr/local/lib/kernel-lore-mcp/
+# v0.2.0 units: klmcp-sync.{service,timer} + klmcp-mcp.service.
+# The legacy klmcp-grokmirror.* + klmcp-ingest.{path,service} files
+# still ship for operators who opt into §0Z's path.
 sudo install -o root -g root -m 0644 \
-    scripts/grokmirror.conf \
-    /etc/kernel-lore-mcp/grokmirror.conf
-sudo install -o root -g root -m 0644 \
-    scripts/systemd/klmcp-grokmirror.service \
-    scripts/systemd/klmcp-grokmirror.timer \
-    scripts/systemd/klmcp-ingest.service \
-    scripts/systemd/klmcp-ingest.path \
+    scripts/systemd/klmcp-sync.service \
+    scripts/systemd/klmcp-sync.timer \
     scripts/systemd/klmcp-mcp.service \
     /etc/systemd/system/
 sudo install -o root -g kernel-lore-mcp -m 0640 \
@@ -168,22 +183,26 @@ openssl rand -hex 32
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl enable --now klmcp-grokmirror.timer
-sudo systemctl enable --now klmcp-ingest.path
+sudo systemctl enable --now klmcp-sync.timer
 sudo systemctl enable --now klmcp-mcp.service
 ```
 
-First grokmirror pull fires 60 s after service start; the first
-ingest fires right after. Cold-start takes ~30–60 min depending on
-network + disk. The timer keeps firing during cold-start but the
-ingest debounce prevents overlap, and the `flock` in
-`state.rs::acquire_writer_lock` guarantees single-writer safety.
+First sync fires 60 s after service start. Cold-start takes
+~30–60 min depending on network + disk. The timer keeps firing
+during cold-start but the `flock` in
+`state.rs::acquire_writer_lock` guarantees single-writer safety —
+any overlapping invocation fails the lock and exits cleanly
+without touching state.
 
 ## 5. Verify
 
 ```sh
 # Timer active + next trigger listed:
-systemctl list-timers klmcp-grokmirror.timer
+systemctl list-timers klmcp-sync.timer
+
+# One-shot sync (for debugging / forced refresh):
+sudo systemctl start klmcp-sync.service
+journalctl -u klmcp-sync.service -f   # follow the structured JSON log stream
 
 # MCP server up + generation advanced:
 curl -s http://127.0.0.1:8080/status | jq .

@@ -343,21 +343,26 @@ pub fn ingest_shard_with_bm25(
 
     state.save_last_indexed_oid(list, shard, &head_hex)?;
 
-    // Bump generation ONLY when we own the BM25 writer (single-shard
-    // path via ingest_shard / ingest_shard_unlocked). When a shared
-    // BM25 writer is in use (multi-shard binary via par_iter), the
-    // caller bumps generation AFTER committing BM25 + rebuilding tid
-    // so readers never see metadata/trigram at gen N while BM25/tid
-    // are still stale at gen N-1.
+    // Bump generation ONLY when this call is the end-to-end pipeline
+    // for a single shard: caller gave us no shared BM25 writer AND
+    // asked us to build BM25 inline. That's the
+    // `ingest_shard` / `ingest_shard_unlocked` path (Python single-
+    // shard, tests).
     //
-    // Per-tier generation markers: the main generation always
-    // advances (Parquet is the source of truth and succeeded if we
-    // got here). Tier markers advance only when THAT tier committed
-    // cleanly. On an over.db failure the main gen moves to N but
-    // `over.generation` stays at N-1 — Reader::new sees the drift
-    // and disables over.db routing until the next successful ingest
-    // reconciles.
-    if shared_bm25.is_none() {
+    // The multi-shard binaries (kernel-lore-ingest, kernel-lore-sync)
+    // either pass a shared BM25 writer OR pass `skip_bm25 = true`; in
+    // both shapes they take responsibility for committing BM25,
+    // rebuilding tid, and bumping generation once after all shards
+    // finish. If we bumped here too we'd emit N+1 generations per
+    // multi-shard run — readers would see intermediate snapshots
+    // where some tiers had advanced and others hadn't.
+    //
+    // Per-tier generation markers follow the same rule. On an over.db
+    // write failure the main gen still advances (Parquet succeeded)
+    // but `over.generation` stays behind — Reader::new sees the
+    // drift and bypasses over.db until the next clean ingest.
+    let caller_orchestrates = shared_bm25.is_some() || skip_bm25;
+    if !caller_orchestrates {
         let new_gen = state.bump_generation()?;
         if !stats.over_failed {
             state.set_tier_generation("over", new_gen)?;
@@ -793,6 +798,46 @@ Prose.\r\n"
     /// Three consecutive ingests with no shard changes: generation
     /// must stay flat after the first. Pins the contract that
     /// grokmirror ticks with no changed shards cost zero writes.
+    #[test]
+    fn skip_bm25_call_does_not_bump_generation() {
+        // Regression: kernel-lore-sync / kernel-lore-ingest pass
+        // `skip_bm25 = true` and no shared BM25 writer. Before the
+        // caller_orchestrates fix, the internal bump inside
+        // ingest_shard_with_bm25 AND the outer bump in the binary
+        // both fired — the generation counter advanced by 2 per run,
+        // which broke per-tier marker discipline.
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let owned = sample_messages();
+        let refs: Vec<&[u8]> = owned.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &refs);
+
+        let data = tempdir().unwrap();
+        let state = State::new(data.path()).unwrap();
+        let gen0 = state.generation().unwrap();
+
+        // Simulate the multi-shard binary's call shape: no shared
+        // BM25, skip_bm25=true, no shared store, no over.
+        let stats = ingest_shard_with_bm25(
+            data.path(),
+            &shard_dir,
+            "linux-cifs",
+            "0",
+            "r1",
+            None, // shared_bm25
+            None, // shared_store
+            None, // shared_over
+            true, // skip_bm25
+        )
+        .unwrap();
+        assert!(stats.ingested > 0);
+        let gen1 = state.generation().unwrap();
+        assert_eq!(
+            gen1, gen0,
+            "internal bump must defer to caller when skip_bm25=true"
+        );
+    }
+
     #[test]
     fn idle_ticks_do_not_bump_generation() {
         let shard = tempdir().unwrap();

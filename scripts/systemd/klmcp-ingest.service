@@ -1,5 +1,8 @@
 [Unit]
-Description=kernel-lore-mcp: ingest mirrored shards into the three-tier index
+# LEGACY (pre-v0.2.0): superseded by klmcp-sync.service, which
+# does manifest fetch + gix fetch + ingest in one process under
+# one writer lock. See runbook §0Z.
+Description=kernel-lore-mcp: ingest mirrored shards (LEGACY, pre-v0.2.0)
 Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
 # Depends on a healthy mirror on disk. Does NOT require the mcp-server
 # to be running; query side reloads via generation-file mtime.

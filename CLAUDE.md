@@ -48,8 +48,11 @@ lives in `docs/architecture/`. Execution contract in `TODO.md`.
    resource / prompt that would require the caller to hold a secret
    is rejected at design time.
 2. **We reduce load on lore.kernel.org; we never add to it.** The
-   server ingests via `grokmirror` (the sanctioned upstream mirror
-   protocol) and serves the indexed corpus. Every agent pointed at
+   server ingests via our own `kernel-lore-sync` binary — same
+   wire protocol as grokmirror (HTTPS manifest.js.gz + git smart-
+   HTTP fetch) but internalized into one atomic Rust process per
+   docs/plans/2026-04-15-internalize-grokmirror.md — and serves
+   the indexed corpus. Every agent pointed at
    a kernel-lore-mcp instance is one fewer agent that would
    otherwise scrape lore directly. Fanout-to-one is the value
    proposition. Do not apologize for integrating — the hosted +
@@ -69,7 +72,7 @@ lives in `docs/architecture/`. Execution contract in `TODO.md`.
 | Python | 3.12 minimum (abi3 floor), 3.14 preferred. Free-threaded `python3.14t` requires `--no-default-features` (abi3 incompatible until PEP 803 "abi3t" lands). |
 | tantivy | 0.26.0 | stemming gated behind `stemmer` feature — NEVER enabled |
 | tantivy-py | NOT USED | we bind tantivy ourselves in the PyO3 module |
-| gix (gitoxide) | 0.81.0 | features: `max-performance-safe`, `revision`, `parallel`. NO `blocking-network-client` (grokmirror fetches) |
+| gix (gitoxide) | 0.81.0 | features: `max-performance-safe`, `revision`, `parallel`, `sha1`, `blocking-http-transport-reqwest-rust-tls` (the last enables the smart-HTTP fetch path used by `kernel-lore-sync`). |
 | mail-parser | 0.11 | `full_encoding` feature (legacy charsets) |
 | roaring | 0.11 | posting lists (trigram tier) |
 | fst | 0.4 | term dictionary (trigram tier) |
@@ -197,10 +200,16 @@ Non-negotiable. See `docs/indexing/tokenizer-spec.md`.
 
 ## Ingestion pipeline
 
-- `grokmirror` pulls lore shards on a 10-minute cron.
-- Ingestion runs as a **separate systemd unit** (`klmcp-ingest`),
-  NOT in-process with the MCP server. It holds the sole
-  `tantivy::IndexWriter` + trigram builder + store appender.
+- `kernel-lore-sync` (v0.2.0) is the primary writer: one Rust
+  binary that fetches `manifest.js.gz`, diffs fingerprints against
+  the local cache, gix-fetches changed shards, and ingests them —
+  all under one writer lock. Ships as a separate systemd unit
+  (`klmcp-sync.service` + `klmcp-sync.timer`, default 5-min
+  cadence), NOT in-process with the MCP server. Holds the sole
+  `tantivy::IndexWriter` + trigram builder + store appender + over.db
+  writer for the duration of a tick.
+- Legacy shape (`grokmirror` pull + separate ingest binary) still
+  works against the same data_dir layout; see runbook §0Z.
 - Walk via `gix::ThreadSafeRepository` with one rayon task per
   shard (never within a shard — packfile cache locality).
   Incremental via `rev_walk([head]).with_hidden([last_oid])` with
@@ -295,7 +304,7 @@ Evaluated and rejected; see `docs/research/`:
 - **gp3 16000 IOPS / 1000 MB/s** (6000/250 would queue cold BM25).
 - Ingestion is a separate systemd unit from serving.
 - Blue/green deploy via dual systemd units + nginx upstream swap.
-- RPO = hours (re-grok-pull from lore). RTO = ~30 min
+- RPO = hours (re-sync from lore via `kernel-lore-sync`). RTO = ~30 min
   (snapshot-restore cold). State this explicitly in responses if
   ever relevant.
 - `robots.txt` + `LEGAL.md` posture for public re-hosting of
@@ -328,9 +337,10 @@ metadata tier is for.
 - Prefer editing existing files over creating new ones.
 - Never add speculative features. This project gets misused as a
   sandbox because it touches many interesting topics.
-- Do not run `grok-pull` from developer machines by default — the
-  deploy box does that. Ingestion tests use synthetic fixtures in
-  `tests/python/fixtures/`.
+- Do not run `kernel-lore-sync` (or the legacy `grok-pull`) from
+  developer machines against production lore without a good reason;
+  the deploy box does that on its timer. Ingestion tests use
+  synthetic fixtures in `tests/python/fixtures/`.
 - Do not commit compressed stores, indices, or fetched lore data.
   `.gitignore` catches `data/`, `*.tantivy`, `*.zst`, etc.
 - Do not write comments explaining WHAT code does. Identifiers

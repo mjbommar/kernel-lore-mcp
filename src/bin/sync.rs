@@ -250,9 +250,18 @@ fn main() -> Result<()> {
     }
 
     let max_retries = args.max_retries;
-    let ingest_results: Vec<(&ChangedShard, Result<_core::IngestStats>)> = fetched_ok
+    tracing::info!(
+        shards = fetched_ok.len(),
+        lists = stores.len(),
+        with_over,
+        with_bm25 = !skip_bm25,
+        "ingest phase starting"
+    );
+    let ingest_phase_start = Instant::now();
+    let ingest_results: Vec<(&ChangedShard, Result<_core::IngestStats>, f64)> = fetched_ok
         .par_iter()
         .map(|sh| {
+            let shard_start = Instant::now();
             let per_run_id = format!("{run_id}-{}-{}", sh.list, sh.shard);
             let shared_store = stores.get(&sh.list).expect("store for list must exist");
             let shared_bm25 = bm25.as_ref();
@@ -280,7 +289,10 @@ fn main() -> Result<()> {
                     over.as_ref(),
                     skip_bm25,
                 ) {
-                    Ok(stats) => return (*sh, Ok(stats)),
+                    Ok(stats) => {
+                        let elapsed = shard_start.elapsed().as_secs_f64();
+                        return (*sh, Ok(stats), elapsed);
+                    }
                     Err(e) => {
                         tracing::warn!(
                             list = sh.list,
@@ -296,9 +308,14 @@ fn main() -> Result<()> {
             (
                 *sh,
                 Err(last_err.unwrap_or_else(|| anyhow!("unknown ingest failure"))),
+                shard_start.elapsed().as_secs_f64(),
             )
         })
         .collect();
+    tracing::info!(
+        elapsed_secs = ingest_phase_start.elapsed().as_secs_f64(),
+        "ingest phase done"
+    );
 
     // Commit BM25 once, after all shards finish.
     if let Some(ref bm25_mutex) = bm25 {
@@ -323,7 +340,7 @@ fn main() -> Result<()> {
     let mut total_over_rows: u64 = 0;
     let mut total_over_failed: u64 = 0;
     let mut successful_paths: Vec<&str> = Vec::new();
-    for (sh, res) in &ingest_results {
+    for (sh, res, elapsed) in &ingest_results {
         match res {
             Ok(stats) => {
                 total_ingested += stats.ingested;
@@ -341,6 +358,7 @@ fn main() -> Result<()> {
                     skipped_no_mid = stats.skipped_no_mid,
                     over_rows = stats.over_rows_written,
                     over_failed = stats.over_failed,
+                    elapsed_secs = elapsed,
                     "shard done"
                 );
             }
@@ -350,6 +368,7 @@ fn main() -> Result<()> {
                     list = sh.list,
                     shard = sh.shard,
                     error = %e,
+                    elapsed_secs = elapsed,
                     "shard failed"
                 );
             }
