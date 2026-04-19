@@ -229,71 +229,102 @@ pub fn dispatch(
         || parsed.fixes_sha.is_some()
         || (parsed.free_text.is_empty() && parsed.patch_substring.is_none());
 
-    if metadata_relevant {
-        if let Some(mid) = &parsed.message_id {
-            if let Some(row) = reader.fetch_message(mid)? {
-                tier_results.insert("metadata", vec![row]);
-            }
+    // Fan out the three tiers in parallel. `std::thread::scope` lets
+    // each closure borrow `reader` + `parsed` without requiring
+    // 'static. The Reader internals (over.db pool, Store cache, BM25
+    // reader) are all Sync, so parallel reads are safe.
+    //
+    // Mixed-tier queries (e.g. `list:lkml security`) pay
+    // max(metadata, bm25) + merge instead of the former sum; pure
+    // single-tier queries cost ~one thread spawn (~microseconds on
+    // Linux) and otherwise behave identically.
+    type TierOut = Result<(Option<Vec<MessageRow>>, Option<bool>)>;
+    let run_metadata = || -> TierOut {
+        if !metadata_relevant {
+            return Ok((None, None));
+        }
+        let rows = if let Some(mid) = &parsed.message_id {
+            reader.fetch_message(mid)?.map_or_else(Vec::new, |r| vec![r])
         } else if let Some(sha) = &parsed.fixes_sha {
-            tier_results.insert("metadata", reader.expand_citation(sha, limit)?);
+            reader.expand_citation(sha, limit)?
         } else if parsed.touched_file.is_some() || parsed.touched_function.is_some() {
-            tier_results.insert(
-                "metadata",
-                reader.activity(
-                    parsed.touched_file.as_deref(),
-                    parsed.touched_function.as_deref(),
-                    parsed.since_unix_ns,
-                    parsed.list.as_deref(),
-                    limit,
-                )?,
-            );
+            reader.activity(
+                parsed.touched_file.as_deref(),
+                parsed.touched_function.as_deref(),
+                parsed.since_unix_ns,
+                parsed.list.as_deref(),
+                limit,
+            )?
         } else if let Some(from) = &parsed.from_addr {
             // f:<addr> — route through eq() which has early termination
             // on `limit` matches. all_rows() would materialize every row
             // in the corpus before post-filtering (29M rows = OOM on
             // realistic corpora).
-            tier_results.insert(
-                "metadata",
-                reader.eq(
-                    crate::reader::EqField::FromAddr,
-                    from,
-                    parsed.since_unix_ns,
-                    parsed.list.as_deref(),
-                    limit,
-                )?,
-            );
+            reader.eq(
+                crate::reader::EqField::FromAddr,
+                from,
+                parsed.since_unix_ns,
+                parsed.list.as_deref(),
+                limit,
+            )?
         } else if parsed.list.is_some() || parsed.since_unix_ns.is_some() {
             // Pure list:/since: predicate. Cap is tight (RRF merge
             // below only uses the first `limit * 2` anyway); loading
             // a million rows per query piles up memory under load.
             let cap = limit.saturating_mul(20).max(10_000);
-            tier_results.insert(
-                "metadata",
-                reader.all_rows(
-                    parsed.list.as_deref(),
-                    parsed.since_unix_ns,
-                    Some(cap),
-                )?,
-            );
+            reader.all_rows(parsed.list.as_deref(), parsed.since_unix_ns, Some(cap))?
+        } else {
+            Vec::new()
+        };
+        Ok((Some(rows), None))
+    };
+
+    let run_trigram = || -> TierOut {
+        match &parsed.patch_substring {
+            Some(needle) => {
+                let rows = reader.patch_search(needle, parsed.list.as_deref(), limit)?;
+                Ok((Some(rows), None))
+            }
+            None => Ok((None, None)),
         }
-    }
+    };
 
-    // Trigram tier
-    if let Some(needle) = &parsed.patch_substring {
-        tier_results.insert(
-            "trigram",
-            reader.patch_search(needle, parsed.list.as_deref(), limit)?,
-        );
-    }
-
-    // BM25 tier
-    if !parsed.free_text.is_empty() {
+    let run_bm25 = || -> TierOut {
+        if parsed.free_text.is_empty() {
+            return Ok((None, None));
+        }
         let (q, hyphen_split) = rewrite_free_text_for_bm25(&parsed.free_text);
-        if hyphen_split {
+        let scored = reader.prose_search_filtered(&q, parsed.list.as_deref(), limit * 2)?;
+        let rows: Vec<MessageRow> = scored.into_iter().map(|(r, _)| r).collect();
+        Ok((Some(rows), Some(hyphen_split)))
+    };
+
+    // rayon::scope uses the already-warm global worker pool — one
+    // well-known trap per the research brief is oversubscribing
+    // tantivy's internal pool; tantivy uses its OWN `Executor` (not
+    // rayon's global), so dispatching 3 tier tasks on the global
+    // pool doesn't contend with it. Cost per dispatch: ~microseconds
+    // vs ~hundreds of microseconds to spawn 3 fresh OS threads.
+    let mut meta_out: TierOut = Ok((None, None));
+    let mut trigram_out: TierOut = Ok((None, None));
+    let mut bm25_out: TierOut = Ok((None, None));
+    rayon::scope(|s| {
+        s.spawn(|_| meta_out = run_metadata());
+        s.spawn(|_| trigram_out = run_trigram());
+        s.spawn(|_| bm25_out = run_bm25());
+    });
+
+    if let (Some(rows), _) = meta_out? {
+        tier_results.insert("metadata", rows);
+    }
+    if let (Some(rows), _) = trigram_out? {
+        tier_results.insert("trigram", rows);
+    }
+    if let (Some(rows), hyphen) = bm25_out? {
+        tier_results.insert("bm25", rows);
+        if hyphen == Some(true) {
             default_applied.push("hyphen-split".to_owned());
         }
-        let scored = reader.prose_search_filtered(&q, parsed.list.as_deref(), limit * 2)?;
-        tier_results.insert("bm25", scored.into_iter().map(|(r, _)| r).collect());
     }
 
     let mut merged = rrf_merge(tier_results, limit * 2);
