@@ -2255,6 +2255,11 @@ fn eq_field_is_over_indexed(field: EqField) -> bool {
             | EqField::CommitOid
             | EqField::SubjectNormalized
             | EqField::SignedOffBy
+            | EqField::ReviewedBy
+            | EqField::AckedBy
+            | EqField::TestedBy
+            | EqField::CoDevelopedBy
+            | EqField::ReportedBy
     )
 }
 

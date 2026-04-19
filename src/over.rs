@@ -566,7 +566,7 @@ impl OverDb {
         let mut cursor: i64 = 0;
         let mut total: u64 = 0;
         loop {
-            let mut pending: Vec<(String, String, Vec<String>)> = Vec::with_capacity(CHUNK);
+            let mut pending: Vec<(String, String, DddPayload)> = Vec::with_capacity(CHUNK);
             let mut last_rowid = cursor;
             {
                 let mut stmt = self.conn.prepare(
@@ -579,11 +579,8 @@ impl OverDb {
                     let mid: String = r.get(1)?;
                     let list: String = r.get(2)?;
                     let blob: Vec<u8> = r.get(3)?;
-                    let sob = match decode_ddd(&blob) {
-                        Ok(p) => p.signed_off_by,
-                        Err(_) => Vec::new(),
-                    };
-                    pending.push((mid, list, sob));
+                    let ddd = decode_ddd(&blob).unwrap_or_default();
+                    pending.push((mid, list, ddd));
                     last_rowid = rowid;
                 }
             }
@@ -594,19 +591,23 @@ impl OverDb {
             {
                 let mut del = tx.prepare(
                     "DELETE FROM over_trailer_email \
-                     WHERE kind = 'signed_off_by' AND message_id = ?1 AND list = ?2",
+                     WHERE message_id = ?1 AND list = ?2",
                 )?;
                 let mut ins = tx.prepare(
                     "INSERT OR IGNORE INTO over_trailer_email \
                         (kind, email, message_id, list) \
-                     VALUES ('signed_off_by', ?1, ?2, ?3)",
+                     VALUES (?1, ?2, ?3, ?4)",
                 )?;
-                for (mid, list, sob) in &pending {
+                for (mid, list, ddd) in &pending {
                     del.execute(rusqlite::params![mid, list])?;
-                    for raw in sob {
-                        let email = crate::reader::extract_email(raw);
-                        if !email.is_empty() {
-                            total += ins.execute(rusqlite::params![email, mid, list])? as u64;
+                    for (kind, raws) in trailer_email_sources(ddd) {
+                        for raw in raws {
+                            let email = crate::reader::extract_email(raw);
+                            if !email.is_empty() {
+                                total += ins.execute(rusqlite::params![
+                                    kind, email, mid, list
+                                ])? as u64;
+                            }
                         }
                     }
                 }
@@ -639,17 +640,17 @@ impl OverDb {
         )?;
         // INSERT OR REPLACE on `over` drops and re-adds rows, so any
         // pre-existing side-table rows for the same (message_id, list)
-        // are now stale and need to go. We delete first, then let the
-        // main insert proceed, then re-populate the side tables from
-        // the fresh ddd payload.
-        let mut sob_del = tx.prepare(
+        // are now stale and need to go. We delete first (scoped by
+        // message_id + list, spanning every kind), then re-populate
+        // from the fresh ddd payload kind-by-kind.
+        let mut tr_del_all = tx.prepare(
             "DELETE FROM over_trailer_email \
-             WHERE kind = 'signed_off_by' AND message_id = ?1 AND list = ?2",
+             WHERE message_id = ?1 AND list = ?2",
         )?;
-        let mut sob_ins = tx.prepare(
+        let mut tr_ins = tx.prepare(
             "INSERT OR IGNORE INTO over_trailer_email \
                 (kind, email, message_id, list) \
-             VALUES ('signed_off_by', ?1, ?2, ?3)",
+             VALUES (?1, ?2, ?3, ?4)",
         )?;
         for row in rows {
             // Defensive lowercase: the indexed column is the lookup
@@ -681,15 +682,18 @@ impl OverDb {
                 blob,
             ])?;
 
-            sob_del.execute(rusqlite::params![row.message_id, row.list])?;
-            for raw in &row.ddd.signed_off_by {
-                let email = crate::reader::extract_email(raw);
-                if !email.is_empty() {
-                    sob_ins.execute(rusqlite::params![
-                        email,
-                        row.message_id,
-                        row.list
-                    ])?;
+            tr_del_all.execute(rusqlite::params![row.message_id, row.list])?;
+            for (kind, raws) in trailer_email_sources(&row.ddd) {
+                for raw in raws {
+                    let email = crate::reader::extract_email(raw);
+                    if !email.is_empty() {
+                        tr_ins.execute(rusqlite::params![
+                            kind,
+                            email,
+                            row.message_id,
+                            row.list
+                        ])?;
+                    }
                 }
             }
         }
@@ -943,12 +947,33 @@ impl OverDb {
     }
 }
 
+/// Single source of truth mapping ddd trailer list fields to the
+/// `over_trailer_email.kind` tokens they populate. Iterating this
+/// keeps `insert_batch_in_tx` and `backfill_trailer_emails` in sync
+/// by construction — adding a new kind means appending one tuple
+/// plus a new `trailer_kind` match arm.
+fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 6] {
+    [
+        ("signed_off_by", &ddd.signed_off_by),
+        ("reviewed_by", &ddd.reviewed_by),
+        ("acked_by", &ddd.acked_by),
+        ("tested_by", &ddd.tested_by),
+        ("co_developed_by", &ddd.co_developed_by),
+        ("reported_by", &ddd.reported_by),
+    ]
+}
+
 /// Map an `EqField` to the `over_trailer_email.kind` token used by
 /// the side-table side-indexed fast path. Returns `None` for fields
 /// that aren't list-shaped-trailer-by-email.
 fn trailer_kind(field: EqField) -> Option<&'static str> {
     match field {
         EqField::SignedOffBy => Some("signed_off_by"),
+        EqField::ReviewedBy => Some("reviewed_by"),
+        EqField::AckedBy => Some("acked_by"),
+        EqField::TestedBy => Some("tested_by"),
+        EqField::CoDevelopedBy => Some("co_developed_by"),
+        EqField::ReportedBy => Some("reported_by"),
         _ => None,
     }
 }
@@ -1411,6 +1436,39 @@ mod tests {
             )
             .unwrap();
         assert!(hits3.is_empty());
+    }
+
+    #[test]
+    fn trailer_email_side_table_covers_every_registered_kind() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut row = sample_row("<m@x>", "lkml", 1_000, "a@x");
+        row.ddd.signed_off_by = vec!["SOB <sob@example.com>".into()];
+        row.ddd.reviewed_by = vec!["Rev <rev@example.com>".into()];
+        row.ddd.acked_by = vec!["Ack <ack@example.com>".into()];
+        row.ddd.tested_by = vec!["Tst <tst@example.com>".into()];
+        row.ddd.co_developed_by = vec!["Co <co@example.com>".into()];
+        row.ddd.reported_by = vec!["Rep <rep@example.com>".into()];
+        db.insert_batch(&[row]).unwrap();
+
+        let cases = [
+            (EqField::SignedOffBy, "sob@example.com"),
+            (EqField::ReviewedBy, "rev@example.com"),
+            (EqField::AckedBy, "ack@example.com"),
+            (EqField::TestedBy, "tst@example.com"),
+            (EqField::CoDevelopedBy, "co@example.com"),
+            (EqField::ReportedBy, "rep@example.com"),
+        ];
+        for (field, email) in cases {
+            let hits = db.scan_eq(field, email, None, None, 10).unwrap();
+            assert_eq!(
+                hits.len(),
+                1,
+                "{:?} lookup failed for {}",
+                field,
+                email
+            );
+            assert_eq!(hits[0].message_id, "<m@x>");
+        }
     }
 
     #[test]
