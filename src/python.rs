@@ -446,6 +446,70 @@ impl PyReader {
         Ok(d)
     }
 
+    /// Aggregate profile for one author. Samples their most-recent
+    /// `limit` messages via the indexed from_addr path.
+    #[pyo3(signature = (addr, list=None, since_unix_ns=None, limit=10_000))]
+    fn author_profile<'py>(
+        &self,
+        py: Python<'py>,
+        addr: String,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let profile = py.detach(|| {
+            self.inner
+                .author_profile(&addr, list.as_deref(), since_unix_ns, limit)
+        })?;
+
+        let d = PyDict::new(py);
+        d.set_item("addr_queried", &profile.addr_queried)?;
+        d.set_item("sampled", profile.sampled)?;
+        d.set_item("limit_hit", profile.limit_hit)?;
+        d.set_item("oldest_unix_ns", profile.oldest_unix_ns)?;
+        d.set_item("newest_unix_ns", profile.newest_unix_ns)?;
+        d.set_item("patches_with_content", profile.patches_with_content)?;
+        d.set_item("cover_letters", profile.cover_letters)?;
+        d.set_item("unique_subjects", profile.unique_subjects)?;
+        d.set_item("with_fixes_trailer", profile.with_fixes_trailer)?;
+
+        let own = PyDict::new(py);
+        own.set_item(
+            "signed_off_by_present",
+            profile.own_trailers.signed_off_by_present,
+        )?;
+        own.set_item("fixes_issued", profile.own_trailers.fixes_issued)?;
+        d.set_item("own_trailers", own)?;
+
+        let recv = PyDict::new(py);
+        recv.set_item("reviewed_by", profile.received_trailers.reviewed_by)?;
+        recv.set_item("acked_by", profile.received_trailers.acked_by)?;
+        recv.set_item("tested_by", profile.received_trailers.tested_by)?;
+        recv.set_item(
+            "co_developed_by",
+            profile.received_trailers.co_developed_by,
+        )?;
+        recv.set_item("reported_by", profile.received_trailers.reported_by)?;
+        recv.set_item("cc_stable", profile.received_trailers.cc_stable)?;
+        d.set_item("received_trailers", recv)?;
+
+        let subs_list: Vec<Bound<'py, PyDict>> = profile
+            .subsystems
+            .iter()
+            .map(|s| {
+                let b = PyDict::new(py);
+                b.set_item("list", &s.list)?;
+                b.set_item("patches", s.patches)?;
+                b.set_item("oldest_unix_ns", s.oldest_unix_ns)?;
+                b.set_item("newest_unix_ns", s.newest_unix_ns)?;
+                Ok::<_, PyErr>(b)
+            })
+            .collect::<PyResult<_>>()?;
+        d.set_item("subsystems", subs_list)?;
+
+        Ok(d)
+    }
+
     /// Case-insensitive byte substring scan over `subject_raw`.
     #[pyo3(signature = (needle, list=None, since_unix_ns=None, limit=100))]
     fn substr_subject<'py>(

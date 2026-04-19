@@ -888,6 +888,99 @@ impl Reader {
         Ok(summary)
     }
 
+    /// Aggregate profile for messages authored by `addr`.
+    ///
+    /// Samples the most recent `limit` messages where `from_addr`
+    /// matches (via the indexed over.db path — sub-millisecond lookup,
+    /// fast for even the most prolific kernel authors). All trailer
+    /// aggregation happens in memory from the decoded MessageRow
+    /// payloads, so numbers are honest for the sampled window.
+    ///
+    /// For a prolific author (e.g. gregkh at ~500k messages) a
+    /// sample of 10 000 gives a representative view of recent
+    /// activity without loading the whole history.
+    pub fn author_profile(
+        &self,
+        addr: &str,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> Result<AuthorProfile> {
+        let rows = self.eq(EqField::FromAddr, addr, since_unix_ns, list_filter, limit)?;
+        let sampled = rows.len() as u64;
+        let limit_hit = (rows.len() >= limit) && limit > 0;
+
+        let mut out = AuthorProfile {
+            addr_queried: addr.to_owned(),
+            sampled,
+            limit_hit,
+            ..AuthorProfile::default()
+        };
+
+        let mut subject_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut subsystems: HashMap<String, SubsystemBucket> = HashMap::new();
+
+        for row in &rows {
+            if row.has_patch {
+                out.patches_with_content += 1;
+            }
+            if row.is_cover_letter {
+                out.cover_letters += 1;
+            }
+            if !row.fixes.is_empty() {
+                out.with_fixes_trailer += 1;
+                out.own_trailers.fixes_issued += 1;
+            }
+            if !row.signed_off_by.is_empty() {
+                out.own_trailers.signed_off_by_present += 1;
+            }
+            if !row.reviewed_by.is_empty() {
+                out.received_trailers.reviewed_by += 1;
+            }
+            if !row.acked_by.is_empty() {
+                out.received_trailers.acked_by += 1;
+            }
+            if !row.tested_by.is_empty() {
+                out.received_trailers.tested_by += 1;
+            }
+            if !row.co_developed_by.is_empty() {
+                out.received_trailers.co_developed_by += 1;
+            }
+            if !row.reported_by.is_empty() {
+                out.received_trailers.reported_by += 1;
+            }
+            if !row.cc_stable.is_empty() {
+                out.received_trailers.cc_stable += 1;
+            }
+            if let Some(s) = row.subject_normalized.as_deref() {
+                subject_set.insert(s.to_owned());
+            }
+            if let Some(d) = row.date_unix_ns {
+                out.oldest_unix_ns = Some(out.oldest_unix_ns.map_or(d, |e| e.min(d)));
+                out.newest_unix_ns = Some(out.newest_unix_ns.map_or(d, |e| e.max(d)));
+            }
+
+            let sub = subsystems
+                .entry(row.list.clone())
+                .or_insert_with(|| SubsystemBucket {
+                    list: row.list.clone(),
+                    ..SubsystemBucket::default()
+                });
+            sub.patches += 1;
+            if let Some(d) = row.date_unix_ns {
+                sub.oldest_unix_ns = Some(sub.oldest_unix_ns.map_or(d, |e| e.min(d)));
+                sub.newest_unix_ns = Some(sub.newest_unix_ns.map_or(d, |e| e.max(d)));
+            }
+        }
+
+        out.unique_subjects = subject_set.len() as u64;
+        let mut subs: Vec<SubsystemBucket> = subsystems.into_values().collect();
+        subs.sort_by_key(|s| std::cmp::Reverse(s.patches));
+        out.subsystems = subs;
+
+        Ok(out)
+    }
+
     /// Case-insensitive byte substring scan over `subject_raw`.
     /// Cheap because subjects are short; one full metadata scan.
     pub fn substr_subject(
@@ -1648,6 +1741,66 @@ pub struct CountSummary {
     pub distinct_authors: u64,
     pub earliest_unix_ns: Option<i64>,
     pub latest_unix_ns: Option<i64>,
+}
+
+/// Aggregate profile for one `from_addr`. Built from the most-recent
+/// `sample_limit` messages authored by that address (via the indexed
+/// over.db from_addr path).
+///
+/// Scope note: this is bounded to messages they AUTHORED. Tools that
+/// want "how many patches did this person REVIEW" (i.e. their address
+/// appeared in someone else's `reviewed_by` trailer) need a separate
+/// trailer-index table — deferred; current over.db has no reverse
+/// lookup on trailer arrays.
+#[derive(Debug, Default, Clone)]
+pub struct AuthorProfile {
+    pub addr_queried: String,
+    /// How many rows the aggregation walked. Capped by `limit`.
+    pub sampled: u64,
+    /// `true` when `sampled == limit`; caller may be looking at a
+    /// recent-only slice of a prolific author's history.
+    pub limit_hit: bool,
+    pub oldest_unix_ns: Option<i64>,
+    pub newest_unix_ns: Option<i64>,
+    pub patches_with_content: u64,
+    pub cover_letters: u64,
+    pub unique_subjects: u64,
+    pub with_fixes_trailer: u64,
+    pub subsystems: Vec<SubsystemBucket>,
+    /// Trailers visible on messages THIS author sent (i.e. what
+    /// their own patches carry).
+    pub own_trailers: OwnTrailerStats,
+    /// Trailers OTHERS added to this author's patches in replies
+    /// that went into the final series version. Counts are
+    /// patch-granularity: "N of my patches got at least one
+    /// Reviewed-by" — NOT total Reviewed-by-count across replies.
+    pub received_trailers: ReceivedTrailerStats,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SubsystemBucket {
+    pub list: String,
+    pub patches: u64,
+    pub oldest_unix_ns: Option<i64>,
+    pub newest_unix_ns: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct OwnTrailerStats {
+    /// Count of this author's messages that carry at least one `Signed-off-by:`.
+    pub signed_off_by_present: u64,
+    /// Messages that cite `Fixes:` (i.e. the author wrote a bug fix).
+    pub fixes_issued: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ReceivedTrailerStats {
+    pub reviewed_by: u64,
+    pub acked_by: u64,
+    pub tested_by: u64,
+    pub co_developed_by: u64,
+    pub reported_by: u64,
+    pub cc_stable: u64,
 }
 
 pub struct DiffResult {
@@ -2432,6 +2585,53 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let mids: std::collections::HashSet<&str> =
             rows.iter().map(|r| r.message_id.as_str()).collect();
         assert_eq!(mids, ["m1@x", "m2@x"].into_iter().collect());
+    }
+
+    #[test]
+    fn author_profile_aggregates_from_fixture() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let prof = r
+            .author_profile("alice@example.com", None, None, 1000)
+            .unwrap();
+        // Two messages from Alice in the sample corpus.
+        assert_eq!(prof.addr_queried, "alice@example.com");
+        assert_eq!(prof.sampled, 2);
+        assert!(!prof.limit_hit);
+        assert_eq!(prof.subsystems.len(), 1);
+        assert_eq!(prof.subsystems[0].list, "linux-cifs");
+        assert_eq!(prof.subsystems[0].patches, 2);
+        // Both patches have content (has_patch=true).
+        assert_eq!(prof.patches_with_content, 2);
+        // At least one patch in the fixture carries a Fixes: trailer.
+        assert!(prof.with_fixes_trailer >= 1);
+        assert!(prof.oldest_unix_ns.is_some());
+        assert!(prof.newest_unix_ns.is_some());
+    }
+
+    #[test]
+    fn author_profile_limit_hit_flag() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        // Ask for just 1 row out of 2 → expect limit_hit=true.
+        let prof = r.author_profile("alice@example.com", None, None, 1).unwrap();
+        assert_eq!(prof.sampled, 1);
+        assert!(prof.limit_hit);
+    }
+
+    #[test]
+    fn author_profile_returns_empty_for_unknown_addr() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+        let prof = r
+            .author_profile("nobody@nowhere.invalid", None, None, 100)
+            .unwrap();
+        assert_eq!(prof.sampled, 0);
+        assert_eq!(prof.subsystems.len(), 0);
+        assert!(prof.oldest_unix_ns.is_none());
     }
 
     #[test]

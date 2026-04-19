@@ -121,6 +121,13 @@ class Reader:
         since_unix_ns: int | None = ...,
         list: str | None = ...,
     ) -> dict[str, Any]: ...
+    def author_profile(
+        self,
+        addr: str,
+        list: str | None = ...,
+        since_unix_ns: int | None = ...,
+        limit: int = ...,
+    ) -> dict[str, Any]: ...
     def substr_subject(
         self,
         needle: str,

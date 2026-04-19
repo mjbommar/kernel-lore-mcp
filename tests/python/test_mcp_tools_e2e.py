@@ -66,6 +66,51 @@ async def test_tools_listed(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_author_profile_aggregates_from_addr(client: Client) -> None:
+    """lore_author_profile samples the most-recent messages for an
+    address and aggregates subsystems + trailer stats. Fixture has
+    two alice@ messages on linux-cifs; both carry patches, one
+    carries a Fixes: trailer."""
+    result = await client.call_tool(
+        "lore_author_profile",
+        {"addr": "alice@example.com", "limit": 1000},
+    )
+    data = result.data
+    assert data.addr_queried == "alice@example.com"
+    assert data.sampled == 2
+    assert data.limit_hit is False
+    assert data.patches_with_content == 2
+    assert data.with_fixes_trailer >= 1
+    assert len(data.subsystems) == 1
+    assert data.subsystems[0].list == "linux-cifs"
+    assert data.subsystems[0].patches == 2
+    assert data.oldest_unix_ns is not None
+    assert data.newest_unix_ns is not None
+    # Invariant: oldest <= newest.
+    assert data.oldest_unix_ns <= data.newest_unix_ns
+
+
+@pytest.mark.asyncio
+async def test_lore_author_profile_unknown_addr_empty(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_author_profile",
+        {"addr": "nobody@nowhere.invalid"},
+    )
+    data = result.data
+    assert data.sampled == 0
+    assert data.subsystems == []
+
+
+@pytest.mark.asyncio
+async def test_lore_author_profile_rejects_non_email(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool("lore_author_profile", {"addr": "not-an-email"})
+    assert "invalid_argument" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_lore_activity_by_file(client: Client) -> None:
     result = await client.call_tool(
         "lore_activity",

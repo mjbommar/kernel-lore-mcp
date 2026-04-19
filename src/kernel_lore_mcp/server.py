@@ -58,6 +58,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     # Explicit tool registration.
     from kernel_lore_mcp.tools.activity import lore_activity
+    from kernel_lore_mcp.tools.author_profile import lore_author_profile
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.message import lore_message
@@ -120,6 +121,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(lore_substr_trailers, annotations=ann("Substring inside a named trailer"))
     mcp.tool(lore_regex, annotations=ann("DFA-only regex scan"))
     mcp.tool(lore_diff, annotations=ann("Message-vs-message diff (patch / prose / raw)"))
+    mcp.tool(lore_author_profile, annotations=ann("Aggregate profile for one from_addr"))
 
     # Embedding tier (Phase 8). Both tools fail loudly with an
     # actionable ToolError when the index hasn't been built yet.

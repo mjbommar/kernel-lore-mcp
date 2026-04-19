@@ -261,6 +261,74 @@ class CountResponse(BaseModel):
     blind_spots_ref: str = "blind-spots://coverage"
 
 
+class SubsystemBucket(BaseModel):
+    """One subsystem (mailing list) an author has participated in."""
+
+    list: str
+    patches: int
+    oldest_unix_ns: int | None = None
+    newest_unix_ns: int | None = None
+    oldest_utc: datetime | None = None
+    newest_utc: datetime | None = None
+
+
+class OwnTrailerStats(BaseModel):
+    """Trailers visible on messages this author sent."""
+
+    signed_off_by_present: int = 0
+    fixes_issued: int = 0
+
+
+class ReceivedTrailerStats(BaseModel):
+    """Trailers OTHERS added to this author's patches in reply chains
+    that made it into the indexed series version. Counts are
+    patch-granularity: N-of-my-patches got at least one Reviewed-by,
+    not total Reviewed-by entries across all reply chains.
+    """
+
+    reviewed_by: int = 0
+    acked_by: int = 0
+    tested_by: int = 0
+    co_developed_by: int = 0
+    reported_by: int = 0
+    cc_stable: int = 0
+
+
+class AuthorProfileResponse(BaseModel):
+    """Profile for one `from_addr`, aggregated from the most recent N
+    messages they authored. See `lore_author_profile`.
+
+    Scope note: all counts are for messages THIS person AUTHORED. For
+    "how many patches has this person REVIEWED" (i.e. appeared as
+    Reviewed-by on someone else's patches), a reverse-trailer index
+    is needed — tracked as future work.
+    """
+
+    addr_queried: str
+    sampled: int = Field(
+        description="How many rows were aggregated. Capped by the limit parameter."
+    )
+    limit_hit: bool = Field(
+        description=(
+            "True when `sampled == limit`; the caller may be seeing a "
+            "recent-only slice of a prolific author's history."
+        )
+    )
+    oldest_unix_ns: int | None = None
+    newest_unix_ns: int | None = None
+    oldest_utc: datetime | None = None
+    newest_utc: datetime | None = None
+    patches_with_content: int
+    cover_letters: int
+    unique_subjects: int
+    with_fixes_trailer: int
+    own_trailers: OwnTrailerStats
+    received_trailers: ReceivedTrailerStats
+    subsystems: list[SubsystemBucket]
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
 class DiffResponse(BaseModel):
     """Generalized message-vs-message diff."""
 
