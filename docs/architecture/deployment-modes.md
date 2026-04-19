@@ -83,8 +83,9 @@ as a safety net; exposing it publicly takes an explicit
 - The ingest pipeline. Both modes ingest identically.
 - The compressed raw store format. Snapshot bundles are portable
   across modes.
-- The three-tier index schemas. See
-  [`../../src/schema.rs`](../../src/schema.rs).
+- The four-tier index schemas. See
+  [`../../src/schema.rs`](../../src/schema.rs) (Parquet, BM25,
+  trigram) and [`../../src/over.rs`](../../src/over.rs) (over.db).
 - The tokenizer. See
   [`../indexing/tokenizer-spec.md`](../indexing/tokenizer-spec.md).
 - The query grammar.

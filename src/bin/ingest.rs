@@ -106,11 +106,46 @@ fn main() -> Result<()> {
         );
     }
 
+    // over.db tier: default-enabled if `<data_dir>/over.db` already
+    // exists (so re-ingests over an existing deployment keep it
+    // fresh) and default-disabled otherwise (don't surprise the
+    // first run with a 12-18 GB sidecar). Explicit --with-over /
+    // --no-over override the auto-detect.
+    let over_path = data_dir.join("over.db");
+    let with_over = match (args.with_over, args.no_over) {
+        (true, true) => {
+            anyhow::bail!("--with-over and --no-over are mutually exclusive");
+        }
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => over_path.exists(),
+    };
+    if with_over {
+        tracing::info!(
+            over_db = %over_path.display(),
+            "over.db incremental writes enabled"
+        );
+    } else {
+        tracing::info!("over.db incremental writes disabled (use --with-over to enable)");
+    }
+
     // Single shared BM25 writer for the whole run. Only opened when
     // --with-bm25 is set; otherwise skipped entirely for speed.
     let bm25 = if !skip_bm25 {
         Some(Mutex::new(
             _core::BmWriter::open(&data_dir).context("open BM25 writer")?,
+        ))
+    } else {
+        None
+    };
+
+    // Single shared OverDb for the whole run; rayon shards serialize
+    // their per-shard insert_batch through this mutex. SQLite WAL
+    // tolerates this fine — there's exactly one writer (us) and
+    // readers (the MCP server) are non-blocking.
+    let over = if with_over {
+        Some(Mutex::new(
+            _core::OverDb::open(&over_path).context("open over.db")?,
         ))
     } else {
         None
@@ -132,9 +167,21 @@ fn main() -> Result<()> {
     }
 
     let start = Instant::now();
+    let max_retries = args.max_retries;
     let totals = shards
         .par_iter()
-        .map(|shard| ingest_one(&data_dir, shard, &run_id, &bm25, &stores, skip_bm25))
+        .map(|shard| {
+            ingest_one(
+                &data_dir,
+                shard,
+                &run_id,
+                &bm25,
+                &stores,
+                over.as_ref(),
+                skip_bm25,
+                max_retries,
+            )
+        })
         .collect::<Vec<_>>();
 
     // Commit BM25 once, after all shards finish (only if BM25 was built).
@@ -164,10 +211,16 @@ fn main() -> Result<()> {
 
     let mut total_ingested: u64 = 0;
     let mut total_failed: u64 = 0;
+    let mut total_over_rows: u64 = 0;
+    let mut total_over_failed: u64 = 0;
     for (shard, result) in shards.iter().zip(totals.iter()) {
         match result {
             Ok(stats) => {
                 total_ingested += stats.ingested;
+                total_over_rows += stats.over_rows_written;
+                if stats.over_failed {
+                    total_over_failed += 1;
+                }
                 tracing::info!(
                     list = shard.list,
                     shard = shard.shard,
@@ -176,6 +229,8 @@ fn main() -> Result<()> {
                     skipped_empty = stats.skipped_empty,
                     skipped_no_mid = stats.skipped_no_mid,
                     parquet = ?stats.parquet_path,
+                    over_rows = stats.over_rows_written,
+                    over_failed = stats.over_failed,
                     "shard done"
                 );
             }
@@ -196,47 +251,93 @@ fn main() -> Result<()> {
         shards = shards.len(),
         failed = total_failed,
         ingested = total_ingested,
+        over_rows = total_over_rows,
+        over_failed_shards = total_over_failed,
         "ingest complete"
     );
 
-    if total_failed > 0 {
+    if total_failed > 0 || total_over_failed > 0 {
         std::process::exit(2);
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ingest_one(
     data_dir: &Path,
     shard: &ShardRef,
     run_id: &str,
     bm25: &Option<Mutex<_core::BmWriter>>,
     stores: &std::collections::HashMap<String, Mutex<_core::Store>>,
+    over: Option<&Mutex<_core::OverDb>>,
     skip_bm25: bool,
+    max_retries: u32,
 ) -> Result<_core::IngestStats> {
     let per_shard_run_id = format!("{run_id}-{}-{}", shard.list, shard.shard);
     let shared_store = stores
         .get(&shard.list)
         .ok_or_else(|| anyhow::anyhow!("no shared store for list {:?}", shard.list))?;
     let shared_bm25 = bm25.as_ref();
-    let stats = _core::ingest_shard_with_bm25(
-        data_dir,
-        &shard.path,
-        &shard.list,
-        &shard.shard,
-        &per_shard_run_id,
-        shared_bm25,
-        Some(shared_store),
-        skip_bm25,
-    )
-    .with_context(|| {
+
+    let mut last_err = None;
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let backoff = std::time::Duration::from_secs(1 << attempt.min(5));
+            tracing::warn!(
+                list = shard.list,
+                shard = shard.shard,
+                attempt,
+                backoff_secs = backoff.as_secs(),
+                "retrying failed shard"
+            );
+            std::thread::sleep(backoff);
+        }
+
+        match _core::ingest_shard_with_bm25(
+            data_dir,
+            &shard.path,
+            &shard.list,
+            &shard.shard,
+            &per_shard_run_id,
+            shared_bm25,
+            Some(shared_store),
+            over,
+            skip_bm25,
+        ) {
+            Ok(stats) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        list = shard.list,
+                        shard = shard.shard,
+                        attempt,
+                        "shard succeeded on retry"
+                    );
+                }
+                return Ok(stats);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    list = shard.list,
+                    shard = shard.shard,
+                    attempt,
+                    error = %e,
+                    error_chain = ?e,
+                    "shard attempt failed"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap()).with_context(|| {
         format!(
-            "ingest_shard failed for {}/{} at {}",
+            "ingest_shard failed for {}/{} at {} after {} retries",
             shard.list,
             shard.shard,
-            shard.path.display()
+            shard.path.display(),
+            max_retries,
         )
-    })?;
-    Ok(stats)
+    })
 }
 
 fn discover_shards(mirror_root: &Path, only_list: Option<&str>) -> Result<Vec<ShardRef>> {
@@ -289,12 +390,19 @@ struct Args {
     run_id: Option<String>,
     with_bm25: bool,
     rebuild_bm25_only: bool,
+    max_retries: u32,
+    with_over: bool,
+    no_over: bool,
 }
 
 fn parse_args() -> Args {
     // Minimal arg parser to avoid pulling in clap. The CLI surface is
     // tiny and stable.
-    let mut args = Args::default();
+    let mut args = Args {
+        // default: retry each failed shard up to 3 times
+        max_retries: 3,
+        ..Args::default()
+    };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -302,8 +410,16 @@ fn parse_args() -> Args {
             "--lore-mirror" => args.lore_mirror = it.next().map(PathBuf::from),
             "--list" => args.list = it.next(),
             "--run-id" => args.run_id = it.next(),
+            "--max-retries" => {
+                args.max_retries = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(3);
+            }
             "--with-bm25" => args.with_bm25 = true,
             "--rebuild-bm25" => args.rebuild_bm25_only = true,
+            "--with-over" => args.with_over = true,
+            "--no-over" => args.no_over = true,
             "--help" | "-h" => {
                 println!(
                     "kernel-lore-ingest\n\
@@ -312,8 +428,12 @@ fn parse_args() -> Args {
                      --lore-mirror PATH    (or $KLMCP_LORE_MIRROR_DIR)\n\
                      --list NAME           optional: restrict to one list\n\
                      --run-id STRING       optional: stable id for this run\n\
+                     --max-retries N       retry failed shards N times (default: 3)\n\
                      --with-bm25           build BM25 inline (slower; default: skip)\n\
-                     --rebuild-bm25        ONLY rebuild BM25 from existing store, then exit\n"
+                     --rebuild-bm25        ONLY rebuild BM25 from existing store, then exit\n\
+                     --with-over           force on incremental over.db writes\n\
+                     --no-over             force off incremental over.db writes\n\
+                                           (default: on iff <data_dir>/over.db exists)\n"
                 );
                 std::process::exit(0);
             }

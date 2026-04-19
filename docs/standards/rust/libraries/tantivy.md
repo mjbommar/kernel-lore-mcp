@@ -6,10 +6,12 @@ Pinned: `tantivy = { version = "0.26", default-features = false, features = ["mm
 Stemmer feature **never enabled** (see `CLAUDE.md` and
 `../../../indexing/tokenizer-spec.md`).
 
-tantivy owns the BM25 tier only. Metadata is Arrow/Parquet;
+tantivy owns the BM25 tier only. Metadata analytical reads are
+Arrow/Parquet; metadata point lookups are SQLite (`over.db`);
 trigrams are `fst`+`roaring`. See
-`../../../architecture/three-tier-index.md` and
-`../../../indexing/bm25-tier.md`.
+`../../../architecture/four-tier-index.md`,
+`../../../architecture/over-db.md`,
+and `../../../indexing/bm25-tier.md`.
 
 ---
 

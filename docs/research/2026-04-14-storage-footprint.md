@@ -25,7 +25,7 @@ keeping Xapian — we derive our own).
 
 ## Our index estimates (full corpus)
 
-Per [`../architecture/three-tier-index.md`](../architecture/three-tier-index.md)
+Per [`../architecture/four-tier-index.md`](../architecture/four-tier-index.md)
 and [`../indexing/compressed-store.md`](../indexing/compressed-store.md):
 
 | Component | Size |

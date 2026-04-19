@@ -110,9 +110,10 @@ This gives us an honest eval without humans in the loop.
 
 ## Why this is v1.1, not v1.0
 
-v1 must ship the three-tier index and the MCP surface. A learned
-retriever is a bolt-on atop that — it lands as an optional fourth
-tier (`neural`), not a replacement for BM25 / trigram / metadata.
+v1 must ship the four-tier index and the MCP surface. A learned
+retriever is a bolt-on atop that — it lands as an optional fifth
+tier (`neural`), not a replacement for BM25 / trigram / metadata
+Parquet / over.db.
 The structured tiers win on precision for the queries we actually
 get; the neural tier earns its keep on the "describe what you
 want in English" surface.
@@ -128,4 +129,5 @@ away at ingest is not.
   column names used above.
 - [`../../src/parse.rs`](../../src/parse.rs) — prose/patch split.
 - [`../architecture/overview.md`](../architecture/overview.md)
-- [`../architecture/three-tier-index.md`](../architecture/three-tier-index.md)
+- [`../architecture/four-tier-index.md`](../architecture/four-tier-index.md)
+- [`../architecture/over-db.md`](../architecture/over-db.md)

@@ -3,16 +3,24 @@
 Every decision in this project trades something. This doc records
 the trades explicitly so we can revisit them honestly.
 
-## Custom three-tier vs one tantivy index
+## Custom four-tier vs one tantivy index
 
-- **Chose:** three tiers.
-- **Cost:** ~2–3 weeks more engineering; three index formats to
-  maintain; three merge stories.
-- **Gain:** ~50% smaller total index; purpose-fit query
-  performance; future-proof for tier-level replacement (swap
-  trigram for a faster code-substring engine without touching BM25).
+- **Chose:** four tiers (Parquet metadata + over.db point-lookup +
+  trigram + BM25). See
+  [`four-tier-index.md`](./four-tier-index.md) and
+  [`over-db.md`](./over-db.md).
+- **Cost:** ~2–3 weeks more engineering; four index formats to
+  maintain; four merge stories. The fourth (over.db) was added
+  after the lore-scale ingest in 2026-04 surfaced Parquet's
+  point-lookup failure mode — see
+  [`../research/2026-04-17-overdb-validation.md`](../research/2026-04-17-overdb-validation.md).
+- **Gain:** ~50% smaller total index than a maximalist tantivy
+  baseline; purpose-fit query performance (sub-millisecond point
+  lookups; ~3 ms popular-author scans); future-proof for
+  tier-level replacement (swap trigram for a faster
+  code-substring engine without touching BM25).
 - **Revisit if:** operational burden dominates. A single-tier
-  tantivy baseline would still be *useful*; trading three-tier for
+  tantivy baseline would still be *useful*; trading four-tier for
   one-tier is a valid simplification if the team shrinks.
 
 ## No stemming, no stopwords

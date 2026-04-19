@@ -78,12 +78,91 @@ pub fn py_rebuild_bm25(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
     Ok(count)
 }
 
+/// Incremental, streaming builder for the embedding index.
+///
+/// Python opens one `EmbeddingBuilder`, pushes batches via
+/// `add_batch(mids, vectors)` as the embedder runs, then calls
+/// `finalize()`. Vectors are written to disk on every call — the
+/// builder never accumulates the full corpus (~54 GB at 17.6M×768×4).
+///
+/// The one-shot `build_embedding_index` function below is a thin
+/// wrapper for callers that already have both lists in memory.
+#[pyclass(name = "EmbeddingBuilder")]
+pub struct PyEmbeddingBuilder {
+    inner: Option<EmbeddingBuilder>,
+}
+
+#[pymethods]
+impl PyEmbeddingBuilder {
+    #[new]
+    fn new(data_dir: PathBuf, model: String, dim: u32) -> PyResult<Self> {
+        let b = EmbeddingBuilder::new(&data_dir, model, dim)?;
+        Ok(Self { inner: Some(b) })
+    }
+
+    fn add(&mut self, message_id: &str, vector: Vec<f32>) -> PyResult<()> {
+        let b = self.inner.as_mut().ok_or_else(|| {
+            crate::error::Error::State("EmbeddingBuilder already finalized".into())
+        })?;
+        b.add(message_id, &vector)?;
+        Ok(())
+    }
+
+    fn add_batch(
+        &mut self,
+        message_ids: Vec<String>,
+        vectors: Vec<Vec<f32>>,
+    ) -> PyResult<()> {
+        if message_ids.len() != vectors.len() {
+            return Err(crate::error::Error::State(format!(
+                "add_batch: {} message-ids vs {} vectors",
+                message_ids.len(),
+                vectors.len()
+            ))
+            .into());
+        }
+        let b = self.inner.as_mut().ok_or_else(|| {
+            crate::error::Error::State("EmbeddingBuilder already finalized".into())
+        })?;
+        for (mid, v) in message_ids.iter().zip(vectors.iter()) {
+            b.add(mid, v)?;
+        }
+        Ok(())
+    }
+
+    #[pyo3(signature = (build_hnsw=true))]
+    fn finalize<'py>(
+        &mut self,
+        py: Python<'py>,
+        build_hnsw: bool,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let b = self.inner.take().ok_or_else(|| {
+            crate::error::Error::State("EmbeddingBuilder already finalized".into())
+        })?;
+        let meta = py.detach(move || b.finalize_with_hnsw(build_hnsw))?;
+        let d = PyDict::new(py);
+        d.set_item("model", &meta.model)?;
+        d.set_item("dim", meta.dim)?;
+        d.set_item("metric", &meta.metric)?;
+        d.set_item("count", meta.count)?;
+        d.set_item("schema_version", meta.schema_version)?;
+        Ok(d)
+    }
+
+    fn __len__(&self) -> usize {
+        self.inner.as_ref().map(|b| b.len()).unwrap_or(0)
+    }
+}
+
 /// Build (or rebuild) the embedding index. Caller passes parallel
 /// lists of message-ids and L2-normalized f32 vectors (one row each).
 /// The Python side runs the actual embedding model (fastembed) and
 /// hands the resulting `numpy.ndarray.astype(np.float32)` here.
 ///
 /// Idempotent — overwrites `<data_dir>/embedding/` atomically.
+///
+/// **Memory warning:** holds both full lists in RAM. For corpus-scale
+/// builds use `EmbeddingBuilder` (streaming).
 #[pyfunction]
 #[pyo3(name = "build_embedding_index")]
 #[pyo3(signature = (data_dir, model, dim, message_ids, vectors))]
@@ -104,11 +183,11 @@ pub fn py_build_embedding_index<'py>(
         .into());
     }
     let meta = py.detach(move || -> Result<_, crate::error::Error> {
-        let mut b = EmbeddingBuilder::new(model, dim);
-        for (mid, v) in message_ids.into_iter().zip(vectors.into_iter()) {
-            b.add(&mid, v)?;
+        let mut b = EmbeddingBuilder::new(&data_dir, model, dim)?;
+        for (mid, v) in message_ids.iter().zip(vectors.iter()) {
+            b.add(mid, v)?;
         }
-        b.finalize(&data_dir)
+        b.finalize()
     })?;
     let d = PyDict::new(py);
     d.set_item("model", &meta.model)?;
@@ -558,25 +637,41 @@ impl PyReader {
                     return Ok(Vec::new());
                 }
 
-                // Scan all messages and filter by the ones whose bodies
-                // mention any of the target paths. For v0.1.x this is a
-                // brute-force scan; the posting-list optimization lands
-                // when we build incremental postings at ingest time.
+                // Stream rows; break as soon as `limit` matches land.
+                // The old implementation called all_rows which would
+                // materialize the full 17.6M-row corpus into a Vec
+                // when `list=None` — OOM.
                 let reader = crate::reader::Reader::new(&data_dir);
-                let all_rows = reader.all_rows(list.as_deref(), since_unix_ns)?;
-
+                let list_owned = list.clone();
                 let mut results = Vec::new();
-                for row in &all_rows {
-                    let body = reader.fetch_body(&row.message_id)?;
-                    let Some(body) = body else { continue };
-                    let found = vocab.scan_body(&body);
-                    let hit = found.iter().any(|id| path_ids.contains(id));
-                    if hit {
-                        results.push(row.clone());
-                        if results.len() >= limit {
-                            break;
+                let mut scan_err: Option<crate::error::Error> = None;
+                reader.scan_streaming(list_owned.as_deref(), |row| {
+                    if let Some(since) = since_unix_ns {
+                        if let Some(d) = row.date_unix_ns {
+                            if d < since {
+                                return true;
+                            }
                         }
                     }
+                    let body = match reader.fetch_body(&row.message_id) {
+                        Ok(Some(b)) => b,
+                        Ok(None) => return true,
+                        Err(e) => {
+                            scan_err = Some(e);
+                            return false;
+                        }
+                    };
+                    let found = vocab.scan_body(&body);
+                    if found.iter().any(|id| path_ids.contains(id)) {
+                        results.push(row);
+                        if results.len() >= limit {
+                            return false;
+                        }
+                    }
+                    true
+                })?;
+                if let Some(e) = scan_err {
+                    return Err(e);
                 }
                 Ok(results)
             },
@@ -587,18 +682,92 @@ impl PyReader {
             .collect()
     }
 
-    /// Return every row in the metadata tier. Optional list + since
-    /// filters. Exposed for the embedding-bootstrap CLI so it doesn't
-    /// need to hack through substr_subject("").
-    #[pyo3(signature = (list=None, since_unix_ns=None))]
-    fn scan_all<'py>(
+    /// Stream every row in the metadata tier through a Python
+    /// callback. The callback receives a list of row-dicts (one
+    /// batch at a time) and returns True to continue or False to
+    /// stop early.
+    ///
+    /// Used by the embedding-bootstrap CLI; avoids materializing
+    /// the full 17.6M-row corpus (~45 GB RSS) in one Python list.
+    #[pyo3(signature = (callback, batch_size=2048, list=None, since_unix_ns=None))]
+    fn scan_batches(
         &self,
-        py: Python<'py>,
+        py: Python<'_>,
+        callback: Bound<'_, pyo3::PyAny>,
+        batch_size: usize,
         list: Option<String>,
         since_unix_ns: Option<i64>,
-    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let rows = py.detach(|| self.inner.all_rows(list.as_deref(), since_unix_ns))?;
-        rows.iter().map(|r| row_to_pydict(py, r)).collect()
+    ) -> PyResult<()> {
+        let batch_size = batch_size.max(1);
+        let mut buf: Vec<MessageRow> = Vec::with_capacity(batch_size);
+        let mut stop = false;
+        let mut py_err: Option<PyErr> = None;
+
+        let flush = |py: Python<'_>,
+                     callback: &Bound<'_, pyo3::PyAny>,
+                     buf: &mut Vec<MessageRow>,
+                     stop: &mut bool,
+                     py_err: &mut Option<PyErr>| {
+            if buf.is_empty() {
+                return;
+            }
+            let dicts: Vec<Bound<'_, PyDict>> = match buf
+                .iter()
+                .map(|r| row_to_pydict(py, r))
+                .collect::<PyResult<Vec<_>>>()
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    *py_err = Some(e);
+                    *stop = true;
+                    buf.clear();
+                    return;
+                }
+            };
+            match callback.call1((dicts,)) {
+                Ok(ret) => match ret.is_truthy() {
+                    Ok(true) => {}
+                    Ok(false) => *stop = true,
+                    Err(e) => {
+                        *py_err = Some(e);
+                        *stop = true;
+                    }
+                },
+                Err(e) => {
+                    *py_err = Some(e);
+                    *stop = true;
+                }
+            }
+            buf.clear();
+        };
+
+        self.inner
+            .scan_streaming(list.as_deref(), |row| {
+                if stop {
+                    return false;
+                }
+                if let Some(since) = since_unix_ns {
+                    if let Some(d) = row.date_unix_ns {
+                        if d < since {
+                            return true;
+                        }
+                    }
+                }
+                buf.push(row);
+                if buf.len() >= batch_size {
+                    flush(py, &callback, &mut buf, &mut stop, &mut py_err);
+                }
+                !stop
+            })?;
+
+        if !stop {
+            flush(py, &callback, &mut buf, &mut stop, &mut py_err);
+        }
+
+        if let Some(e) = py_err {
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Embedding-index dim, used by the Python tool to verify the

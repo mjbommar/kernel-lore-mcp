@@ -28,7 +28,7 @@ Before touching Rust code, understand the existing invariants, the relevant arch
 - [ ] **Read the Rust standards guide.** [`../index.md`](../index.md) is the entry point; follow links to the relevant design/library guide.
 
 - [ ] **Read the relevant architecture doc.**
-  - Ingest work: [`../../../architecture/three-tier-index.md`](../../../architecture/three-tier-index.md) + `docs/ingestion/` subdir.
+  - Ingest work: [`../../../architecture/four-tier-index.md`](../../../architecture/four-tier-index.md) + [`../../../architecture/over-db.md`](../../../architecture/over-db.md) + `docs/ingestion/` subdir.
   - Indexing work: `docs/indexing/` (tier spec, tokenizer spec).
   - Router / query grammar: `docs/mcp/query-routing.md`.
   - Storage / on-disk layout: `docs/architecture/` + `docs/ingestion/`.
@@ -41,7 +41,7 @@ Before touching Rust code, understand the existing invariants, the relevant arch
 
 - [ ] **Decide: library error (`thiserror`) or binary error (`anyhow`)?** Only binaries get `anyhow`. Library functions always return a typed `Error`.
 
-- [ ] **Check the three-tier contract.** Does this change cross a tier boundary? Rebuildability contract: the compressed raw store is the source of truth; all three tiers must be rebuildable from it.
+- [ ] **Check the four-tier contract.** Does this change cross a tier boundary? Rebuildability contract: the compressed raw store is the source of truth; metadata Parquet, trigram, and BM25 rebuild from it; over.db rebuilds from metadata Parquet.
 
 - [ ] **Check the single-writer contract.** `tantivy::IndexWriter`, trigram builder, and store appender all live in `klmcp-ingest`, never the MCP server. If you're about to open a writer in the wrong binary, stop.
 

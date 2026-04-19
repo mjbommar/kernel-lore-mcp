@@ -33,6 +33,7 @@ mod embedding;
 mod error;
 mod ingest;
 mod metadata;
+mod over;
 mod parse;
 pub mod path_tier;
 mod python;
@@ -52,6 +53,8 @@ pub use embedding::{EmbeddingBuilder, EmbeddingMeta, EmbeddingReader};
 pub use ingest::{
     IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25, rebuild_bm25,
 };
+pub use over::{DddPayload, OverDb, OverRow};
+pub use reader::{MessageRow, Reader};
 pub use router::{CursorPayload, ParsedQuery, RankedHit, parse_query, sign_cursor, verify_cursor};
 pub use state::State;
 pub use store::Store;
@@ -69,6 +72,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_embedding_meta, m)?)?;
     m.add_class::<crate::python::PyReader>()?;
+    m.add_class::<crate::python::PyEmbeddingBuilder>()?;
     Ok(())
 }
 

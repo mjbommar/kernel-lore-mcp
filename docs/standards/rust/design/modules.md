@@ -35,7 +35,7 @@ Every `.rs` file above is one `mod X;` line in `lib.rs`. New
 sibling modules are added to `lib.rs` in **alphabetical order**
 (makes rebase conflicts trivial).
 
-See `../../../architecture/three-tier-index.md` for the
+See `../../../architecture/four-tier-index.md` for the
 high-level design this tree implements.
 
 ---
@@ -231,7 +231,7 @@ choices:
    reporting).
 
 Our one binary today is `src/bin/reindex.rs`. It will eventually
-need to open the store, walk its index, and feed the three tier
+need to open the store, walk its index, and feed the four tier
 builders. That's all `pub` API. See `boundaries.md` for the
 binary vs library split (anyhow vs thiserror).
 

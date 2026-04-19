@@ -67,11 +67,24 @@ triple_accel = "0.4"
 # Compression (compressed raw store)
 zstd = "0.13"
 
+# SQLite metadata tier (over.db). Mirrors public-inbox's over.sqlite3
+# pattern. `bundled` so we don't depend on a system libsqlite3 version.
+# `trace` enables cheap query-level tracing for ops debugging.
+rusqlite = { version = "0.33", features = ["bundled", "trace"] }
+
+# msgpack for the over.db `ddd` blob (display fields).
+rmp-serde = "1.3"
+
 # Approximate-nearest-neighbour index for the embedding tier.
 # Pure Rust, no transitive ML deps; we feed it pre-computed f32
 # vectors (Python side embeds via fastembed).
 instant-distance = { version = "0.6", features = ["with-serde"] }
 bincode = "1.3"
+
+# Zero-copy mmap for on-disk vector reads. Avoids holding
+# `count * dim * 4` bytes of vectors.f32 in anonymous RSS
+# (~54 GB at full-corpus scale).
+memmap2 = "0.9"
 
 # Columnar metadata tier
 arrow = { version = "58", default-features = false, features = ["ipc"] }
@@ -132,6 +145,10 @@ opt-level = 3
 debug = 1
 panic = "abort"
 strip = "symbols"
+
+[[bin]]
+name = "kernel-lore-build-over"
+path = "src/bin/build_over.rs"
 
 [[bin]]
 name = "bench-blob-read"

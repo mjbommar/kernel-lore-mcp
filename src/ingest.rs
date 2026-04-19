@@ -25,9 +25,10 @@ use gix::ObjectId;
 use crate::bm25::BmWriter;
 use crate::error::{Error, Result};
 use crate::metadata::{self, MetadataBatch, MetadataRow};
-use crate::parse;
+use crate::over::{DddPayload, OverDb, OverRow};
+use crate::parse::{self, ParsedMessage};
 use crate::state::State;
-use crate::store::Store;
+use crate::store::{Store, StoreOffset};
 use crate::trigram::{SegmentBuilder as TrigramBuilder, segment_dir as trigram_segment_dir};
 
 /// Ingest one public-inbox shard end-to-end.
@@ -63,7 +64,9 @@ pub fn ingest_shard_unlocked(
 ) -> Result<IngestStats> {
     // Default: build BM25 inline (backward compat for the Python
     // single-shard path). The Rust binary uses skip_bm25=true.
-    ingest_shard_with_bm25(data_dir, shard_path, list, shard, run_id, None, None, false)
+    ingest_shard_with_bm25(
+        data_dir, shard_path, list, shard, run_id, None, None, None, false,
+    )
 }
 
 /// Full-control variant: accepts optional shared writers so
@@ -90,6 +93,14 @@ pub fn ingest_shard_unlocked(
 /// `rebuild_bm25()` after the hot path finishes.
 ///
 /// `shared_bm25` / `shared_store`: see earlier docs.
+///
+/// `shared_over`: when `Some`, every parsed message's row is appended
+/// to the shared `OverDb` in a single transaction that commits AFTER
+/// the per-shard Parquet write succeeds. `INSERT OR REPLACE` keyed on
+/// `(message_id, list)` keeps re-ingests idempotent. When `None`, the
+/// over.db tier is skipped entirely (preserving the legacy behavior
+/// for callers — typically the Python single-shard path — that don't
+/// hold a writer for it).
 #[allow(clippy::too_many_arguments)]
 pub fn ingest_shard_with_bm25(
     data_dir: &Path,
@@ -99,6 +110,7 @@ pub fn ingest_shard_with_bm25(
     run_id: &str,
     shared_bm25: Option<&Mutex<BmWriter>>,
     shared_store: Option<&Mutex<Store>>,
+    shared_over: Option<&Mutex<OverDb>>,
     skip_bm25: bool,
 ) -> Result<IngestStats> {
     let state = State::new(data_dir)?;
@@ -147,6 +159,14 @@ pub fn ingest_shard_with_bm25(
 
     let mut batch = MetadataBatch::new();
     let mut trigram = TrigramBuilder::new();
+    // Buffered until the per-shard Parquet write succeeds; only then
+    // do we open the over.db transaction. Keeps Parquet as the
+    // ordering authority for "this shard committed".
+    let mut over_rows: Vec<OverRow> = if shared_over.is_some() {
+        Vec::with_capacity(1024)
+    } else {
+        Vec::new()
+    };
     // local_bm25 is Some when (a) the caller didn't supply a shared
     // writer AND (b) skip_bm25 is false. When skip_bm25 is true, no
     // BM25 work happens at all — the index is built separately via
@@ -183,10 +203,15 @@ pub fn ingest_shard_with_bm25(
         // commit.time() returns gix_date::Time with .seconds field.
         let commit_date_ns = commit.time().ok().map(|t| t.seconds * 1_000_000_000);
         let parsed = parse::parse_message(data, commit_date_ns);
-        let Some(mid) = parsed.message_id.clone() else {
+        let Some(raw_mid) = parsed.message_id.clone() else {
             stats.skipped_no_mid += 1;
             continue;
         };
+        // RFC 2822 header folding can leave \r\n + whitespace inside
+        // Message-IDs. Normalize by collapsing all whitespace runs to
+        // nothing — Message-IDs are opaque tokens, never contain
+        // intentional spaces.
+        let mid: String = raw_mid.split_whitespace().collect();
 
         // Patch goes to trigram tier BEFORE we consume `parsed` into the
         // metadata row.
@@ -225,12 +250,25 @@ pub fn ingest_shard_with_bm25(
             .lock()
             .map_err(|_| Error::State("store mutex poisoned".to_owned()))?
             .append(data)?;
+        let body_sha256_hex = hex(&appended.body_sha256);
+        if shared_over.is_some() {
+            over_rows.push(build_over_row(
+                &mid,
+                list,
+                &parsed,
+                appended.ptr,
+                appended.body_length,
+                &body_sha256_hex,
+                shard,
+                &info.id.to_string(),
+            ));
+        }
         let row = MetadataRow {
             list,
             shard,
             commit_oid: &info.id.to_string(),
             offset: appended.ptr,
-            body_sha256_hex: hex(&appended.body_sha256),
+            body_sha256_hex,
             body_length: appended.body_length,
             parsed,
         };
@@ -252,6 +290,42 @@ pub fn ingest_shard_with_bm25(
     let rb = batch.finish()?;
     let parquet_path = metadata::write_parquet(data_dir, list, run_id, &rb)?;
     stats.parquet_path = Some(parquet_path.display().to_string());
+
+    // over.db write — strictly AFTER Parquet succeeds. A failure here
+    // is logged and surfaced via `stats.over_failed` but does NOT
+    // abort the shard: Parquet (the source-of-truth metadata tier)
+    // already succeeded, and a future ingest will repopulate the
+    // missing rows via INSERT OR REPLACE on (message_id, list).
+    if let Some(over_mutex) = shared_over {
+        if !over_rows.is_empty() {
+            match over_mutex.lock() {
+                Ok(mut over) => match over.insert_batch(&over_rows) {
+                    Ok(()) => {
+                        stats.over_rows_written = over_rows.len() as u64;
+                    }
+                    Err(e) => {
+                        stats.over_failed = true;
+                        tracing::error!(
+                            list = list,
+                            shard = shard,
+                            rows = over_rows.len(),
+                            error = %e,
+                            "over.db insert_batch failed (shard's parquet write succeeded; \
+                             will be reconciled on next ingest via INSERT OR REPLACE)"
+                        );
+                    }
+                },
+                Err(_) => {
+                    stats.over_failed = true;
+                    tracing::error!(
+                        list = list,
+                        shard = shard,
+                        "over.db mutex poisoned; skipping over.db write for this shard"
+                    );
+                }
+            }
+        }
+    }
 
     // Trigram segment — only finalize if we indexed at least one patch.
     if !trigram.is_empty() {
@@ -292,6 +366,87 @@ pub struct IngestStats {
     pub parquet_path: Option<String>,
     pub trigram_segment_path: Option<String>,
     pub bm25_opstamp: Option<u64>,
+    /// Number of rows written to over.db for this shard. Zero when
+    /// the over.db tier is disabled.
+    pub over_rows_written: u64,
+    /// True iff Parquet succeeded but the over.db transaction failed.
+    /// The binary uses this to decide its exit code (2 = partial).
+    pub over_failed: bool,
+}
+
+/// Project a `ParsedMessage` plus its body locator into the
+/// over.db row layout. Indexed columns get the lowercased
+/// `from_addr`; the original-case form is preserved inside `ddd`
+/// so display paths don't lose information.
+#[allow(clippy::too_many_arguments)]
+fn build_over_row(
+    message_id: &str,
+    list: &str,
+    parsed: &ParsedMessage,
+    ptr: StoreOffset,
+    body_length: u64,
+    body_sha256_hex: &str,
+    shard: &str,
+    commit_oid: &str,
+) -> OverRow {
+    let trailers_json = if parsed.trailers.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&parsed.trailers).ok()
+    };
+    OverRow {
+        message_id: message_id.to_owned(),
+        list: list.to_owned(),
+        from_addr: parsed.from_addr.as_deref().map(str::to_ascii_lowercase),
+        date_unix_ns: parsed.date_unix_ns,
+        in_reply_to: parsed.in_reply_to.clone(),
+        // tid is rebuilt cross-corpus after every ingest run via
+        // `rebuild_tid`; we leave it NULL here and let the rebuild
+        // populate it. `INSERT OR REPLACE` on (message_id, list) means
+        // we don't risk overwriting a fresher tid because the
+        // rebuild writes through its own dedicated update path
+        // (Phase 5 wiring; for Phase 4 the column simply stays NULL
+        // until that wire-up lands).
+        tid: None,
+        body_segment_id: ptr.segment_id as i64,
+        body_offset: ptr.offset as i64,
+        body_length: body_length as i64,
+        body_sha256: body_sha256_hex.to_owned(),
+        has_patch: parsed.has_patch,
+        is_cover_letter: parsed.is_cover_letter,
+        series_version: Some(parsed.series_version as i64),
+        series_index: parsed.series_index.map(|v| v as i64),
+        series_total: parsed.series_total.map(|v| v as i64),
+        files_changed: parsed.files_changed.map(|v| v as i64),
+        insertions: parsed.insertions.map(|v| v as i64),
+        deletions: parsed.deletions.map(|v| v as i64),
+        commit_oid: Some(commit_oid.to_owned()),
+        ddd: DddPayload {
+            subject_raw: parsed.subject_raw.clone(),
+            subject_normalized: parsed.subject_normalized.clone(),
+            subject_tags: parsed.subject_tags.clone(),
+            references: parsed.references.clone(),
+            touched_files: parsed.touched_files.clone(),
+            touched_functions: parsed.touched_functions.clone(),
+            signed_off_by: parsed.signed_off_by.clone(),
+            reviewed_by: parsed.reviewed_by.clone(),
+            acked_by: parsed.acked_by.clone(),
+            tested_by: parsed.tested_by.clone(),
+            co_developed_by: parsed.co_developed_by.clone(),
+            reported_by: parsed.reported_by.clone(),
+            suggested_by: parsed.suggested_by.clone(),
+            helped_by: parsed.helped_by.clone(),
+            assisted_by: parsed.assisted_by.clone(),
+            fixes: parsed.fixes.clone(),
+            link: parsed.link.clone(),
+            closes: parsed.closes.clone(),
+            cc_stable: parsed.cc_stable.clone(),
+            trailers_json,
+            from_name: parsed.from_name.clone(),
+            from_addr_original_case: parsed.from_addr.clone(),
+            shard: Some(shard.to_owned()),
+        },
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -316,21 +471,39 @@ fn hex(bytes: &[u8]) -> String {
 /// query boundary.
 pub fn rebuild_bm25(data_dir: &Path) -> Result<u64> {
     use crate::reader::Reader;
+    use std::collections::HashMap;
 
     let reader = Reader::new(data_dir);
     let mut writer = BmWriter::open(data_dir)?;
 
-    let mut rows = Vec::new();
-    reader.scan_all(&mut rows)?;
-
+    // Stream rows through the indexer; never materialize the full
+    // corpus. Previously this called scan_all into a Vec which OOMed
+    // at 17.6M-row scale (~49 GB RSS).
+    let mut stores: HashMap<String, crate::store::Store> = HashMap::new();
     let mut count: u64 = 0;
-    for row in &rows {
-        let body = reader.fetch_body(&row.message_id)?;
-        let Some(body) = body else { continue };
+    let mut err: Option<Error> = None;
+
+    reader.scan_streaming(None, |row| {
+        let store = match stores.get(&row.list) {
+            Some(s) => s,
+            None => match crate::store::Store::open(data_dir, &row.list) {
+                Ok(s) => {
+                    stores.insert(row.list.clone(), s);
+                    stores.get(&row.list).unwrap()
+                }
+                Err(e) => {
+                    err = Some(e);
+                    return false;
+                }
+            },
+        };
+        let body = match store.read_at(row.body_segment_id, row.body_offset) {
+            Ok(b) => b,
+            Err(_) => return true,
+        };
 
         let text = std::str::from_utf8(&body).unwrap_or("");
 
-        // Split prose from patch — same logic as the Python side.
         let prose = if text.starts_with("diff --git ") {
             ""
         } else if let Some(idx) = text.find("\ndiff --git ") {
@@ -345,9 +518,17 @@ pub fn rebuild_bm25(data_dir: &Path) -> Result<u64> {
             .or(row.subject_raw.as_deref());
 
         if !prose.is_empty() || subject.is_some() {
-            writer.add(&row.message_id, &row.list, subject, prose)?;
+            if let Err(e) = writer.add(&row.message_id, &row.list, subject, prose) {
+                err = Some(e);
+                return false;
+            }
             count += 1;
         }
+        true
+    })?;
+
+    if let Some(e) = err {
+        return Err(e);
     }
 
     writer.commit()?;

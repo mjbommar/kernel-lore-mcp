@@ -115,11 +115,13 @@ once, every agent query is zero HTTP load on lore.kernel.org.
 
 ## Architecture in one paragraph
 
-Three-tier index plus an embedding tier, purpose-built per query
-class: **columnar metadata** (Arrow/Parquet) for structured fields;
-**trigram** (`fst` + `roaring`) for patch/diff content with DFA-only
-regex confirmation; **BM25** (tantivy) for prose; **semantic**
-(HNSW via instant-distance) for "more like this." Rust core via
+Four-tier index plus an embedding tier, purpose-built per query
+class: **columnar metadata** (Arrow/Parquet) for analytical scans;
+**SQLite `over.db`** (public-inbox pattern) for sub-millisecond
+metadata point lookups and predicate scans; **trigram** (`fst` +
+`roaring`) for patch/diff content with DFA-only regex confirmation;
+**BM25** (tantivy) for prose; **semantic** (HNSW via
+instant-distance) for "more like this." Rust core via
 PyO3 0.28 does the heavy lifting; Python + FastMCP 3.2 serves
 MCP over stdio + Streamable HTTP. Ingestion is incremental from
 grokmirror-managed public-inbox git shards via gix. The

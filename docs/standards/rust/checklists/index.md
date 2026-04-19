@@ -136,7 +136,7 @@ Doc comments on every public item.
 - [ ] `///` on every `pub` item
 - [ ] Code examples in `///` blocks compile via `cargo test --doc`
 - [ ] Cross-link with `[`Type`]` rustdoc links
-- [ ] Module-level `//!` describes the module's role in the three-tier architecture
+- [ ] Module-level `//!` describes the module's role in the four-tier architecture
 
 ---
 

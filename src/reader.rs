@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use arrow::array::{
     Array, BooleanArray, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
@@ -30,6 +31,7 @@ use arrow::array::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::error::{Error, Result};
+use crate::over::OverDb;
 use crate::schema as sc;
 
 /// One row's worth of metadata, flattened for consumption.
@@ -82,14 +84,81 @@ pub struct MessageRow {
 /// Reader over all Parquet metadata files. Cheap to construct;
 /// per-query scans re-open files so we get fresh mmap-backed reads
 /// after a writer commit.
+///
+/// When `<data_dir>/over.db` exists, it is opened lazily at
+/// construction time and used for indexed point lookups, equality
+/// scans, and post-tantivy / post-trigram hydration. The Parquet
+/// scan path is preserved as a graceful fallback for deployments
+/// that haven't built `over.db` yet (Phase 3 of the over.db tier).
+///
+/// `OverDb` wraps a single `rusqlite::Connection`, which is `Send`
+/// but not `Sync`. We share it across PyO3-detached worker threads
+/// behind an `Arc<Mutex<_>>`. This serializes reads at the
+/// SQLite-connection layer; for the latency targets (sub-ms point
+/// lookups, sub-100ms BM25 hydration) lock contention is well
+/// below the SQLite work itself. If Phase 5 stress tests show the
+/// mutex becoming the bottleneck we'll switch to an r2d2 pool.
+/// Hard cap on patch_search candidate union size. A degenerate needle
+/// (e.g. a single common trigram, list=None) could otherwise match
+/// most of the 17.6M-message corpus and accumulate ~700 MB of
+/// message-ids into a HashSet before any confirm step runs.
+const MAX_PATCH_CANDIDATES: usize = 100_000;
+
 pub struct Reader {
     data_dir: PathBuf,
+    over: Option<Arc<Mutex<OverDb>>>,
 }
 
 impl Reader {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
-        Self {
-            data_dir: data_dir.as_ref().to_owned(),
+        let data_dir = data_dir.as_ref().to_owned();
+        let over_path = data_dir.join("over.db");
+        let over = if over_path.exists() {
+            match OverDb::open(&over_path) {
+                Ok(db) => {
+                    tracing::debug!(
+                        path = %over_path.display(),
+                        "Reader: over.db tier enabled"
+                    );
+                    Some(Arc::new(Mutex::new(db)))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %over_path.display(),
+                        error = %e,
+                        "Reader: over.db present but failed to open; falling back to Parquet scan"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self { data_dir, over }
+    }
+
+    /// Borrow the optional over.db handle. `None` when the data dir
+    /// has no `over.db` (graceful fallback to the legacy Parquet scan).
+    fn over_db(&self) -> Option<&Arc<Mutex<OverDb>>> {
+        self.over.as_ref()
+    }
+
+    /// Run `f` against the over.db handle if one is available, holding
+    /// the mutex only for the duration of the closure. Returns `None`
+    /// when the over.db tier is disabled, leaving the caller to fall
+    /// through to the Parquet scan path. Mutex poisoning is treated
+    /// as "tier broken" — log + fall through.
+    fn with_over<T, F>(&self, f: F) -> Option<Result<T>>
+    where
+        F: FnOnce(&OverDb) -> Result<T>,
+    {
+        let handle = self.over.as_ref()?;
+        match handle.lock() {
+            Ok(guard) => Some(f(&guard)),
+            Err(_) => {
+                tracing::warn!("over.db mutex poisoned; falling back to Parquet scan");
+                None
+            }
         }
     }
 
@@ -182,14 +251,50 @@ impl Reader {
         )
     }
 
-    /// Collect all rows with optional list + since filters. Used by
-    /// the path tier's brute-force scan in v0.1.x; will be replaced
-    /// by posting-list reads in v0.2.x.
+    /// Streaming variant of `scan_all`. Invokes `visit` for every row
+    /// without ever materializing the full corpus in memory. Honors
+    /// the same dedup-by-message_id (mtime-DESC, freshest-wins) and
+    /// optional `list` filter the rest of the read path uses.
+    ///
+    /// `visit` returns `true` to continue, `false` to stop early.
+    /// Used by the `kernel-lore-build-over` binary, which would
+    /// otherwise OOM trying to hold 29M rows.
+    pub fn scan_streaming<V>(&self, list: Option<&str>, visit: V) -> Result<()>
+    where
+        V: FnMut(MessageRow) -> bool,
+    {
+        let want_list = list.map(|s| s.to_owned());
+        self.scan(
+            move |r| match &want_list {
+                Some(l) => &r.list == l,
+                None => true,
+            },
+            visit,
+        )
+    }
+
+    /// Collect all rows with optional list + since filters.
+    ///
+    /// `limit` caps the returned row count. `None` uses the safety
+    /// default of 1M — the uncapped Parquet path would OOM on a
+    /// 17.6M-row corpus. Callers should pass `Some(n)` with a tight
+    /// bound whenever they have one.
     pub fn all_rows(
         &self,
         list: Option<&str>,
         since_unix_ns: Option<i64>,
+        limit: Option<usize>,
     ) -> Result<Vec<MessageRow>> {
+        const DEFAULT_CAP: usize = 1_000_000;
+        let cap = limit.unwrap_or(DEFAULT_CAP);
+
+        if let Some(l) = list
+            && let Some(res) =
+                self.with_over(|db| db.scan_eq(EqField::List, l, since_unix_ns, None, cap))
+        {
+            return res;
+        }
+
         let mut out = Vec::new();
         self.scan(
             |_| true,
@@ -207,7 +312,7 @@ impl Reader {
                     }
                 }
                 out.push(r);
-                true
+                out.len() < cap
             },
         )?;
         Ok(out)
@@ -216,6 +321,11 @@ impl Reader {
     /// Read the tid side-table at `<data_dir>/tid/tid.parquet` into a
     /// `message_id -> tid` map. Returns empty if the side-table
     /// hasn't been built yet.
+    ///
+    /// **Memory warning:** materializes every (mid, tid) pair —
+    /// ~1.8 GB on a 17.6M-row corpus. Intended for tests and debug
+    /// tooling only. Production callers should use the `over_tid`
+    /// index via `scan_eq(EqField::Tid, ...)`.
     pub fn tid_lookup(&self) -> Result<std::collections::HashMap<String, String>> {
         let path = self.data_dir.join("tid").join("tid.parquet");
         if !path.exists() {
@@ -238,6 +348,9 @@ impl Reader {
 
     /// Read the tid side-table propagated_files / propagated_functions
     /// columns into a `message_id -> (files, functions)` map.
+    ///
+    /// **Memory warning:** same scale hazard as `tid_lookup` — easily
+    /// 3-5 GB at 17.6M-row scale. Test/debug only.
     #[allow(clippy::type_complexity)]
     pub fn propagated_lookup(
         &self,
@@ -307,6 +420,15 @@ impl Reader {
     /// Point lookup by Message-ID (across all lists).
     pub fn fetch_message(&self, message_id: &str) -> Result<Option<MessageRow>> {
         let needle = strip_angles(message_id).to_owned();
+        // over.db: indexed point lookup by message_id (sub-ms typical).
+        // Cross-posts collapse to the freshest by date_unix_ns inside
+        // OverDb::get, matching the mtime-DESC + dedup behavior the
+        // legacy Parquet scan provided. When over.db is present it
+        // is authoritative; SQL errors propagate (we don't paper over
+        // them with a 30-second Parquet rescan).
+        if let Some(res) = self.with_over(|db| db.get(&needle)) {
+            return res;
+        }
         let mut found: Option<MessageRow> = None;
         self.scan(
             |r| r.message_id == needle,
@@ -332,6 +454,47 @@ impl Reader {
         let f_path = file.map(str::to_owned);
         let f_func = function.map(str::to_owned);
         let list_filter = list.map(str::to_owned);
+
+        // over.db: when scoped to a single list (the dominant query
+        // shape from `lore_activity` / router), use the
+        // `over_list_date` index to pull just that list's rows in
+        // date-DESC order, then filter on touched_files / touched_functions
+        // (which live in the zstd-compressed ddd blob — decoded as part
+        // of MessageRow materialization, no extra round trips).
+        //
+        // We over-fetch to compensate for in-memory predicate selectivity:
+        // most rows in a list don't touch any given file. The 4096 cap
+        // matches the maximum reasonable activity window without
+        // pulling enough rows to blow query budget.
+        if let Some(l) = &list_filter
+            && let Some(res) = self.with_over(|db| {
+                let scan_limit = limit.saturating_mul(64).max(4_096);
+                db.scan_eq(EqField::List, l, since_unix_ns, None, scan_limit)
+            })
+        {
+            let rows = res?;
+            let mut out: Vec<MessageRow> = rows
+                .into_iter()
+                .filter(|r| {
+                    if let Some(ref p) = f_path
+                        && !r.touched_files.iter().any(|x| x == p)
+                    {
+                        return false;
+                    }
+                    if let Some(ref fn_) = f_func
+                        && !r.touched_functions.iter().any(|x| x == fn_)
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .take(limit)
+                .collect();
+            // scan_eq already returned date-DESC; re-sort defensively
+            // in case future filtering changes the order.
+            out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+            return Ok(out);
+        }
 
         let mut out = Vec::new();
         self.scan(
@@ -381,6 +544,33 @@ impl Reader {
         };
         let list = seed.list.clone();
         let from = seed.from_addr.clone();
+
+        // over.db fast path: use the indexed `tid` column directly.
+        // After rebuild_tid backfill, seed.tid is populated and the
+        // over_tid index makes sibling-lookup O(thread size). The
+        // previous implementation called `tid_lookup()`, which loads
+        // the entire 17.6M-entry tid.parquet into a HashMap (~1.8 GB)
+        // on every query.
+        if let Some(seed_tid) = seed.tid.clone().filter(|t| !t.is_empty())
+            && let Some(res) = self.with_over(|db| {
+                db.scan_eq(EqField::Tid, &seed_tid, None, None, 10_000)
+            })
+        {
+            let siblings = res?;
+            let mut out: Vec<MessageRow> = siblings
+                .into_iter()
+                .filter(|r| {
+                    r.list == list
+                        && r.subject_normalized.as_deref() == Some(subj.as_str())
+                        && r.from_addr == from
+                })
+                .collect();
+            out.sort_by_key(|r| (r.series_version, r.series_index.unwrap_or(0)));
+            return Ok(out);
+        }
+        // Falls through if over.db's tid column hasn't been backfilled
+        // yet (rebuild_tid hasn't run). Legacy Parquet scan still works.
+
         let mut out = Vec::new();
         self.scan(
             |r| {
@@ -418,6 +608,18 @@ impl Reader {
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
+        // over.db indexed routes: MessageId, FromAddr, List, InReplyTo,
+        // Tid. For everything else we leave the Parquet path in place
+        // (over.db's sequential scan would also work, but the plan
+        // explicitly defers it to keep this change small + bisectable).
+        if eq_field_is_over_indexed(field)
+            && let Some(res) = self.with_over(|db| {
+                db.scan_eq(field, value, since_unix_ns, list_filter, limit)
+            })
+        {
+            return res;
+        }
+
         let value_owned = value.to_owned();
         let list_owned = list_filter.map(str::to_owned);
         let mut out = Vec::new();
@@ -831,6 +1033,24 @@ impl Reader {
         let wanted: std::collections::HashMap<String, f32> =
             top.iter().map(|(m, s)| (m.clone(), *s)).collect();
 
+        // Hot path: tantivy returned ~limit doc ids in milliseconds;
+        // over.db hydrates them in milliseconds via a chunked
+        // `WHERE message_id IN (...)` lookup. The legacy path here
+        // did a full Parquet scan (~3 minutes on the 29M-row corpus)
+        // which is the bug Phase 3 exists to fix.
+        let ids: Vec<String> = top.iter().map(|(m, _)| m.clone()).collect();
+        if let Some(res) = self.with_over(|db| db.get_many(&ids)) {
+            let map = res?;
+            let mut scored: Vec<(MessageRow, f32)> = map
+                .into_iter()
+                .filter_map(|(mid, row)| wanted.get(&mid).map(|s| (row, *s)))
+                .collect();
+            scored
+                .sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            return Ok(scored);
+        }
+
         let mut rows = Vec::new();
         self.scan(
             |r| wanted.contains_key(&r.message_id),
@@ -871,37 +1091,31 @@ impl Reader {
             None => list_trigram_lists(&self.data_dir)?,
         };
 
-        // Gather candidates across all (list, segment) trigram indices.
         let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for lst in &lists {
+        'outer: for lst in &lists {
             for seg_dir in crate::trigram::list_segments(&self.data_dir, lst)? {
                 let seg = crate::trigram::SegmentReader::open(&seg_dir)?;
                 for mid in seg.candidates_for_substring(needle.as_bytes()) {
                     candidates.insert(mid.to_owned());
+                    if candidates.len() >= MAX_PATCH_CANDIDATES {
+                        break 'outer;
+                    }
                 }
             }
         }
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
+        if candidates.len() >= MAX_PATCH_CANDIDATES {
+            return Err(Error::QueryParse(format!(
+                "patch_search: needle {needle:?} matches too many candidates \
+                 (>{MAX_PATCH_CANDIDATES}); narrow with list: or a longer substring"
+            )));
+        }
 
-        let mut hits = Vec::new();
         let list_filter = list.map(str::to_owned);
         let needle_bytes = needle.as_bytes().to_owned();
-        self.scan(
-            |r| {
-                if let Some(ref lst) = list_filter {
-                    if &r.list != lst {
-                        return false;
-                    }
-                }
-                candidates.contains(&r.message_id)
-            },
-            |r| {
-                hits.push(r);
-                true
-            },
-        )?;
+        let hits = self.hydrate_candidates(&candidates, list_filter.as_deref())?;
 
         // Confirm: decompress + byte-scan. Dropping ambiguous hits.
         let mut confirmed = Vec::new();
@@ -916,6 +1130,52 @@ impl Reader {
         confirmed.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
         confirmed.truncate(limit);
         Ok(confirmed)
+    }
+
+    /// Hydrate a set of trigram-candidate message_ids into full
+    /// `MessageRow`s, preferring over.db's indexed IN-lookup when
+    /// available and falling back to the single-pass Parquet scan
+    /// otherwise. Applies `list_filter` at the over.db layer via a
+    /// post-hydration filter (cheap: we already have the row in memory)
+    /// or at the scan predicate for the Parquet path.
+    fn hydrate_candidates(
+        &self,
+        candidates: &std::collections::HashSet<String>,
+        list_filter: Option<&str>,
+    ) -> Result<Vec<MessageRow>> {
+        if let Some(res) = self.with_over(|db| {
+            let ids: Vec<String> = candidates.iter().cloned().collect();
+            db.get_many(&ids)
+        }) {
+            let map = res?;
+            let want_list = list_filter.map(str::to_owned);
+            let out: Vec<MessageRow> = map
+                .into_values()
+                .filter(|r| match &want_list {
+                    Some(l) => &r.list == l,
+                    None => true,
+                })
+                .collect();
+            return Ok(out);
+        }
+
+        let list_owned = list_filter.map(str::to_owned);
+        let mut hits = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref lst) = list_owned
+                    && &r.list != lst
+                {
+                    return false;
+                }
+                candidates.contains(&r.message_id)
+            },
+            |r| {
+                hits.push(r);
+                true
+            },
+        )?;
+        Ok(hits)
     }
 
     /// Like `patch_search` but with optional edit-distance tolerance.
@@ -938,35 +1198,30 @@ impl Reader {
         };
 
         let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for lst in &lists {
+        'outer: for lst in &lists {
             for seg_dir in crate::trigram::list_segments(&self.data_dir, lst)? {
                 let seg = crate::trigram::SegmentReader::open(&seg_dir)?;
                 for mid in seg.candidates_for_substring_fuzzy(needle.as_bytes(), fuzzy_edits) {
                     candidates.insert(mid.to_owned());
+                    if candidates.len() >= MAX_PATCH_CANDIDATES {
+                        break 'outer;
+                    }
                 }
             }
         }
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
+        if candidates.len() >= MAX_PATCH_CANDIDATES {
+            return Err(Error::QueryParse(format!(
+                "patch_search_fuzzy: needle {needle:?} matches too many candidates \
+                 (>{MAX_PATCH_CANDIDATES}); narrow with list: or a longer substring"
+            )));
+        }
 
-        let mut hits = Vec::new();
         let list_filter = list.map(str::to_owned);
         let needle_bytes = needle.as_bytes().to_owned();
-        self.scan(
-            |r| {
-                if let Some(ref lst) = list_filter {
-                    if &r.list != lst {
-                        return false;
-                    }
-                }
-                candidates.contains(&r.message_id)
-            },
-            |r| {
-                hits.push(r);
-                true
-            },
-        )?;
+        let hits = self.hydrate_candidates(&candidates, list_filter.as_deref())?;
 
         let mut confirmed = Vec::new();
         for row in hits {
@@ -1022,6 +1277,23 @@ impl Reader {
         let needle = strip_angles(token).to_owned();
         let sha_like = is_sha_prefix(&needle);
         let cve_like = is_cve_id(&needle);
+
+        // Fast path: a token that looks like a Message-ID (not SHA, not
+        // CVE) is a point lookup against over.db's indexed message_id
+        // column. The legacy scan-all path below was minute-scale on a
+        // 17M-row corpus; over.db is microseconds.
+        //
+        // We only bypass the scan when `sha_like` and `cve_like` are
+        // both false — for SHA queries we still need to walk `fixes[]`
+        // (a ddd-blob field) and for CVE queries we need a substring
+        // match on `subject_raw`. Neither has an over.db fast path yet
+        // (filed as F2 in the over.db follow-ups doc).
+        if !sha_like && !cve_like && self.over_db().is_some()
+            && let Some(res) = self.with_over(|db| db.get(&needle))
+            && let Some(row) = res?
+        {
+            return Ok(vec![row]);
+        }
 
         let mut out: Vec<MessageRow> = Vec::new();
         self.scan(
@@ -1161,6 +1433,21 @@ pub struct DiffResult {
     pub row_b: MessageRow,
     pub text_a: String,
     pub text_b: String,
+}
+
+/// True when `OverDb::scan_eq` has a dedicated index for the field.
+/// Mirrors the match arms inside `OverDb::scan_eq`. Kept here so the
+/// Reader can short-circuit through over.db without the dispatch
+/// touching the slower sequential scan path inside the OverDb module.
+fn eq_field_is_over_indexed(field: EqField) -> bool {
+    matches!(
+        field,
+        EqField::MessageId
+            | EqField::FromAddr
+            | EqField::List
+            | EqField::InReplyTo
+            | EqField::Tid
+    )
 }
 
 fn eq_field_matches(field: EqField, r: &MessageRow, value: &str) -> bool {
@@ -1940,5 +2227,119 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
 
         let none = r.patch_search("never_appears_anywhere", None, 10).unwrap();
         assert!(none.is_empty());
+    }
+
+    /// End-to-end test that the over.db tier wires through `Reader`.
+    ///
+    /// We hand-build an `over.db` with two synthetic rows in the
+    /// tempdir BEFORE constructing the Reader. There is no Parquet
+    /// metadata at all — so anything the Reader returns must have
+    /// come from the over.db indexed path. That makes this both a
+    /// unit test for the wiring and a regression guard against
+    /// silent fallback to the legacy Parquet scan.
+    #[test]
+    fn reader_uses_over_db_when_present() {
+        use crate::over::{DddPayload, OverDb, OverRow};
+
+        let dir = tempdir().unwrap();
+        let over_path = dir.path().join("over.db");
+
+        let mut db = OverDb::open(&over_path).unwrap();
+        let row_a = OverRow {
+            message_id: "over-test-a@x".to_owned(),
+            list: "linux-cifs".to_owned(),
+            from_addr: Some("Reviewer@Example.COM".to_owned()),
+            date_unix_ns: Some(1_700_000_000_000_000_000),
+            in_reply_to: None,
+            tid: None,
+            body_segment_id: 0,
+            body_offset: 0,
+            body_length: 42,
+            body_sha256: "abc".to_owned(),
+            has_patch: true,
+            is_cover_letter: false,
+            series_version: Some(1),
+            series_index: Some(1),
+            series_total: Some(2),
+            files_changed: Some(3),
+            insertions: Some(10),
+            deletions: Some(2),
+            commit_oid: Some("oidA".to_owned()),
+            ddd: DddPayload {
+                subject_raw: Some("[PATCH 1/2] over-db wiring".to_owned()),
+                subject_normalized: Some("over-db wiring".to_owned()),
+                subject_tags: vec!["PATCH".to_owned()],
+                from_name: Some("Reviewer".to_owned()),
+                from_addr_original_case: Some("Reviewer@Example.COM".to_owned()),
+                shard: Some("0".to_owned()),
+                ..Default::default()
+            },
+        };
+        let row_b = OverRow {
+            message_id: "over-test-b@x".to_owned(),
+            list: "linux-cifs".to_owned(),
+            from_addr: Some("other@example.com".to_owned()),
+            date_unix_ns: Some(1_700_000_000_500_000_000),
+            in_reply_to: Some("over-test-a@x".to_owned()),
+            tid: None,
+            body_segment_id: 0,
+            body_offset: 100,
+            body_length: 13,
+            body_sha256: "def".to_owned(),
+            has_patch: false,
+            is_cover_letter: false,
+            series_version: None,
+            series_index: None,
+            series_total: None,
+            files_changed: None,
+            insertions: None,
+            deletions: None,
+            commit_oid: None,
+            ddd: DddPayload {
+                subject_raw: Some("Re: [PATCH 1/2] over-db wiring".to_owned()),
+                subject_normalized: Some("over-db wiring".to_owned()),
+                from_addr_original_case: Some("other@example.com".to_owned()),
+                shard: Some("0".to_owned()),
+                ..Default::default()
+            },
+        };
+        db.insert_batch(&[row_a, row_b]).unwrap();
+        drop(db);
+
+        // No metadata/ dir exists. If the Reader falls back to Parquet
+        // (the bug Phase 3 exists to fix), every call below returns
+        // empty. The over.db path must produce real rows.
+        let reader = Reader::new(dir.path());
+
+        let got = reader
+            .fetch_message("over-test-a@x")
+            .unwrap()
+            .expect("fetch_message must hit over.db");
+        assert_eq!(got.message_id, "over-test-a@x");
+        assert_eq!(got.list, "linux-cifs");
+        // Original-case from the ddd blob, not the lowercased index col.
+        assert_eq!(got.from_addr.as_deref(), Some("Reviewer@Example.COM"));
+        assert_eq!(got.subject_raw.as_deref(), Some("[PATCH 1/2] over-db wiring"));
+
+        // Indexed eq scan: case-folded mid-case query should still hit.
+        let by_from = reader
+            .eq(EqField::FromAddr, "reviewer@example.com", None, None, 10)
+            .unwrap();
+        assert_eq!(by_from.len(), 1);
+        assert_eq!(by_from[0].message_id, "over-test-a@x");
+
+        // Indexed list scan, ordered date-DESC.
+        let by_list = reader
+            .eq(EqField::List, "linux-cifs", None, None, 10)
+            .unwrap();
+        assert_eq!(by_list.len(), 2);
+        assert_eq!(by_list[0].message_id, "over-test-b@x");
+        assert_eq!(by_list[1].message_id, "over-test-a@x");
+
+        // all_rows(list:_) routes through over.db's list-date index.
+        let all = reader
+            .all_rows(Some("linux-cifs"), None, Some(100))
+            .unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

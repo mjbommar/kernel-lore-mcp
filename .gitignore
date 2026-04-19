@@ -55,3 +55,6 @@ manifest.js.gz
 .env.local
 *.pem
 *.key
+
+# Local scratch / validation harnesses (not part of the shipping surface).
+scratch/

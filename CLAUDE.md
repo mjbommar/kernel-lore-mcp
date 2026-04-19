@@ -124,7 +124,7 @@ kernel-lore-mcp/
 ├── docs/
 │   ├── architecture/         # design rationale
 │   ├── ingestion/            # how data comes in
-│   ├── indexing/             # the three tiers, tokenizer spec
+│   ├── indexing/             # the four tiers, tokenizer spec
 │   ├── mcp/                  # tool schemas, routing, transport, clients
 │   ├── ops/                  # EC2, cost, freshness, deploy, security
 │   └── research/             # dated investigations
@@ -135,32 +135,42 @@ kernel-lore-mcp/
 **Keep this organized.** Every doc has a single home. If you can't
 decide where something goes, update the taxonomy — don't scatter.
 
-## Three-tier index architecture
+## Four-tier index architecture
 
 Corpus is heterogeneous. One index is wrong. See
-`docs/architecture/three-tier-index.md`.
+`docs/architecture/four-tier-index.md` and
+`docs/architecture/over-db.md`.
 
-1. **Metadata tier** — Arrow/Parquet. Structured fields: message_id,
-   list, from, subject (raw + normalized + tags), date, in_reply_to,
-   references[], tid (thread id, precomputed at ingest),
-   touched_files[], touched_functions[], series_version,
-   series_index, is_cover_letter, has_patch, patch_stats, trailers
-   (signed_off_by[], reviewed_by[], acked_by[], tested_by[],
-   co_developed_by[], reported_by[], fixes[], link[], closes[]),
-   cross_posted_to[], body_offset, body_length, body_sha256,
-   schema_version. ~3 GB for all of lore.
-2. **Trigram tier** — custom; `fst` + `roaring`. Indexes patch/diff
+1. **Metadata tier (analytical)** — Arrow/Parquet. Structured
+   fields: message_id, list, from, subject (raw + normalized +
+   tags), date, in_reply_to, references[], tid (thread id,
+   precomputed at ingest), touched_files[], touched_functions[],
+   series_version, series_index, is_cover_letter, has_patch,
+   patch_stats, trailers (signed_off_by[], reviewed_by[],
+   acked_by[], tested_by[], co_developed_by[], reported_by[],
+   fixes[], link[], closes[]), cross_posted_to[], body_offset,
+   body_length, body_sha256, schema_version. ~5 GB for all of lore.
+   Source of truth for metadata; analytical scans only.
+2. **Metadata point-lookup tier** — SQLite, public-inbox `over.db`
+   pattern. One row per (message_id, list) with indexed columns
+   for predicate fields (message_id, from_addr, list+date, tid,
+   in_reply_to) and a zstd-msgpack `ddd` blob for the rest.
+   ~19 GB for 17.6M messages. Sub-millisecond point lookups via
+   composite indices. See `src/over.rs`.
+3. **Trigram tier** — custom; `fst` + `roaring`. Indexes patch/diff
    content. Regex + substring over code. Confirm-with-real-regex
    by decompressing the patch body from the compressed store
    (candidates capped; see `src/trigram.rs`). ~20 GB.
-3. **BM25 tier** — tantivy with our `kernel_prose` analyzer.
+4. **BM25 tier** — tantivy with our `kernel_prose` analyzer.
    Indexes prose body (message minus patch) + subject. Positions
    OFF (`IndexRecordOption::WithFreqs`). Phrase queries on prose
    are REJECTED, not silently degraded. ~10 GB.
 
 Rebuildability contract: the compressed raw store is the source
-of truth. All three tiers can be rebuilt from it without
-refetching lore. `reindex` binary does this.
+of truth. Metadata Parquet, trigram, and BM25 all rebuild from
+the store via the `reindex` binary. over.db rebuilds from metadata
+Parquet via `kernel-lore-build-over` in ~30 minutes for 17.6M
+rows — no re-walk of the store needed.
 
 ## Tokenizer proscriptions
 

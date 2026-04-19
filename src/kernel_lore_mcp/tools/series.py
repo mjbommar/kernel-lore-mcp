@@ -12,6 +12,8 @@ from kernel_lore_mcp.mapping import row_to_timeline_entry
 from kernel_lore_mcp.models import SeriesTimelineResponse
 from kernel_lore_mcp.timeout import run_with_timeout
 
+_MAX_TIMELINE_ROWS = 200
+
 
 async def lore_series_timeline(
     message_id: Annotated[str, Field(min_length=1, max_length=512)],
@@ -27,5 +29,5 @@ async def lore_series_timeline(
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.series_timeline, message_id)
-    entries = [row_to_timeline_entry(r) for r in rows]
+    entries = [row_to_timeline_entry(r) for r in rows[:_MAX_TIMELINE_ROWS]]
     return SeriesTimelineResponse(entries=entries, freshness=build_freshness(reader))

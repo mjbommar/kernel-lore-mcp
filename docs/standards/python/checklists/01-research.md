@@ -53,10 +53,10 @@ the area you are changing.
       For Rust crates, read the docs of the pinned version (see
       CLAUDE.md "Stack"). Do not assume an API — confirm it.
 
-- [ ] **Identify the tier.** Metadata, trigram, or BM25? A query
-      that touches multiple tiers must go through the router, not
-      stitch tiers together inside a tool.
-      > Ref: [../../../architecture/three-tier-index.md](../../../architecture/three-tier-index.md)
+- [ ] **Identify the tier.** Metadata Parquet, metadata over.db,
+      trigram, or BM25? A query that touches multiple tiers must go
+      through the router, not stitch tiers together inside a tool.
+      > Ref: [../../../architecture/four-tier-index.md](../../../architecture/four-tier-index.md)
 
 - [ ] **Determine whether Rust is needed.** CPU-bound? Called
       >1000x or on large inputs? Profiled? If yes to all, plan

@@ -10,7 +10,7 @@ Document decisions and interfaces, not obvious code. `cargo doc` is the public s
 
 - [ ] `///` doc comment on every `pub` item.
 - [ ] Code examples in `///` blocks compile via `cargo test --doc`.
-- [ ] Module-level `//!` describes the module's role in the three-tier architecture.
+- [ ] Module-level `//!` describes the module's role in the four-tier architecture.
 - [ ] `cargo doc --no-deps` emits zero warnings.
 - [ ] No auto-generated `.md` files. `CLAUDE.md` + `docs/standards/rust/` are the only doc surfaces.
 
@@ -29,7 +29,7 @@ Document decisions and interfaces, not obvious code. `cargo doc` is the public s
   //! narrows candidates via trigram intersection, then confirms by
   //! decompressing the candidate body from the compressed store.
   //!
-  //! See `docs/architecture/three-tier-index.md` for the tier contract.
+  //! See `docs/architecture/four-tier-index.md` for the tier contract.
   ```
 
 - [ ] **Link to related modules** with `[`module_name`]` rustdoc links. Cross-link adjacent tiers.
@@ -40,7 +40,7 @@ Document decisions and interfaces, not obvious code. `cargo doc` is the public s
 
 - [ ] **Every public function documents its parameters** when not self-evident:
   ```rust
-  /// Dispatch a parsed query across the three tiers and merge results.
+  /// Dispatch a parsed query across the four tiers and merge results.
   ///
   /// # Parameters
   /// - `query`: already-parsed `Query` (see [`Query::parse`]).
@@ -138,7 +138,7 @@ Document decisions and interfaces, not obvious code. `cargo doc` is the public s
 
 - [ ] **If you introduced a new pattern / rule / proscription**, update `CLAUDE.md` (project-wide) or `docs/standards/rust/` (Rust-specific). Commit separately from the code change.
 
-- [ ] **If the tier contract or tokenizer spec changed**, update `docs/architecture/three-tier-index.md` / `docs/indexing/tokenizer-spec.md`.
+- [ ] **If the tier contract or tokenizer spec changed**, update `docs/architecture/four-tier-index.md` / `docs/architecture/over-db.md` / `docs/indexing/tokenizer-spec.md`.
 
 - [ ] **If `.pyi` changed**, update `docs/standards/rust/ffi.md` if the boundary rule changed.
 

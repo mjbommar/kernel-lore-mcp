@@ -249,17 +249,21 @@ fn decompose_subject(raw: &str) -> (String, Vec<String>, u32, Option<u32>, Optio
 fn split_prose_and_patch(body: &str, out: &mut ParsedMessage) {
     // Find first `^diff --git ` line. Everything before (minus quoted
     // reply prefixes and signature) is prose; the rest is patch.
-    let patch_start = body
-        .lines()
-        .scan(0usize, |pos, line| {
-            let start = *pos;
-            *pos += line.len() + 1; // +1 for '\n'
-            Some((start, line))
-        })
-        .find(|(_, line)| line.starts_with("diff --git "));
+    //
+    // Use byte-offset search instead of lines()+accumulator because
+    // str::lines() strips \r from \r\n endings but line.len() doesn't
+    // include it, causing accumulated drift on \r\n bodies that panics
+    // when the offset lands inside a multi-byte UTF-8 codepoint.
+    let needle = "diff --git ";
+    let patch_byte_start = if body.starts_with(needle) {
+        Some(0)
+    } else {
+        body.find(&format!("\n{needle}"))
+            .map(|pos| pos + 1) // skip the \n, point at 'd'
+    };
 
-    let (prose_end, patch_text) = match patch_start {
-        Some((start, _)) => (start, Some(&body[start..])),
+    let (prose_end, patch_text) = match patch_byte_start {
+        Some(start) => (start, Some(&body[start..])),
         None => (body.len(), None),
     };
 

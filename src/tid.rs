@@ -29,21 +29,94 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 
 use crate::error::{Error, Result};
-use crate::reader::{MessageRow, Reader};
+use crate::reader::Reader;
 
 const SIDETABLE_FILENAME: &str = "tid.parquet";
 const FALLBACK_WINDOW_NS: i64 = 30 * 24 * 3600 * 1_000_000_000; // 30 days
+const PARQUET_BATCH_ROWS: usize = 100_000;
 
 /// `(list, normalized_subject, from_addr) -> sorted Vec<(date_ns, mid)>`.
 /// Hand-named so clippy stops complaining about the very-complex-type.
 type SubjectBucket = BTreeMap<(String, String, String), Vec<(i64, String)>>;
 
+/// Minimal projection of `MessageRow` carrying only the fields tid
+/// computation needs. Avoids holding ~2-3 KB per row (trailers,
+/// references, touched_files, etc.) across a 17.6M-row corpus —
+/// which previously OOMed at ~44 GB RSS.
+#[derive(Clone, Default)]
+struct LiteRow {
+    message_id: String,
+    list: String,
+    in_reply_to: Option<String>,
+    references_first: Option<String>,
+    subject_normalized: Option<String>,
+    from_addr: Option<String>,
+    date_unix_ns: Option<i64>,
+    is_cover_letter: bool,
+    /// Filled in by `assign_tids`. Empty before.
+    tid: String,
+}
+
 /// Rebuild the tid side-table for `<data_dir>`. Returns the path
 /// written + how many rows landed.
 pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
     let reader = Reader::new(data_dir);
-    let rows = collect_all_rows(&reader)?;
-    let computed = compute(&rows);
+
+    // Pass 1: stream lightweight rows. Drops trailers, touched_files,
+    // etc. — ~10x smaller per row than MessageRow.
+    let mut lite_rows: Vec<LiteRow> = Vec::new();
+    reader.scan_streaming(None, |r| {
+        lite_rows.push(LiteRow {
+            message_id: r.message_id,
+            list: r.list,
+            in_reply_to: r.in_reply_to,
+            references_first: r.references.into_iter().next().filter(|s| !s.is_empty()),
+            subject_normalized: r.subject_normalized,
+            from_addr: r.from_addr,
+            date_unix_ns: r.date_unix_ns,
+            is_cover_letter: r.is_cover_letter,
+            tid: String::new(),
+        });
+        true
+    })?;
+
+    assign_tids(&mut lite_rows);
+
+    // Pass 2: accumulate touched_files / touched_functions per
+    // cover-letter tid. Other tids get nothing stored so the map
+    // stays small even with a multi-million-row corpus.
+    let cover_tids: HashSet<String> = lite_rows
+        .iter()
+        .filter(|r| r.is_cover_letter)
+        .map(|r| r.tid.clone())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let tid_of_mid: HashMap<&str, &str> = lite_rows
+        .iter()
+        .map(|r| (r.message_id.as_str(), r.tid.as_str()))
+        .collect();
+
+    let mut propagated_files: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut propagated_funcs: HashMap<String, HashSet<String>> = HashMap::new();
+
+    if !cover_tids.is_empty() {
+        reader.scan_streaming(None, |row| {
+            if let Some(&tid) = tid_of_mid.get(row.message_id.as_str()) {
+                if cover_tids.contains(tid) {
+                    let files = propagated_files.entry(tid.to_owned()).or_default();
+                    for f in row.touched_files {
+                        files.insert(f);
+                    }
+                    let funcs = propagated_funcs.entry(tid.to_owned()).or_default();
+                    for f in row.touched_functions {
+                        funcs.insert(f);
+                    }
+                }
+            }
+            true
+        })?;
+    }
 
     let out_dir = data_dir.join("tid");
     fs::create_dir_all(&out_dir)?;
@@ -51,53 +124,77 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
     let tmp_path = out_dir.join(format!(".{SIDETABLE_FILENAME}.tmp"));
 
     let schema = sidetable_schema();
-    let batch = build_batch(&schema, &computed)?;
-
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(
             ZstdLevel::try_new(3).map_err(|e| Error::State(format!("zstd: {e}")))?,
         ))
         .build();
-    // Write to a tempfile, then atomic rename. A crash mid-write
-    // leaves the previous tid.parquet intact.
     let file = File::create(&tmp_path)?;
-    let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
-    writer.write(&batch)?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
+
+    let total = lite_rows.len();
+    let mut chunk: Vec<TidRow> = Vec::with_capacity(PARQUET_BATCH_ROWS);
+    for lite in &lite_rows {
+        let (files, funcs) = if lite.is_cover_letter {
+            let f = propagated_files
+                .get(&lite.tid)
+                .cloned()
+                .unwrap_or_default();
+            let fn_ = propagated_funcs
+                .get(&lite.tid)
+                .cloned()
+                .unwrap_or_default();
+            (sorted_vec(f), sorted_vec(fn_))
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        chunk.push(TidRow {
+            message_id: lite.message_id.clone(),
+            tid: lite.tid.clone(),
+            propagated_files: files,
+            propagated_functions: funcs,
+        });
+        if chunk.len() >= PARQUET_BATCH_ROWS {
+            writer.write(&build_batch(&schema, &chunk)?)?;
+            chunk.clear();
+        }
+    }
+    if !chunk.is_empty() {
+        writer.write(&build_batch(&schema, &chunk)?)?;
+    }
     writer.close()?;
     fs::rename(&tmp_path, &final_path)?;
-    Ok((final_path, computed.len()))
-}
 
-/// One side-table row.
-#[derive(Debug, Clone)]
-pub struct TidRow {
-    pub message_id: String,
-    pub tid: String,
-    pub propagated_files: Vec<String>,
-    pub propagated_functions: Vec<String>,
-}
-
-fn collect_all_rows(reader: &Reader) -> Result<Vec<MessageRow>> {
-    let mut all = Vec::new();
-    reader.scan_all(&mut all)?;
-    Ok(all)
-}
-
-/// Pure compute: given the full row set, return the side-table.
-pub fn compute(rows: &[MessageRow]) -> Vec<TidRow> {
-    if rows.is_empty() {
-        return Vec::new();
+    // Backfill over.db.tid. Chunked update_tids already checkpoints
+    // WAL per batch; we build the slice once from lite_rows.
+    let over_path = data_dir.join("over.db");
+    if over_path.exists() {
+        let mut over = crate::over::OverDb::open(&over_path)?;
+        let mid_tid: Vec<(String, String)> = lite_rows
+            .iter()
+            .map(|r| (r.message_id.clone(), r.tid.clone()))
+            .collect();
+        let updated = over.update_tids(&mid_tid)?;
+        tracing::info!(updated, total = total, "over.db tid column backfilled");
     }
 
-    // Index by message_id for parent lookups.
-    let by_mid: HashMap<&str, &MessageRow> =
-        rows.iter().map(|r| (r.message_id.as_str(), r)).collect();
+    Ok((final_path, total))
+}
 
-    // Subject-fallback bucket: (list, normalized_subject, from_addr) →
-    // sorted Vec<(date_ns, mid)>. Cheap pre-pass enables the 30-day
-    // window heuristic when the reply graph is broken.
+/// Resolve a tid for every LiteRow in place.
+fn assign_tids(rows: &mut [LiteRow]) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let by_mid: HashMap<&str, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.message_id.as_str(), i))
+        .collect();
+
     let mut subj_bucket: SubjectBucket = BTreeMap::new();
-    for r in rows {
+    for r in rows.iter() {
         if let Some(subj) = &r.subject_normalized {
             let from = r.from_addr.clone().unwrap_or_default();
             let date = r.date_unix_ns.unwrap_or(0);
@@ -111,109 +208,49 @@ pub fn compute(rows: &[MessageRow]) -> Vec<TidRow> {
         v.sort_by_key(|(d, _)| *d);
     }
 
-    // Resolve tid per message_id by walking the parent chain.
-    let mut tid_of: HashMap<String, String> = HashMap::new();
-    for row in rows {
-        let tid = resolve_tid(row, &by_mid, &subj_bucket);
-        tid_of.insert(row.message_id.clone(), tid);
+    let resolved: Vec<String> = (0..rows.len())
+        .map(|i| resolve_tid_lite(&rows[i], rows, &by_mid, &subj_bucket))
+        .collect();
+    for (r, tid) in rows.iter_mut().zip(resolved.into_iter()) {
+        r.tid = tid;
     }
-
-    // Propagate touched_files / touched_functions per tid (cover
-    // letters inherit from patches; non-covers keep their own).
-    let mut by_tid: HashMap<&str, Vec<&MessageRow>> = HashMap::new();
-    for r in rows {
-        if let Some(tid) = tid_of.get(&r.message_id) {
-            by_tid.entry(tid.as_str()).or_default().push(r);
-        }
-    }
-    let mut propagated_files_per_tid: HashMap<&str, HashSet<String>> = HashMap::new();
-    let mut propagated_funcs_per_tid: HashMap<&str, HashSet<String>> = HashMap::new();
-    for (tid, members) in &by_tid {
-        let mut files: HashSet<String> = HashSet::new();
-        let mut funcs: HashSet<String> = HashSet::new();
-        for m in members {
-            for f in &m.touched_files {
-                files.insert(f.clone());
-            }
-            for f in &m.touched_functions {
-                funcs.insert(f.clone());
-            }
-        }
-        propagated_files_per_tid.insert(tid, files);
-        propagated_funcs_per_tid.insert(tid, funcs);
-    }
-
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let tid = tid_of.get(&row.message_id).cloned().unwrap_or_default();
-        // Only cover letters get propagation; everyone else keeps
-        // their own touched_files. (We still write the columns so a
-        // reader join doesn't have to special-case absence.)
-        let (files, funcs) = if row.is_cover_letter {
-            let f = propagated_files_per_tid
-                .get(tid.as_str())
-                .cloned()
-                .unwrap_or_default();
-            let fn_ = propagated_funcs_per_tid
-                .get(tid.as_str())
-                .cloned()
-                .unwrap_or_default();
-            (sorted_vec(f), sorted_vec(fn_))
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        out.push(TidRow {
-            message_id: row.message_id.clone(),
-            tid,
-            propagated_files: files,
-            propagated_functions: funcs,
-        });
-    }
-    out
 }
 
-fn resolve_tid(
-    row: &MessageRow,
-    by_mid: &HashMap<&str, &MessageRow>,
+fn resolve_tid_lite(
+    row: &LiteRow,
+    rows: &[LiteRow],
+    by_mid: &HashMap<&str, usize>,
     subj_bucket: &SubjectBucket,
 ) -> String {
-    // 1. Walk the parent chain via in_reply_to first; fall back to
-    //    references[0] (typically the thread root in
-    //    well-formed messages).
     let mut current = row.message_id.clone();
     let mut visited = HashSet::new();
     visited.insert(current.clone());
-    while let Some(cur_row) = by_mid.get(current.as_str()).copied() {
-        let parent_mid = cur_row.in_reply_to.clone().or_else(|| {
-            cur_row
-                .references
-                .first()
-                .cloned()
-                .filter(|p| !p.is_empty())
-        });
+    while let Some(&idx) = by_mid.get(current.as_str()) {
+        let cur = &rows[idx];
+        let parent_mid = cur
+            .in_reply_to
+            .clone()
+            .or_else(|| cur.references_first.clone());
         let Some(parent) = parent_mid else {
             break;
         };
         if !by_mid.contains_key(parent.as_str()) {
-            break; // dangling parent
+            break;
         }
         if !visited.insert(parent.clone()) {
-            break; // cycle (shouldn't happen, but be defensive)
+            break;
         }
         current = parent;
     }
 
-    // If we got past the seed, current is a valid root in our corpus.
     if current != row.message_id {
         return current;
     }
 
-    // 2. Subject-normalized + from + 30-day window fallback.
     if let (Some(subj), date) = (&row.subject_normalized, row.date_unix_ns) {
         let from = row.from_addr.clone().unwrap_or_default();
         let key = (row.list.clone(), subj.clone(), from);
         if let Some(bucket) = subj_bucket.get(&key) {
-            // Pick the earliest mid in the same window.
             let lo = date.unwrap_or(i64::MIN).saturating_sub(FALLBACK_WINDOW_NS);
             for (d, mid) in bucket {
                 if *d >= lo && *d <= date.unwrap_or(i64::MAX) {
@@ -223,8 +260,16 @@ fn resolve_tid(
         }
     }
 
-    // 3. Singleton: tid = self.
     row.message_id.clone()
+}
+
+/// One side-table row.
+#[derive(Debug, Clone)]
+pub struct TidRow {
+    pub message_id: String,
+    pub tid: String,
+    pub propagated_files: Vec<String>,
+    pub propagated_functions: Vec<String>,
 }
 
 fn sidetable_schema() -> Arc<Schema> {

@@ -242,17 +242,33 @@ pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<V
                     limit,
                 )?,
             );
-        } else if parsed.list.is_some()
-            || parsed.from_addr.is_some()
-            || parsed.since_unix_ns.is_some()
-        {
-            // Pure metadata predicates (list:, f:, since:) without a
-            // structural key. Do a filtered scan so the caller gets
-            // results instead of an empty set. The post-filter below
-            // applies the same predicates again for belt-and-suspenders.
+        } else if let Some(from) = &parsed.from_addr {
+            // f:<addr> — route through eq() which has early termination
+            // on `limit` matches. all_rows() would materialize every row
+            // in the corpus before post-filtering (29M rows = OOM on
+            // realistic corpora).
             tier_results.insert(
                 "metadata",
-                reader.all_rows(parsed.list.as_deref(), parsed.since_unix_ns)?,
+                reader.eq(
+                    crate::reader::EqField::FromAddr,
+                    from,
+                    parsed.since_unix_ns,
+                    parsed.list.as_deref(),
+                    limit,
+                )?,
+            );
+        } else if parsed.list.is_some() || parsed.since_unix_ns.is_some() {
+            // Pure list:/since: predicate. Cap is tight (RRF merge
+            // below only uses the first `limit * 2` anyway); loading
+            // a million rows per query piles up memory under load.
+            let cap = limit.saturating_mul(20).max(10_000);
+            tier_results.insert(
+                "metadata",
+                reader.all_rows(
+                    parsed.list.as_deref(),
+                    parsed.since_unix_ns,
+                    Some(cap),
+                )?,
             );
         }
     }

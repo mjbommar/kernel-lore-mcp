@@ -24,9 +24,12 @@ Inaugural public release. Anonymous read-only MCP server over
   `Co-developed-by:`, `Reported-by:`, `Link:`, `Closes:`).
 - Zstd-compressed raw store (per-list, segment-based) as source
   of truth.
-- Three-tier index rebuilds from the store alone:
-  metadata (Arrow/Parquet), trigram (`fst` + `roaring`), BM25
-  (`tantivy` 0.26, stemmer deliberately disabled).
+- Four-tier index: metadata Parquet (Arrow/Parquet) and the
+  derived SQLite `over.db` point-lookup tier (public-inbox
+  pattern; rebuilds from Parquet via `kernel-lore-build-over` in
+  ~30 minutes for 17.6M rows), trigram (`fst` + `roaring`), BM25
+  (`tantivy` 0.26, stemmer deliberately disabled). Parquet,
+  trigram, and BM25 all rebuild from the compressed store alone.
 - Optional embedding tier (HNSW via `instant-distance`) built
   off a fastembed model via `kernel-lore-embed`.
 - Single-writer `flock` on `state/writer.lock`; atomic

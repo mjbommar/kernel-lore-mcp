@@ -102,44 +102,62 @@ def main(argv: list[str] | None = None) -> int:
     log.info("embed.model_loaded", model=args.model, dim=embedder.dim)
 
     reader = _core.Reader(data_dir)
-    rows = _scan_all(reader)
-    if args.limit:
-        rows = rows[: args.limit]
-    log.info("embed.rows_collected", rows=len(rows))
+    builder = _core.EmbeddingBuilder(data_dir, args.model, embedder.dim)
 
-    mids: list[str] = []
-    texts: list[str] = []
-    for row in rows:
-        text = _row_to_text(row, reader, args.prose_max_chars)
-        if not text:
-            continue
-        mids.append(row["message_id"])
-        texts.append(text)
+    pending_texts: list[str] = []
+    pending_mids: list[str] = []
+    rows_seen = 0
+    embedded = 0
+    last_log = started
+    limit = args.limit
 
-    log.info("embed.texts_prepared", embed_count=len(texts), skipped=len(rows) - len(texts))
+    def _flush_pending() -> None:
+        nonlocal embedded
+        if not pending_texts:
+            return
+        batch_vecs = embedder.embed(pending_texts)
+        normalized = [l2_normalize(v) for v in batch_vecs]
+        builder.add_batch(pending_mids, normalized)
+        embedded += len(pending_mids)
+        pending_texts.clear()
+        pending_mids.clear()
 
-    vectors: list[list[float]] = []
-    for i in range(0, len(texts), args.batch):
-        chunk = texts[i : i + args.batch]
-        batch_vecs = embedder.embed(chunk)
-        for v in batch_vecs:
-            vectors.append(l2_normalize(v))
-        if (i // args.batch) % 50 == 0:
-            elapsed = time.monotonic() - started
+    def _on_batch(batch_rows: list[dict]) -> bool:
+        nonlocal rows_seen, last_log
+        for row in batch_rows:
+            if limit is not None and rows_seen >= limit:
+                _flush_pending()
+                return False
+            rows_seen += 1
+            text = _row_to_text(row, reader, args.prose_max_chars)
+            if not text:
+                continue
+            pending_mids.append(row["message_id"])
+            pending_texts.append(text)
+            if len(pending_texts) >= args.batch:
+                _flush_pending()
+        now = time.monotonic()
+        if now - last_log >= 10.0:
+            last_log = now
             log.info(
                 "embed.progress",
-                done=i + len(chunk),
-                total=len(texts),
-                elapsed_secs=round(elapsed, 1),
+                rows_seen=rows_seen,
+                embedded=embedded,
+                elapsed_secs=round(now - started, 1),
             )
+        return True
 
-    meta = _core.build_embedding_index(
-        data_dir=data_dir,
-        model=args.model,
-        dim=embedder.dim,
-        message_ids=mids,
-        vectors=vectors,
+    reader.scan_batches(_on_batch, batch_size=4096)
+    _flush_pending()
+
+    log.info(
+        "embed.texts_prepared",
+        rows_seen=rows_seen,
+        embedded=embedded,
+        skipped=rows_seen - embedded,
     )
+
+    meta = builder.finalize()
     log.info(
         "embed.complete",
         rows=meta["count"],
@@ -148,11 +166,6 @@ def main(argv: list[str] | None = None) -> int:
         elapsed_secs=round(time.monotonic() - started, 1),
     )
     return 0
-
-
-def _scan_all(reader) -> list[dict]:
-    """Pull every metadata row from the corpus."""
-    return reader.scan_all()
 
 
 def _row_to_text(row: dict, reader, prose_max_chars: int) -> str | None:

@@ -70,6 +70,37 @@ _CLASSIFY_LABELS = {
 }
 _UNKNOWN_LABEL = "unknown"
 
+_JOIN_BUDGET = 30_000
+
+
+async def _collect_bodies_budgeted(
+    reader, rows: list[dict], budget: int = _JOIN_BUDGET
+) -> tuple[list[str], str]:
+    """Decode and concatenate message bodies up to `budget` characters.
+
+    Returns (per-message bodies, joined-and-truncated blob). Stops
+    fetching as soon as the budget is exhausted — avoids holding all
+    N message bodies in memory for a 500-message thread where only
+    the first ~30 KB matter.
+    """
+    pieces: list[str] = []
+    used = 0
+    for r in rows:
+        if used >= budget:
+            break
+        body = await run_with_timeout(reader.fetch_body, r["message_id"])
+        if body is None:
+            continue
+        decoded = _decode(body)
+        remaining = budget - used
+        if len(decoded) > remaining:
+            pieces.append(decoded[:remaining])
+            used = budget
+            break
+        pieces.append(decoded)
+        used += len(decoded) + 2
+    return pieces, "\n\n".join(pieces)
+
 
 def _decode(body: bytes) -> str:
     try:
@@ -224,12 +255,7 @@ async def lore_summarize_thread(
     if not rows:
         raise not_found(what="thread seed", message_id=message_id)
 
-    bodies: list[str] = []
-    for r in rows:
-        body = await run_with_timeout(reader.fetch_body, r["message_id"])
-        if body is not None:
-            bodies.append(_decode(body))
-    joined = "\n\n".join(bodies)
+    _, joined = await _collect_bodies_budgeted(reader, rows)
 
     backend = "extractive"
     summary = _extractive_summary(joined, max_sentences)
@@ -238,7 +264,7 @@ async def lore_summarize_thread(
             prompt = (
                 f"Summarize the following kernel mailing-list thread in at most "
                 f"{max_sentences} sentences. Preserve filenames, identifiers, and "
-                f"decision states. Omit pleasantries.\n\n{joined[:30_000]}"
+                f"decision states. Omit pleasantries.\n\n{joined}"
             )
             summary = await sample_text(
                 ctx,
@@ -360,18 +386,13 @@ async def lore_explain_review_status(
     if not rows:
         raise not_found(what="thread seed", message_id=message_id)
 
-    bodies: list[str] = []
-    for r in rows:
-        body = await run_with_timeout(reader.fetch_body, r["message_id"])
-        if body is not None:
-            bodies.append(_decode(body))
+    bodies, joined = await _collect_bodies_budgeted(reader, rows)
 
     concerns = _extract_concerns(rows, bodies)
     trailers = _aggregate_trailers(rows)
     backend = "extractive"
 
     if ctx is not None and client_supports_sampling(ctx):
-        joined = "\n\n".join(bodies)[:30_000]
         prompt = (
             "From this kernel mailing-list thread, extract at most 5 short "
             "reviewer concerns that are still open. One bullet per line. If "

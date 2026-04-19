@@ -84,7 +84,7 @@ Re-read your own diff before committing. Catch what `clippy` cannot.
 
 - [ ] **`.pyi` stub updated.** Every new pyfunction has a stub entry in `src/kernel_lore_mcp/_core.pyi`.
 
-### Three-tier invariants
+### Four-tier invariants
 
 - [ ] **Positions OFF on BM25 prose fields.** Search diff for `WithFreqsAndPositions` on prose — reject.
 

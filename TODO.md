@@ -231,6 +231,64 @@ These are doc/contract changes that shape the ingest + query layer
 - [ ] Add `docs/research/2026-04-14-review-findings.md` archiving
   the four reviewer reports so future sessions see the provenance.
 
+## over.db tier complete (2026-04-17)
+
+Driven by the lore-scale failure mode discovered during the
+2026-04-16 full-corpus ingest: `fetch_message` and every `eq()`
+predicate were doing full Parquet scans (187 s wall-clock, 36 GB
+RSS / OOM on `f:gregkh@linuxfoundation.org`). Plan in
+[`docs/plans/2026-04-17-overdb-metadata-tier.md`](./docs/plans/2026-04-17-overdb-metadata-tier.md);
+Phase 5 validation in
+[`docs/research/2026-04-17-overdb-validation.md`](./docs/research/2026-04-17-overdb-validation.md).
+
+- [x] **Phase 1** — `src/over.rs` SQLite module (public-inbox
+  `over.sqlite3` pattern; indexed columns + zstd-msgpack `ddd`
+  blob; WAL pragmas; bulk-load mode).
+- [x] **Phase 2** — `kernel-lore-build-over` binary
+  (`src/bin/build_over.rs`); deferred-index strategy; tempfile +
+  atomic rename; ~30 min for 17.6M rows.
+- [x] **Phase 3** — Reader wired through over.db with graceful
+  Parquet fallback. Five paths converted: `fetch_message`,
+  `eq`, `prose_search_filtered`, `patch_search`, `all_rows`.
+- [x] **Phase 4** — Incremental ingest writes to over.db when
+  `--with-over` is set (auto-detected if file exists).
+  `INSERT OR REPLACE` keyed on `(message_id, list)` for
+  idempotency. `tid` column stays NULL until `rebuild_tid`
+  wires through (deviation from plan; tracked as follow-up).
+- [x] **Phase 5** — Validation closed. fetch_message 0.06 ms p50
+  (was 187 s); eq from_addr 3.08 ms p50 (was 587 ms after first
+  build, 5.4 s p95); prose_search 23.5 ms p50 (was 170 s); peak
+  RSS 151 MB (was 1754 MB). All plan targets met after one round
+  of tuning (composite `over_from_date` index + lowered
+  `mmap_size` / `cache_size`).
+- [x] **Phase 6** — Documentation + rollout
+  ([`docs/architecture/four-tier-index.md`](./docs/architecture/four-tier-index.md),
+  [`docs/architecture/over-db.md`](./docs/architecture/over-db.md),
+  CLAUDE.md "Four-tier index architecture", runbook §10A,
+  corpus-coverage disk footprint).
+
+**Follow-ups not blocking:**
+
+- Cross-post collapse: validation §5e found zero cross-posted
+  message_ids in the 17.6M corpus, suggesting upstream
+  `Reader::scan` dedup flattens by message_id alone before rows
+  reach over.db. Schema supports the multi-row representation;
+  fix is in the dedup pass.
+- `eq()` for non-indexed `EqField` variants (signed_off_by,
+  touched_files, …) still falls through to a sequential
+  `ddd`-decode scan inside over.db. Promote to dedicated
+  columns / side-tables if they become hot.
+- `tid` column population (Phase 4 deviation).
+
+**Retro:** the failure mode and the fix were both well-aligned
+with prior art (public-inbox runs essentially this layout in
+production at lore.kernel.org scale). The validation-protocol
+fragility — renaming `over.db` to test the Parquet fallback
+crashed the subagent and broke the live system mid-test — is the
+one process lesson worth carrying forward; future parity tests
+should compare against a separately-built second instance, not
+filesystem renames.
+
 ## Phase 1 complete (2026-04-14)
 
 Landed in commit `2b54d7c`:

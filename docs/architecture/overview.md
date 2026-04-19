@@ -80,14 +80,17 @@ non-logging, API-key rate limits on file-granularity
                       /status
 ```
 
-## Three-tier index
+## Four-tier index
 
-Why three indices and not one: see
-[`three-tier-index.md`](./three-tier-index.md). Short version: a
-mailing list archive has three mostly-disjoint query classes
-(structured metadata, code/patch substring, prose BM25), each with
-a different optimal data structure. One monolithic index either
-over-serves or under-serves every class.
+Why four indices and not one: see
+[`four-tier-index.md`](./four-tier-index.md). Short version: a
+mailing list archive has four mostly-disjoint query classes
+(structured metadata analytical scans, structured metadata point
+lookups, code/patch substring, prose BM25), each with a different
+optimal data structure. One monolithic index either over-serves or
+under-serves every class. Parquet alone fails the point-lookup
+class catastrophically — see [`over-db.md`](./over-db.md) for the
+SQLite tier that fixes it.
 
 ## Why Rust + Python
 

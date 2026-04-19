@@ -28,7 +28,7 @@ Write code that is small, typed tightly, and easy to delete. Check the pipeline 
 
 - [ ] **Use `pub(crate)` by default.** Promote to `pub` only when the item crosses the PyO3 boundary or the `reindex` binary needs it.
 
-- [ ] **Module-level `//!` comment.** One paragraph: what this module does, where it fits in the three-tier architecture, and what invariants it upholds.
+- [ ] **Module-level `//!` comment.** One paragraph: what this module does, where it fits in the four-tier architecture, and what invariants it upholds.
 
 ### Types
 

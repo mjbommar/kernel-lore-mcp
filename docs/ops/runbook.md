@@ -45,6 +45,15 @@ KLMCP_GROKMIRROR_CONF_TEMPLATE="$PWD/scripts/grokmirror-personal.conf" \
     --data-dir "$KLMCP_DATA_DIR" \
     --lore-mirror "$KLMCP_DATA_DIR/shards"
 
+# 0A.5b — (optional, recommended) build over.db so metadata point
+# lookups and `f:` / `list:` predicates run in milliseconds instead
+# of seconds. Skip if you only ingested a tiny corpus; required for
+# anything close to lore scale. ~2 min per million rows; ~30 min
+# for a full 17.6M-row corpus. Disk: ~19 GB at full corpus size.
+# Atomic via tempfile+rename — safe to ctrl-C.
+cargo build --release --bin kernel-lore-build-over
+./target/release/kernel-lore-build-over --data-dir "$KLMCP_DATA_DIR"
+
 # 0A.6 — confirm the index is live (no HTTP needed)
 ./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # Expect: {"generation": >= 1, "freshness_ok": true, ...}
@@ -86,7 +95,7 @@ monitoring, alerts), proceed to §1.
 ## 0. What you are deploying
 
 Three systemd units that together keep a local `lore.kernel.org`
-mirror + three-tier index + MCP server running:
+mirror + four-tier index + MCP server running:
 
 - `klmcp-grokmirror.timer` → `klmcp-grokmirror.service` — pulls
   via grokmirror every 5 minutes.
@@ -263,6 +272,48 @@ sudo systemctl stop klmcp-grokmirror.service
 ```
 
 Reverse for restart.
+
+## 10A. Build / rebuild `over.db`
+
+`over.db` is the SQLite metadata point-lookup tier (see
+[`../architecture/over-db.md`](../architecture/over-db.md)). It is
+a pure projection of the metadata Parquet — Parquet is the source
+of truth — so it's always safe to delete and rebuild.
+
+```sh
+# Local dev:
+./target/release/kernel-lore-build-over --data-dir "$KLMCP_DATA_DIR"
+
+# Hosted:
+sudo -u kernel-lore-mcp /usr/local/bin/kernel-lore-build-over \
+    --data-dir /var/lib/kernel-lore-mcp
+```
+
+| Property | Value |
+|---|---|
+| Wall-clock (full 17.6M-row corpus) | ~30 min |
+| Throughput | ~2 min per million rows |
+| Disk footprint | ~19 GB for 17.6M messages (~1.1 KB/row including indices) |
+| Atomicity | Builds to `over.db.tmp.<run_id>`, atomic rename on success. Crash leaves the tempfile behind for inspection — no half-written `over.db`. |
+| Fallback when absent | Reader paths fall through to legacy Parquet scans (slow but correct). |
+
+**When to rebuild:**
+
+1. **Schema migration.** `OverDb::SCHEMA_VERSION` bump; the
+   Reader refuses to open a stale DB and the build is the
+   migration.
+2. **File corruption.** `sqlite3 over.db "PRAGMA integrity_check"`
+   reports anything other than `ok`. Just `rm over.db` and rerun
+   the build — Parquet is the source of truth, no data loss.
+3. **Forced rebuild for performance.** If you've heavily mutated
+   the corpus (e.g. re-ingested with a fresh schema), a clean
+   rebuild reclaims space that incremental writes leave fragmented.
+
+**Incremental ingest writes to over.db automatically when
+`--with-over` is set on `kernel-lore-ingest`** (auto-detected if
+`over.db` exists at the data dir root). No separate cron entry
+required for the steady-state — the rebuild step above is only
+needed for the cases listed.
 
 ## 11. Recover from a mid-ingest crash
 

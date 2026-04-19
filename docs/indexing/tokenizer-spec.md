@@ -92,7 +92,7 @@ field we add in v2 if needed. V1: `from_addr` uses `raw_lc`.
 
 `IndexRecordOption::WithFreqs` for all `kernel_prose` fields.
 Rationale in
-[`../architecture/three-tier-index.md`](../architecture/three-tier-index.md).
+[`../architecture/four-tier-index.md`](../architecture/four-tier-index.md).
 
 ## Tokenizer-manager gotcha
 

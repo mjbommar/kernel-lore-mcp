@@ -43,6 +43,15 @@ pub enum Error {
 
     #[error("state inconsistency: {0}")]
     State(String),
+
+    #[error("sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    #[error("msgpack encode error: {0}")]
+    MsgpackEncode(#[from] rmp_serde::encode::Error),
+
+    #[error("msgpack decode error: {0}")]
+    MsgpackDecode(#[from] rmp_serde::decode::Error),
 }
 
 impl From<Error> for PyErr {

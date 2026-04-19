@@ -1,6 +1,10 @@
 # Research — search library landscape (April 14 2026)
 
-Evaluation that produced the three-tier architecture.
+Evaluation that produced the original three-tier architecture
+(later expanded to four tiers — see
+[`../architecture/four-tier-index.md`](../architecture/four-tier-index.md)
+and [`../architecture/over-db.md`](../architecture/over-db.md)
+for the SQLite tier added in 2026-04).
 
 ## Rubric
 
@@ -25,7 +29,7 @@ Regex/substring on code? Exact-match on structured fields?
 ### tantivy-py (0.25, rejected)
 
 - Thin subset. Can't register Rust tokenizers from Python.
-- Fine for v0 prototypes, not for our three-tier design.
+- Fine for v0 prototypes, not for our four-tier design.
 
 ### Sonic (rejected)
 
