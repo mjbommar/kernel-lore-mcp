@@ -955,6 +955,33 @@ impl Reader {
     /// Bounded by `max_messages` so a runaway thread can't OOM the
     /// server.
     pub fn thread(&self, message_id: &str, max_messages: usize) -> Result<Vec<MessageRow>> {
+        // Fast path: one indexed `scan_eq(Tid, ...)` against over.db.
+        // `rebuild_tid` backfills the `tid` column for every row, so
+        // after a rebuild, "all messages in the thread" is a single
+        // B-tree lookup on `over_tid`. Mirrors the series_timeline fix.
+        if let Some(seed) = self.fetch_message(message_id)?
+            && let Some(seed_tid) = seed.tid.as_deref().filter(|t| !t.is_empty())
+            && let Some(res) = self.with_over(|db| {
+                db.scan_eq(EqField::Tid, seed_tid, None, None, max_messages)
+            })
+        {
+            let mut rows = res?;
+            rows.sort_by_key(|r| r.date_unix_ns.unwrap_or(i64::MIN));
+            return Ok(rows);
+        }
+
+        // Fallback: Parquet-scan BFS. Used when over.db isn't present
+        // or `rebuild_tid` hasn't backfilled tids yet (fresh boxes).
+        // Slow — scans every Parquet file per thread node — but
+        // correct, and the fast path above handles production.
+        self.thread_via_parquet_scan(message_id, max_messages)
+    }
+
+    fn thread_via_parquet_scan(
+        &self,
+        message_id: &str,
+        max_messages: usize,
+    ) -> Result<Vec<MessageRow>> {
         use std::collections::{HashSet, VecDeque};
         let needle = strip_angles(message_id).to_owned();
         let mut visited: HashSet<String> = HashSet::new();
@@ -2023,6 +2050,85 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let rows = r.series_timeline("m1@x").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m1@x");
+    }
+
+    /// thread() fast path: when over.db has `tid` backfilled (as
+    /// rebuild_tid does in production), the BFS falls away and we
+    /// resolve the thread in a single indexed scan_eq. Without this
+    /// wiring, thread() did a full Parquet scan per node — minutes
+    /// per call on a 17.6M-row corpus.
+    #[test]
+    fn thread_uses_over_tid_when_present() {
+        use crate::over::{DddPayload, OverDb, OverRow};
+        let dir = tempdir().unwrap();
+        let over_path = dir.path().join("over.db");
+        let mut db = OverDb::open(&over_path).unwrap();
+
+        // Three messages in the same thread (shared tid = "root@x").
+        // Plus one unrelated message on a different tid that must
+        // NOT appear in the result.
+        let mk = |mid: &str,
+                  tid: &str,
+                  date: i64,
+                  in_reply_to: Option<&str>|
+         -> OverRow {
+            OverRow {
+                message_id: mid.to_owned(),
+                list: "linux-cifs".to_owned(),
+                from_addr: Some("a@b".to_owned()),
+                date_unix_ns: Some(date),
+                in_reply_to: in_reply_to.map(str::to_owned),
+                tid: Some(tid.to_owned()),
+                body_segment_id: 0,
+                body_offset: 0,
+                body_length: 1,
+                body_sha256: "sha".to_owned(),
+                has_patch: false,
+                is_cover_letter: false,
+                series_version: None,
+                series_index: None,
+                series_total: None,
+                files_changed: None,
+                insertions: None,
+                deletions: None,
+                commit_oid: None,
+                ddd: DddPayload {
+                    subject_raw: Some("thread test".to_owned()),
+                    subject_normalized: Some("thread test".to_owned()),
+                    ..Default::default()
+                },
+            }
+        };
+        db.insert_batch(&[
+            mk("root@x", "root@x", 1_000, None),
+            mk("reply1@x", "root@x", 2_000, Some("root@x")),
+            mk("reply2@x", "root@x", 3_000, Some("reply1@x")),
+            mk("unrelated@x", "other@x", 4_000, None),
+        ])
+        .unwrap();
+        drop(db);
+
+        // No Parquet metadata exists — the fast path is the ONLY way
+        // to produce any rows. If thread() silently falls back to the
+        // BFS, the test returns empty and fails.
+        let reader = Reader::new(dir.path());
+        let rows = reader.thread("reply2@x", 10).unwrap();
+        let mids: std::collections::HashSet<&str> =
+            rows.iter().map(|r| r.message_id.as_str()).collect();
+        assert_eq!(rows.len(), 3, "expected all 3 thread members, got {mids:?}");
+        assert!(mids.contains("root@x"));
+        assert!(mids.contains("reply1@x"));
+        assert!(mids.contains("reply2@x"));
+        assert!(!mids.contains("unrelated@x"));
+
+        // Ordered by date ascending.
+        assert_eq!(rows[0].message_id, "root@x");
+        assert_eq!(rows[1].message_id, "reply1@x");
+        assert_eq!(rows[2].message_id, "reply2@x");
+
+        // max_messages bound is respected.
+        let capped = reader.thread("reply2@x", 2).unwrap();
+        assert_eq!(capped.len(), 2);
     }
 
     #[test]
