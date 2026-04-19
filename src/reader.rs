@@ -2207,7 +2207,7 @@ fn any_trailer_contains_email(row: &MessageRow, addr_lc: &str) -> bool {
 /// Extract `user@host` from a "Name <email>" style string. Returns
 /// empty when the pattern doesn't match. Case-folded to match the
 /// lowercased indexing in over.db / ddd payloads.
-fn extract_email(s: &str) -> String {
+pub(crate) fn extract_email(s: &str) -> String {
     let start = match s.rfind('<') {
         Some(i) => i + 1,
         None => {
@@ -2254,6 +2254,7 @@ fn eq_field_is_over_indexed(field: EqField) -> bool {
             | EqField::BodySha256
             | EqField::CommitOid
             | EqField::SubjectNormalized
+            | EqField::SignedOffBy
     )
 }
 

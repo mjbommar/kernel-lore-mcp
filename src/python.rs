@@ -95,6 +95,21 @@ pub fn py_backfill_subject_normalized(py: Python<'_>, data_dir: PathBuf) -> PyRe
     Ok(n)
 }
 
+/// One-off backfill for the trailer side table. Walks every existing
+/// over.db row, decodes its ddd blob, and materializes
+/// signed-off-by emails into `over_trailer_email` so subsequent
+/// `eq('signed_off_by', email)` queries hit the indexed join path.
+#[pyfunction]
+#[pyo3(name = "backfill_trailer_emails")]
+pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let n = py.detach(|| -> crate::error::Result<u64> {
+        let over_path = data_dir.join("over.db");
+        let mut db = crate::over::OverDb::open(&over_path)?;
+        db.backfill_trailer_emails()
+    })?;
+    Ok(n)
+}
+
 /// Rebuild the BM25 index from the compressed store + metadata.
 /// Returns the number of docs indexed.
 #[pyfunction]

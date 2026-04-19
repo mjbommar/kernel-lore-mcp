@@ -75,6 +75,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_backfill_trailer_emails,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_build_embedding_index,
         m
     )?)?;

@@ -327,6 +327,24 @@ impl OverDb {
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            -- Side table for list-shaped trailer fields. One row per
+            -- (trailer kind, extracted email, source over row). Keeping
+            -- every list-shaped trailer in one table (rather than one
+            -- per kind) lets us add new kinds by writing rows with a
+            -- new `kind` string — no further schema migrations.
+            --
+            -- `email` is the lowercased user@host extracted from the
+            -- raw trailer line ("Signed-off-by: Name <email>" → email).
+            -- Entries preserving the full trailer text live in the
+            -- `over.ddd` blob; this table is purely an index surface.
+            CREATE TABLE IF NOT EXISTS over_trailer_email (
+                kind       TEXT NOT NULL,
+                email      TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                list       TEXT NOT NULL,
+                PRIMARY KEY (kind, email, message_id, list)
+            );
             "#,
         )?;
 
@@ -388,6 +406,12 @@ impl OverDb {
             CREATE INDEX IF NOT EXISTS over_subject_normalized
                 ON over (subject_normalized)
                 WHERE subject_normalized IS NOT NULL;
+
+            -- Reverse lookup on the trailer side table for cascading
+            -- DELETE on REPLACE. The (kind, email, ...) primary key
+            -- already supports the forward lookup used by scan_eq.
+            CREATE INDEX IF NOT EXISTS over_trailer_email_mid_list
+                ON over_trailer_email (message_id, list);
 
             -- (message_id, list) is the natural identity key. Cross-posts
             -- legitimately share message_id across lists, so we cannot
@@ -532,6 +556,69 @@ impl OverDb {
         Ok(total)
     }
 
+    /// Populate `over_trailer_email` for every existing row by
+    /// decoding its `ddd` blob and extracting signed-off-by emails.
+    /// Idempotent — DELETEs before INSERTing per (message_id, list).
+    /// Chunked 50k rows per tx with WAL checkpoints. Returns the
+    /// number of side-table rows written.
+    pub fn backfill_trailer_emails(&mut self) -> Result<u64> {
+        const CHUNK: usize = 50_000;
+        let mut cursor: i64 = 0;
+        let mut total: u64 = 0;
+        loop {
+            let mut pending: Vec<(String, String, Vec<String>)> = Vec::with_capacity(CHUNK);
+            let mut last_rowid = cursor;
+            {
+                let mut stmt = self.conn.prepare(
+                    "SELECT rowid, message_id, list, ddd FROM over \
+                     WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                while let Some(r) = rows.next()? {
+                    let rowid: i64 = r.get(0)?;
+                    let mid: String = r.get(1)?;
+                    let list: String = r.get(2)?;
+                    let blob: Vec<u8> = r.get(3)?;
+                    let sob = match decode_ddd(&blob) {
+                        Ok(p) => p.signed_off_by,
+                        Err(_) => Vec::new(),
+                    };
+                    pending.push((mid, list, sob));
+                    last_rowid = rowid;
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction()?;
+            {
+                let mut del = tx.prepare(
+                    "DELETE FROM over_trailer_email \
+                     WHERE kind = 'signed_off_by' AND message_id = ?1 AND list = ?2",
+                )?;
+                let mut ins = tx.prepare(
+                    "INSERT OR IGNORE INTO over_trailer_email \
+                        (kind, email, message_id, list) \
+                     VALUES ('signed_off_by', ?1, ?2, ?3)",
+                )?;
+                for (mid, list, sob) in &pending {
+                    del.execute(rusqlite::params![mid, list])?;
+                    for raw in sob {
+                        let email = crate::reader::extract_email(raw);
+                        if !email.is_empty() {
+                            total += ins.execute(rusqlite::params![email, mid, list])? as u64;
+                        }
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            cursor = last_rowid;
+        }
+        Ok(total)
+    }
+
     fn insert_batch_in_tx(tx: &Transaction<'_>, rows: &[OverRow]) -> Result<()> {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO over (
@@ -549,6 +636,20 @@ impl OverDb {
                 ?16, ?17, ?18, ?19,
                 ?20, ?21
             )",
+        )?;
+        // INSERT OR REPLACE on `over` drops and re-adds rows, so any
+        // pre-existing side-table rows for the same (message_id, list)
+        // are now stale and need to go. We delete first, then let the
+        // main insert proceed, then re-populate the side tables from
+        // the fresh ddd payload.
+        let mut sob_del = tx.prepare(
+            "DELETE FROM over_trailer_email \
+             WHERE kind = 'signed_off_by' AND message_id = ?1 AND list = ?2",
+        )?;
+        let mut sob_ins = tx.prepare(
+            "INSERT OR IGNORE INTO over_trailer_email \
+                (kind, email, message_id, list) \
+             VALUES ('signed_off_by', ?1, ?2, ?3)",
         )?;
         for row in rows {
             // Defensive lowercase: the indexed column is the lookup
@@ -579,6 +680,18 @@ impl OverDb {
                 row.ddd.subject_normalized.as_deref(),
                 blob,
             ])?;
+
+            sob_del.execute(rusqlite::params![row.message_id, row.list])?;
+            for raw in &row.ddd.signed_off_by {
+                let email = crate::reader::extract_email(raw);
+                if !email.is_empty() {
+                    sob_ins.execute(rusqlite::params![
+                        email,
+                        row.message_id,
+                        row.list
+                    ])?;
+                }
+            }
         }
         Ok(())
     }
@@ -664,6 +777,20 @@ impl OverDb {
             return Ok(Vec::new());
         }
 
+        // Side-table join path for list-shaped trailer fields. The
+        // value is the user@host piece of a trailer line; the side
+        // table was populated at insert time with one row per kind
+        // per email per source row.
+        if let Some(kind) = trailer_kind(field) {
+            return self.scan_eq_via_trailer_email(
+                kind,
+                &value.to_ascii_lowercase(),
+                since_unix_ns,
+                list_filter,
+                limit,
+            );
+        }
+
         let (where_clause, primary): (&str, String) = match field {
             EqField::FromAddr => ("from_addr = ?1", value.to_ascii_lowercase()),
             EqField::List => ("list = ?1", value.to_string()),
@@ -719,6 +846,58 @@ impl OverDb {
         Ok(out)
     }
 
+    /// Indexed path for list-shaped trailer fields whose extracted
+    /// email was materialized into `over_trailer_email` at insert
+    /// time. Joins the side table back against `over` to rebuild
+    /// full MessageRows while walking in date-DESC order.
+    fn scan_eq_via_trailer_email(
+        &self,
+        kind: &str,
+        email_lc: &str,
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let mut sql = String::from(
+            "SELECT \
+                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
+                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
+                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
+                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
+             FROM over_trailer_email t \
+             INNER JOIN over o \
+                ON o.message_id = t.message_id AND o.list = t.list \
+             WHERE t.kind = ?1 AND t.email = ?2",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(kind.to_string()), Box::new(email_lc.to_string())];
+        let mut next_idx = 3_usize;
+        if let Some(since) = since_unix_ns {
+            sql.push_str(&format!(" AND o.date_unix_ns >= ?{next_idx}"));
+            params.push(Box::new(since));
+            next_idx += 1;
+        }
+        if let Some(list) = list_filter {
+            sql.push_str(&format!(" AND o.list = ?{next_idx}"));
+            params.push(Box::new(list.to_string()));
+            next_idx += 1;
+        }
+        sql.push_str(&format!(
+            " ORDER BY o.date_unix_ns DESC LIMIT ?{next_idx}"
+        ));
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        while let Some(r) = rows.next()? {
+            out.push(row_to_message(r)?);
+        }
+        Ok(out)
+    }
+
     fn scan_eq_sequential(
         &self,
         field: EqField,
@@ -761,6 +940,16 @@ impl OverDb {
         }
         let _ = next_idx;
         Ok(out)
+    }
+}
+
+/// Map an `EqField` to the `over_trailer_email.kind` token used by
+/// the side-table side-indexed fast path. Returns `None` for fields
+/// that aren't list-shaped-trailer-by-email.
+fn trailer_kind(field: EqField) -> Option<&'static str> {
+    match field {
+        EqField::SignedOffBy => Some("signed_off_by"),
+        _ => None,
     }
 }
 
@@ -1146,6 +1335,132 @@ mod tests {
         for h in &hits {
             assert!(h.date_unix_ns.unwrap() >= 105);
         }
+    }
+
+    fn sample_row_with_sob(
+        mid: &str,
+        list: &str,
+        date: i64,
+        from: &str,
+        sob_emails: &[&str],
+    ) -> OverRow {
+        let mut row = sample_row(mid, list, date, from);
+        row.ddd.signed_off_by = sob_emails
+            .iter()
+            .map(|e| format!("Someone <{e}>"))
+            .collect();
+        row
+    }
+
+    #[test]
+    fn scan_eq_signed_off_by_joins_trailer_side_table() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let rows = vec![
+            sample_row_with_sob(
+                "<s1@x>",
+                "lkml",
+                1_000,
+                "author1@x",
+                &["gregkh@linuxfoundation.org"],
+            ),
+            sample_row_with_sob(
+                "<s2@x>",
+                "lkml",
+                2_000,
+                "author2@x",
+                &["gregkh@linuxfoundation.org", "akpm@linux-foundation.org"],
+            ),
+            sample_row_with_sob("<s3@x>", "lkml", 3_000, "a@x", &["other@x.com"]),
+        ];
+        db.insert_batch(&rows).unwrap();
+
+        let hits = db
+            .scan_eq(
+                EqField::SignedOffBy,
+                "gregkh@linuxfoundation.org",
+                None,
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // Newest-first.
+        assert_eq!(hits[0].message_id, "<s2@x>");
+        assert_eq!(hits[1].message_id, "<s1@x>");
+
+        // Case-insensitive on input.
+        let hits2 = db
+            .scan_eq(
+                EqField::SignedOffBy,
+                "GREGKH@LinuxFoundation.Org",
+                None,
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits2.len(), 2);
+
+        // list_filter narrows.
+        let hits3 = db
+            .scan_eq(
+                EqField::SignedOffBy,
+                "gregkh@linuxfoundation.org",
+                None,
+                Some("other-list"),
+                10,
+            )
+            .unwrap();
+        assert!(hits3.is_empty());
+    }
+
+    #[test]
+    fn insert_or_replace_prunes_stale_sob_side_rows() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let row_v1 = sample_row_with_sob("<r@x>", "lkml", 1, "a@x", &["old@x.com"]);
+        db.insert_batch(&[row_v1]).unwrap();
+        // Overwrite with a new ddd that drops old@, adds new@.
+        let row_v2 = sample_row_with_sob("<r@x>", "lkml", 2, "a@x", &["new@x.com"]);
+        db.insert_batch(&[row_v2]).unwrap();
+
+        let by_old = db
+            .scan_eq(EqField::SignedOffBy, "old@x.com", None, None, 10)
+            .unwrap();
+        assert!(by_old.is_empty(), "stale SOB entry survived REPLACE");
+        let by_new = db
+            .scan_eq(EqField::SignedOffBy, "new@x.com", None, None, 10)
+            .unwrap();
+        assert_eq!(by_new.len(), 1);
+    }
+
+    #[test]
+    fn backfill_trailer_emails_fills_side_table_from_ddd() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let rows = vec![sample_row_with_sob(
+            "<b@x>",
+            "lkml",
+            1,
+            "a@x",
+            &["gregkh@linuxfoundation.org"],
+        )];
+        db.insert_batch(&rows).unwrap();
+        // Wipe the side table to simulate an over.db built before F2b.
+        db.conn
+            .execute("DELETE FROM over_trailer_email", [])
+            .unwrap();
+
+        let n = db.backfill_trailer_emails().unwrap();
+        assert_eq!(n, 1);
+
+        let hits = db
+            .scan_eq(
+                EqField::SignedOffBy,
+                "gregkh@linuxfoundation.org",
+                None,
+                None,
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]
