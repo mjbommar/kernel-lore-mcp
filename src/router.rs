@@ -211,8 +211,13 @@ pub struct RankedHit {
 /// Each tier returns a Vec<MessageRow>. We assign ranks per tier
 /// (1-based), compute RRF score = sum(1 / (RRF_K + rank)), and
 /// merge by message_id. Caller specifies `limit`.
-pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<Vec<RankedHit>> {
+pub fn dispatch(
+    reader: &Reader,
+    parsed: &ParsedQuery,
+    limit: usize,
+) -> Result<(Vec<RankedHit>, Vec<String>)> {
     let mut tier_results: HashMap<&'static str, Vec<MessageRow>> = HashMap::new();
+    let mut default_applied: Vec<String> = Vec::new();
 
     // Metadata tier — fire if any structured predicate is present
     // OR if there's no free_text and no patch_substring (we still
@@ -283,10 +288,10 @@ pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<V
 
     // BM25 tier
     if !parsed.free_text.is_empty() {
-        let q = parsed.free_text.join(" ");
-        // Filter by list at the tantivy query level so the top-N
-        // results are guaranteed to be from the requested list.
-        // No more post-filter starvation under corpus skew.
+        let (q, hyphen_split) = rewrite_free_text_for_bm25(&parsed.free_text);
+        if hyphen_split {
+            default_applied.push("hyphen-split".to_owned());
+        }
         let scored = reader.prose_search_filtered(&q, parsed.list.as_deref(), limit * 2)?;
         tier_results.insert("bm25", scored.into_iter().map(|(r, _)| r).collect());
     }
@@ -314,7 +319,25 @@ pub fn dispatch(reader: &Reader, parsed: &ParsedQuery, limit: usize) -> Result<V
     }
     merged.truncate(limit);
 
-    Ok(merged)
+    Ok((merged, default_applied))
+}
+
+/// Rewrite a free-text BM25 query so hyphenated terms don't trip
+/// tantivy's phrase-query path.
+///
+/// Tantivy's `QueryParser` interprets `use-after-free` as a phrase
+/// of three tokens. Our `body_prose` field is indexed WithFreqs
+/// (positions OFF by design — see CLAUDE.md), so any phrase query
+/// gets rejected. The `KernelIdentSplitter` tokenizer already splits
+/// on hyphens at index time, so rewriting the query `use-after-free`
+/// → `use after free` produces the same token set via an implicit
+/// AND instead. Returns `(rewritten, changed)` so the router can
+/// surface `hyphen-split` in `default_applied`.
+fn rewrite_free_text_for_bm25(free_text: &[String]) -> (String, bool) {
+    let raw = free_text.join(" ");
+    let rewritten = raw.replace('-', " ");
+    let changed = rewritten != raw;
+    (rewritten, changed)
 }
 
 fn rrf_merge(tiers: HashMap<&'static str, Vec<MessageRow>>, limit: usize) -> Vec<RankedHit> {
@@ -467,6 +490,22 @@ mod tests {
         assert!((m1.fused_score - expected).abs() < 1e-6);
         assert_eq!(m1.tier_provenance.len(), 2);
         assert!(m1.is_exact_match);
+    }
+
+    #[test]
+    fn rewrite_free_text_splits_hyphens() {
+        let free_text = vec!["use-after-free".to_owned(), "cifs".to_owned()];
+        let (rewritten, changed) = rewrite_free_text_for_bm25(&free_text);
+        assert_eq!(rewritten, "use after free cifs");
+        assert!(changed);
+    }
+
+    #[test]
+    fn rewrite_free_text_idempotent_when_no_hyphens() {
+        let free_text = vec!["ksmbd".to_owned(), "dacl".to_owned()];
+        let (rewritten, changed) = rewrite_free_text_for_bm25(&free_text);
+        assert_eq!(rewritten, "ksmbd dacl");
+        assert!(!changed);
     }
 
     #[test]

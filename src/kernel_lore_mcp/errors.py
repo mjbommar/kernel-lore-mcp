@@ -116,9 +116,43 @@ def invalid_argument(
     )
 
 
+def invalid_cursor(*, reason: str, cursor: str) -> LoreError:
+    """Rejected pagination cursor.
+
+    Until HMAC-validated paging lands (phase-5d), the only safe
+    behavior is to reject any supplied cursor — the server never
+    issues one, so any cursor the caller holds is either forged or
+    stale.
+    """
+    preview = cursor[:48] + "…" if len(cursor) > 48 else cursor
+    return LoreError(
+        "invalid_cursor",
+        f"pagination cursor rejected: {reason}",
+        echoed_input={"cursor": preview},
+        valid_example="omit the cursor field to request the first page",
+    )
+
+
+def query_too_long(*, name: str, length: int, limit: int) -> LoreError:
+    """Request field exceeds the server's length cap.
+
+    Kept separate from pydantic's raw ValidationError so agents get
+    a consistent `[query_too_long]` shape with actionable guidance
+    instead of a generic validation traceback.
+    """
+    return LoreError(
+        "query_too_long",
+        f"{name} is {length} characters; server cap is {limit}.",
+        echoed_input={name: f"<{length}-char string>"},
+        valid_example=f"truncate {name} to <= {limit} characters and retry",
+    )
+
+
 __all__ = [
     "LoreError",
     "invalid_argument",
+    "invalid_cursor",
     "not_found",
+    "query_too_long",
     "unknown_enum",
 ]

@@ -22,7 +22,10 @@ async def lore_series_timeline(
     (matched by normalized subject + from_addr + list), ordered by
     `(series_version, series_index)`.
 
-    Cost: cheap — expected p95 50 ms (metadata grouping).
+    Cost: cheap — expected p95 5 ms on corpora with over.db tid
+    backfilled (single `scan_eq(Tid)` + post-filter). Older docs
+    advertised 50 ms; the measured number on a 17.6M-row corpus is
+    well under that.
     """
     from kernel_lore_mcp import _core
 

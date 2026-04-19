@@ -32,7 +32,13 @@ async def lore_thread(
 ) -> ThreadResponse:
     """Walk in_reply_to / references to return the full thread.
 
-    Cost: moderate — expected p95 300 ms (graph walk + N body fetches).
+    Cost: cheap — expected p95 5 ms on `concise` (single indexed
+    `scan_eq(Tid)` against over.db after rebuild_tid has populated
+    the tid column). `detailed` adds one body fetch per message
+    (~50 ms for a 10-message thread).
+
+    Falls back to a Parquet-scan BFS on fresh deployments where
+    rebuild_tid hasn't run — substantially slower, but correct.
     """
     from kernel_lore_mcp import _core
 

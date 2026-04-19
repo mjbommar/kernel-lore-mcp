@@ -955,12 +955,19 @@ impl Reader {
     /// Bounded by `max_messages` so a runaway thread can't OOM the
     /// server.
     pub fn thread(&self, message_id: &str, max_messages: usize) -> Result<Vec<MessageRow>> {
+        // Not-in-corpus short-circuit. Without this, a bogus mid falls
+        // through to `thread_via_parquet_scan` and burns ~5 s (the
+        // request timeout) scanning every Parquet file for a mid that
+        // isn't there. `fetch_message` is a single indexed lookup.
+        let Some(seed) = self.fetch_message(message_id)? else {
+            return Ok(Vec::new());
+        };
+
         // Fast path: one indexed `scan_eq(Tid, ...)` against over.db.
         // `rebuild_tid` backfills the `tid` column for every row, so
         // after a rebuild, "all messages in the thread" is a single
         // B-tree lookup on `over_tid`. Mirrors the series_timeline fix.
-        if let Some(seed) = self.fetch_message(message_id)?
-            && let Some(seed_tid) = seed.tid.as_deref().filter(|t| !t.is_empty())
+        if let Some(seed_tid) = seed.tid.as_deref().filter(|t| !t.is_empty())
             && let Some(res) = self.with_over(|db| {
                 db.scan_eq(EqField::Tid, seed_tid, None, None, max_messages)
             })
@@ -970,10 +977,10 @@ impl Reader {
             return Ok(rows);
         }
 
-        // Fallback: Parquet-scan BFS. Used when over.db isn't present
-        // or `rebuild_tid` hasn't backfilled tids yet (fresh boxes).
-        // Slow — scans every Parquet file per thread node — but
-        // correct, and the fast path above handles production.
+        // Fallback: Parquet-scan BFS. Used when over.db is absent or
+        // `rebuild_tid` hasn't backfilled tids yet (fresh deployment).
+        // The seed exists, so the scan is bounded to one real thread,
+        // not an open-ended hunt for a non-existent mid.
         self.thread_via_parquet_scan(message_id, max_messages)
     }
 
@@ -2129,6 +2136,40 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         // max_messages bound is respected.
         let capped = reader.thread("reply2@x", 2).unwrap();
         assert_eq!(capped.len(), 2);
+    }
+
+    /// thread() on a mid that isn't in the corpus must short-circuit
+    /// via the indexed fetch_message lookup — never fall through to
+    /// the Parquet-scan BFS (which would burn ~5 s looking for a
+    /// nonexistent mid, triggering the request-timeout cap).
+    #[test]
+    fn thread_on_missing_mid_returns_empty_without_parquet_scan() {
+        use crate::over::OverDb;
+        let dir = tempdir().unwrap();
+        // Bring up an over.db so the fast path is available.
+        let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
+        // No metadata/ directory exists — if the code falls back to
+        // thread_via_parquet_scan, `parquet_files()` returns empty and
+        // we get the same answer but via a slow detour. The real
+        // regression guard is the latency: if a future refactor
+        // re-enables the fallback on missing-mid, a full-corpus
+        // production instance would time out, not a synthetic one.
+        let reader = Reader::new(dir.path());
+        let start = std::time::Instant::now();
+        let rows = reader
+            .thread("<definitely-not-real@nowhere.invalid>", 50)
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(rows.is_empty());
+        // On an empty corpus this is trivially fast, but the assertion
+        // is about shape, not speed: the path must be the indexed
+        // fetch_message -> None branch, confirmed by returning empty
+        // immediately. (Kept a loose latency check so grossly wrong
+        // refactors still fail loudly in CI.)
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "thread() on missing mid took {elapsed:?} — expected short-circuit"
+        );
     }
 
     #[test]

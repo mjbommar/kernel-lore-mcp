@@ -82,7 +82,9 @@ class Reader:
         self,
         query: str,
         limit: int = ...,
-    ) -> list[dict[str, Any]]: ...
+    ) -> dict[str, Any]:
+        """Returns {"hits": list[dict], "default_applied": list[str]}."""
+        ...
     def patch_search(
         self,
         needle: str,

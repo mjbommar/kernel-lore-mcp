@@ -297,20 +297,27 @@ impl PyReader {
         py: Python<'py>,
         query: String,
         limit: usize,
-    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        let hits = py.detach(|| -> Result<Vec<router::RankedHit>, crate::error::Error> {
-            let parsed = router::parse_query(&query)?;
-            router::dispatch(&self.inner, &parsed, limit)
-        })?;
-        hits.iter()
+    ) -> PyResult<Bound<'py, PyDict>> {
+        type DispatchOut = (Vec<router::RankedHit>, Vec<String>);
+        let (hits, default_applied) =
+            py.detach(|| -> Result<DispatchOut, crate::error::Error> {
+                let parsed = router::parse_query(&query)?;
+                router::dispatch(&self.inner, &parsed, limit)
+            })?;
+        let rows: Vec<Bound<'py, PyDict>> = hits
+            .iter()
             .map(|h| {
                 let d = row_to_pydict(py, &h.row)?;
                 d.set_item("_score", h.fused_score)?;
                 d.set_item("_tier_provenance", &h.tier_provenance)?;
                 d.set_item("_is_exact_match", h.is_exact_match)?;
-                Ok(d)
+                Ok::<_, PyErr>(d)
             })
-            .collect()
+            .collect::<PyResult<_>>()?;
+        let out = PyDict::new(py);
+        out.set_item("hits", rows)?;
+        out.set_item("default_applied", default_applied)?;
+        Ok(out)
     }
 
     /// Walk the reply graph from `message_id` and return every
