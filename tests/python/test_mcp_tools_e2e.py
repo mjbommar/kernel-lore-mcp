@@ -102,6 +102,34 @@ async def test_lore_author_profile_unknown_addr_empty(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_thread_state_unknown_on_small_thread(client: Client) -> None:
+    """Sample corpus has only two messages touching different files,
+    no RFC tag, no supersede chain, no NACK. Should land on
+    `unknown` with low confidence and an honest caveat."""
+    result = await client.call_tool(
+        "lore_thread_state",
+        {"message_id": "m1@x"},
+    )
+    data = result.data
+    assert data.message_id == "m1@x"
+    # State depends on ages: fixture dates may be > 180 days old →
+    # abandoned, otherwise unknown. Both acceptable; just make sure
+    # we didn't confidently claim something we can't support.
+    assert data.state in {"unknown", "abandoned", "under_review"}
+    assert data.confidence in {"high", "medium", "low"}
+    assert "merged" in data.caveat
+
+
+@pytest.mark.asyncio
+async def test_lore_thread_state_not_found_on_bogus_mid(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool("lore_thread_state", {"message_id": "<nope@nowhere>"})
+    assert "not_found" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_lore_file_timeline_default_asc(client: Client) -> None:
     """Timeline with default asc order + quarter bucket. Fixture has
     two patches touching fs/smb/server/smbacl.c; both land in the

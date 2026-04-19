@@ -87,6 +87,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.series import lore_series_timeline
     from kernel_lore_mcp.tools.stable_backport import lore_stable_backport_status
     from kernel_lore_mcp.tools.thread import lore_thread
+    from kernel_lore_mcp.tools.thread_state import lore_thread_state
 
     # Every tool shares the same four-annotation shape. Corpus grows
     # over time as new mail arrives (`openWorldHint=true`); none of
@@ -136,6 +137,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(
         lore_file_timeline,
         annotations=ann("Chronological patch activity on one file (with histogram)"),
+    )
+    mcp.tool(
+        lore_thread_state,
+        annotations=ann("Classify a thread (rfc/superseded/nacked/...)"),
     )
 
     # Embedding tier (Phase 8). Both tools fail loudly with an
