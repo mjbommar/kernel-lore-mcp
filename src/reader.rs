@@ -2228,6 +2228,8 @@ fn eq_field_is_over_indexed(field: EqField) -> bool {
             | EqField::List
             | EqField::InReplyTo
             | EqField::Tid
+            | EqField::BodySha256
+            | EqField::CommitOid
     )
 }
 

@@ -361,6 +361,16 @@ impl OverDb {
             CREATE INDEX IF NOT EXISTS over_tid        ON over (tid);
             CREATE INDEX IF NOT EXISTS over_reply      ON over (in_reply_to);
 
+            -- body_sha256 / commit_oid are already scalar columns on
+            -- every row; indexing them promotes eq() on these fields
+            -- from a full ddd-decode sequential scan to a point lookup.
+            -- body_sha256 is NOT NULL; commit_oid is nullable (non-
+            -- patches have no mainline OID) so partial-index it to keep
+            -- the index file small.
+            CREATE INDEX IF NOT EXISTS over_body_sha256 ON over (body_sha256);
+            CREATE INDEX IF NOT EXISTS over_commit_oid  ON over (commit_oid)
+                WHERE commit_oid IS NOT NULL;
+
             -- (message_id, list) is the natural identity key. Cross-posts
             -- legitimately share message_id across lists, so we cannot
             -- make message_id alone UNIQUE. INSERT OR REPLACE on this
@@ -578,6 +588,8 @@ impl OverDb {
             EqField::List => ("list = ?1", value.to_string()),
             EqField::InReplyTo => ("in_reply_to = ?1", value.to_string()),
             EqField::Tid => ("tid = ?1", value.to_string()),
+            EqField::BodySha256 => ("body_sha256 = ?1", value.to_string()),
+            EqField::CommitOid => ("commit_oid = ?1", value.to_string()),
             _ => {
                 tracing::warn!(
                     field = ?field,
@@ -1036,6 +1048,34 @@ mod tests {
         for h in &hits {
             assert!(h.date_unix_ns.unwrap() >= 105);
         }
+    }
+
+    #[test]
+    fn scan_eq_body_sha256_and_commit_oid_indexed() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let rows = vec![
+            sample_row("<b1@x>", "lkml", 1_000, "a@x"),
+            sample_row("<b2@x>", "lkml", 2_000, "a@x"),
+        ];
+        db.insert_batch(&rows).unwrap();
+
+        let by_sha = db
+            .scan_eq(EqField::BodySha256, "sha-<b2@x>", None, None, 10)
+            .unwrap();
+        assert_eq!(by_sha.len(), 1);
+        assert_eq!(by_sha[0].message_id, "<b2@x>");
+
+        let by_oid = db
+            .scan_eq(EqField::CommitOid, "oid-<b1@x>", None, None, 10)
+            .unwrap();
+        assert_eq!(by_oid.len(), 1);
+        assert_eq!(by_oid[0].message_id, "<b1@x>");
+
+        // Non-existent value returns empty, not a scan.
+        let miss = db
+            .scan_eq(EqField::CommitOid, "deadbeef", None, None, 10)
+            .unwrap();
+        assert!(miss.is_empty());
     }
 
     #[test]
