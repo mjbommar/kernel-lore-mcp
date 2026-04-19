@@ -31,6 +31,7 @@ use pyo3::prelude::*;
 mod bm25;
 mod embedding;
 mod error;
+mod git_sidecar;
 mod ingest;
 mod maintainers;
 mod metadata;
@@ -52,6 +53,7 @@ mod trigram;
 // paths.
 pub use bm25::BmWriter;
 pub use embedding::{EmbeddingBuilder, EmbeddingMeta, EmbeddingReader};
+pub use git_sidecar::{CommitRecord, GitSidecar, sidecar_path as git_sidecar_path};
 pub use ingest::{
     IngestStats, ingest_shard, ingest_shard_unlocked, ingest_shard_with_bm25, rebuild_bm25,
 };

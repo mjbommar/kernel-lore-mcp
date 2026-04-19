@@ -151,6 +151,10 @@ name = "kernel-lore-build-over"
 path = "src/bin/build_over.rs"
 
 [[bin]]
+name = "kernel-lore-build-git-sidecar"
+path = "src/bin/build_git_sidecar.rs"
+
+[[bin]]
 name = "bench-blob-read"
 path = "src/bin/bench_blob_read.rs"
 
