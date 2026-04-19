@@ -132,6 +132,25 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
     let file = File::create(&tmp_path)?;
     let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
 
+    // Interleave Parquet writes with over.db tid backfill so the big
+    // `mid_tid: Vec<(String, String)>` never fully materializes. Old
+    // code built a 17.6M-element Vec of (mid, tid) tuples — ~3 GB —
+    // just to hand to `over.update_tids`. We now push chunks in as
+    // we iterate lite_rows, reusing the same 50 k-row buffer.
+    let over_path = data_dir.join("over.db");
+    let mut over_conn = if over_path.exists() {
+        Some(crate::over::OverDb::open(&over_path)?)
+    } else {
+        None
+    };
+    const OVER_CHUNK: usize = 50_000;
+    let mut over_chunk: Vec<(String, String)> = if over_conn.is_some() {
+        Vec::with_capacity(OVER_CHUNK)
+    } else {
+        Vec::new()
+    };
+    let mut over_updated: u64 = 0;
+
     let total = lite_rows.len();
     let mut chunk: Vec<TidRow> = Vec::with_capacity(PARQUET_BATCH_ROWS);
     for lite in &lite_rows {
@@ -158,6 +177,15 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
             writer.write(&build_batch(&schema, &chunk)?)?;
             chunk.clear();
         }
+        if over_conn.is_some() {
+            over_chunk.push((lite.message_id.clone(), lite.tid.clone()));
+            if over_chunk.len() >= OVER_CHUNK
+                && let Some(db) = over_conn.as_mut()
+            {
+                over_updated += db.update_tids(&over_chunk)?;
+                over_chunk.clear();
+            }
+        }
     }
     if !chunk.is_empty() {
         writer.write(&build_batch(&schema, &chunk)?)?;
@@ -165,17 +193,18 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
     writer.close()?;
     fs::rename(&tmp_path, &final_path)?;
 
-    // Backfill over.db.tid. Chunked update_tids already checkpoints
-    // WAL per batch; we build the slice once from lite_rows.
-    let over_path = data_dir.join("over.db");
-    if over_path.exists() {
-        let mut over = crate::over::OverDb::open(&over_path)?;
-        let mid_tid: Vec<(String, String)> = lite_rows
-            .iter()
-            .map(|r| (r.message_id.clone(), r.tid.clone()))
-            .collect();
-        let updated = over.update_tids(&mid_tid)?;
-        tracing::info!(updated, total = total, "over.db tid column backfilled");
+    if !over_chunk.is_empty()
+        && let Some(db) = over_conn.as_mut()
+    {
+        over_updated += db.update_tids(&over_chunk)?;
+        over_chunk.clear();
+    }
+    if over_conn.is_some() {
+        tracing::info!(
+            updated = over_updated,
+            total = total,
+            "over.db tid column backfilled"
+        );
     }
 
     Ok((final_path, total))
