@@ -305,13 +305,30 @@ pub fn dispatch(
     // rayon's global), so dispatching 3 tier tasks on the global
     // pool doesn't contend with it. Cost per dispatch: ~microseconds
     // vs ~hundreds of microseconds to spawn 3 fresh OS threads.
+    //
+    // Deadline propagation: rayon workers don't inherit the calling
+    // thread's TLS, so a DeadlineGuard set upstream in PyO3 doesn't
+    // reach the spawned tiers. Snapshot the deadline (Deadline is
+    // Copy) before spawn and re-install it inside each worker via
+    // DeadlineGuard::install so scan() checks within the tier honor
+    // the same budget.
+    let deadline = crate::timeout::current_deadline();
     let mut meta_out: TierOut = Ok((None, None));
     let mut trigram_out: TierOut = Ok((None, None));
     let mut bm25_out: TierOut = Ok((None, None));
     rayon::scope(|s| {
-        s.spawn(|_| meta_out = run_metadata());
-        s.spawn(|_| trigram_out = run_trigram());
-        s.spawn(|_| bm25_out = run_bm25());
+        s.spawn(|_| {
+            let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+            meta_out = run_metadata();
+        });
+        s.spawn(|_| {
+            let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+            trigram_out = run_trigram();
+        });
+        s.spawn(|_| {
+            let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+            bm25_out = run_bm25();
+        });
     });
 
     if let (Some(rows), _) = meta_out? {

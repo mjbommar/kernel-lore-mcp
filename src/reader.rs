@@ -590,6 +590,13 @@ impl Reader {
             let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
             let reader = builder.build()?;
             for batch in reader {
+                // Request-budget check at batch boundary. A no-op on
+                // threads without a DeadlineGuard (tests, offline
+                // tools); long-running tool entries install a guard
+                // so adversarial scans terminate promptly instead
+                // of wedging the Rust thread pool while Python
+                // abandons the future.
+                crate::timeout::check_request_deadline()?;
                 let batch = batch?;
                 let rows = materialize_batch(&batch)?;
                 for row in rows {
@@ -2882,6 +2889,34 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
     /// via the indexed fetch_message lookup — never fall through to
     /// the Parquet-scan BFS (which would burn ~5 s looking for a
     /// nonexistent mid, triggering the request-timeout cap).
+    /// An already-expired deadline installed before a scan causes
+    /// the very first batch boundary to return `QueryTimeout` —
+    /// which turns into a clean Err instead of the worker wedging
+    /// while asyncio abandons the future on the Python side.
+    #[test]
+    fn scan_honors_expired_request_deadline() {
+        use crate::timeout::{Deadline, DeadlineGuard};
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+
+        // Install a deadline that's already 10 seconds overdue. The
+        // first batch check inside scan() must short-circuit with
+        // Error::QueryTimeout. Without the deadline wiring, substr_subject
+        // completes; with it, it Errs.
+        let _guard = DeadlineGuard::install({
+            // Manually synthesize an expired Deadline via a 0-ms
+            // budget — by the time scan() runs even the first check
+            // Instant::now() - start exceeds 0.
+            Deadline::new(0)
+        });
+        let err = r.substr_subject("ksmbd", None, None, 100).unwrap_err();
+        match err {
+            crate::error::Error::QueryTimeout { .. } => {}
+            other => panic!("expected QueryTimeout, got {other:?}"),
+        }
+    }
+
     #[test]
     fn thread_on_missing_mid_returns_empty_without_parquet_scan() {
         use crate::over::OverDb;

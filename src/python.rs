@@ -24,6 +24,16 @@ use crate::ingest;
 use crate::reader::{DiffMode, EqField, MessageRow, Reader as CoreReader, RegexField};
 use crate::router;
 use crate::tid;
+use crate::timeout::DeadlineGuard;
+
+/// Install a thread-local deadline for the duration of one reader
+/// query, matching the router-layer wall-clock cap. Cheap — ~one
+/// TLS write; `scan()` checks at batch boundaries. Paired with
+/// Python's `run_with_timeout` so both sides agree on the budget.
+#[inline]
+fn read_query_guard() -> DeadlineGuard {
+    DeadlineGuard::new(router::query_wall_clock_ms())
+}
 
 /// Ingest one public-inbox shard. Releases the GIL for the whole walk.
 ///
@@ -254,6 +264,7 @@ impl PyReader {
         list: Option<String>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| {
             self.inner.activity(
                 file.as_deref(),
@@ -298,6 +309,7 @@ impl PyReader {
         query: String,
         limit: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let _guard = read_query_guard();
         type DispatchOut = (Vec<router::RankedHit>, Vec<String>);
         let (hits, default_applied) =
             py.detach(|| -> Result<DispatchOut, crate::error::Error> {
@@ -369,6 +381,7 @@ impl PyReader {
         limit: usize,
         fuzzy_edits: u32,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| {
             self.inner
                 .patch_search_fuzzy(&needle, list.as_deref(), limit, fuzzy_edits)
@@ -396,6 +409,7 @@ impl PyReader {
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let f = EqField::from_name(&field)
             .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
+        let _guard = read_query_guard();
         let rows = py.detach(|| {
             self.inner
                 .eq(f, &value, since_unix_ns, list.as_deref(), limit)
@@ -470,6 +484,7 @@ impl PyReader {
         include_mentions: bool,
         mention_limit: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let _guard = read_query_guard();
         let profile = py.detach(|| {
             self.inner.author_profile_extended(
                 &addr,
@@ -541,6 +556,7 @@ impl PyReader {
         window_days: u32,
         activity_limit: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let _guard = read_query_guard();
         let profile = py.detach(|| {
             self.inner
                 .maintainer_profile(&path, window_days, activity_limit)
@@ -604,6 +620,7 @@ impl PyReader {
         since_unix_ns: Option<i64>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| {
             self.inner
                 .substr_subject(&needle, list.as_deref(), since_unix_ns, limit)
@@ -624,6 +641,7 @@ impl PyReader {
         since_unix_ns: Option<i64>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| {
             self.inner.substr_trailers(
                 &name,
@@ -656,6 +674,7 @@ impl PyReader {
                 "unknown regex field {field:?}; supported: subject, from_addr, body_prose, patch"
             ))
         })?;
+        let _guard = read_query_guard();
         let rows = py.detach(|| {
             self.inner.regex(
                 f,

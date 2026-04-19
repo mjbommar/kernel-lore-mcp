@@ -28,9 +28,21 @@
 //!     batches). Checking per row would dominate scan cost for
 //!     hot paths; per batch is ~1024 rows / ~1 ms between checks.
 
+use std::cell::RefCell;
 use std::time::Instant;
 
 use crate::error::{Error, Result};
+
+thread_local! {
+    /// Per-request deadline for the current thread. Set at the top
+    /// of an expensive tool entry point (e.g. via `DeadlineGuard`),
+    /// checked by `scan()` at batch boundaries, and cleared on drop.
+    ///
+    /// Thread-local avoids plumbing `Option<&Deadline>` through
+    /// every scan call site (~18 in reader.rs) for a feature that
+    /// only a handful of entry points activate.
+    static REQUEST_DEADLINE: RefCell<Option<Deadline>> = const { RefCell::new(None) };
+}
 
 /// A wall-clock deadline for a single query. Immutable once constructed.
 #[derive(Debug, Clone, Copy)]
@@ -74,6 +86,57 @@ pub fn check(deadline: Option<&Deadline>) -> Result<()> {
     match deadline {
         Some(d) => d.check(),
         None => Ok(()),
+    }
+}
+
+/// Snapshot the thread-local deadline if one is set. Safe to call
+/// anywhere. Returns `None` on an unguarded thread.
+pub fn current_deadline() -> Option<Deadline> {
+    REQUEST_DEADLINE.with(|c| *c.borrow())
+}
+
+/// Verify the thread-local deadline, if present. No-op on threads
+/// without a guard. Used by `scan()` at batch boundaries so scans
+/// fired under a `DeadlineGuard` honor the budget; scans fired
+/// directly (tests, offline tools) are unaffected.
+pub fn check_request_deadline() -> Result<()> {
+    REQUEST_DEADLINE.with(|c| match c.borrow().as_ref() {
+        Some(d) => d.check(),
+        None => Ok(()),
+    })
+}
+
+/// RAII guard: sets a thread-local deadline on construction and
+/// clears it on drop. Install at the top of expensive tool entry
+/// points (e.g. `trailer_mentions`, `substr_subject`, `regex` scans).
+///
+/// Nested usage is safe in the sense that a guard overrides the
+/// current deadline for its lifetime and restores whatever was
+/// there before on drop — callers can layer tighter budgets.
+pub struct DeadlineGuard {
+    prev: Option<Deadline>,
+}
+
+impl DeadlineGuard {
+    pub fn new(limit_ms: u64) -> Self {
+        let d = Deadline::new(limit_ms);
+        let prev = REQUEST_DEADLINE.with(|c| c.replace(Some(d)));
+        Self { prev }
+    }
+
+    /// Install a specific pre-built deadline. Useful when a caller
+    /// wants to propagate the same deadline into spawned rayon
+    /// tasks so they finish under the same budget.
+    pub fn install(d: Deadline) -> Self {
+        let prev = REQUEST_DEADLINE.with(|c| c.replace(Some(d)));
+        Self { prev }
+    }
+}
+
+impl Drop for DeadlineGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        REQUEST_DEADLINE.with(|c| *c.borrow_mut() = prev);
     }
 }
 
