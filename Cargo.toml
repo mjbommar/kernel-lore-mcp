@@ -38,6 +38,10 @@ gix = { version = "0.81", default-features = false, features = [
     # feature gix-hash's Kind enum ends up empty and `match self` fails to
     # compile.
     "sha1",
+    # Enables `Remote::connect` / `fetch()` over HTTPS (smart protocol)
+    # for the internalized sync path (kernel-lore-sync, v0.2.0). Pulls
+    # in gix-protocol + gix-transport; binary grows ~1–2 MB.
+    "blocking-http-transport-reqwest-rust-tls",
 ] }
 
 # Email parsing
@@ -119,6 +123,16 @@ git2 = { version = "0.20", default-features = false }
 # anyhow ONLY for the reindex binary; library code uses thiserror.
 anyhow = "1"
 
+# Internalized grokmirror replacement (kernel-lore-sync, v0.2.0).
+# ureq: tiny sync HTTP client for manifest.js.gz. rustls TLS keeps us
+#   on the same TLS stack gix uses for its smart-http transport.
+# flate2: gzip decode for the manifest blob.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "json",
+] }
+flate2 = "1"
+
 [dev-dependencies]
 proptest = "1"
 tempfile = "3"
@@ -161,3 +175,7 @@ path = "src/bin/bench_blob_read.rs"
 [[bin]]
 name = "bench-ingest-stages"
 path = "src/bin/bench_ingest_stages.rs"
+
+[[bin]]
+name = "kernel-lore-sync"
+path = "src/bin/sync.rs"

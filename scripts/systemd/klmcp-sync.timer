@@ -1,0 +1,26 @@
+[Unit]
+Description=kernel-lore-mcp: 5-min sync cadence
+Documentation=https://github.com/mjbommar/kernel-lore-mcp/blob/main/docs/ops/update-frequency.md
+Requires=klmcp-sync.service
+
+[Timer]
+# First sync fires 60s after boot so the network settles.
+OnBootSec=60s
+
+# Default cadence per docs/ops/update-frequency.md. Override with a
+# drop-in (`/etc/systemd/system/klmcp-sync.timer.d/override.conf`)
+# rather than editing this file.
+OnUnitActiveSec=300s
+
+# Jitter up to ±30s so a fleet of self-hosted instances doesn't
+# all hit lore at :00, :05, :10, ...
+RandomizedDelaySec=30s
+
+# Catch up exactly once after a reboot; no flurry.
+AccuracySec=30s
+Persistent=true
+
+Unit=klmcp-sync.service
+
+[Install]
+WantedBy=timers.target

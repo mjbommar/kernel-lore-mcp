@@ -54,6 +54,11 @@ kernel-lore-embed = "kernel_lore_mcp.cli.embed:main"
 # Rust toolchain. The rayon-fanout Rust binary at src/bin/ingest.rs
 # remains the fast path for hosted deploys.
 kernel-lore-ingest = "kernel_lore_mcp.cli.ingest:main"
+# kernel-lore-sync replaces the grokmirror + ingest two-process chain
+# with one atomic Rust binary (manifest fetch + gix fetch + ingest +
+# generation bump). This thin Python entry point exec's the Rust
+# binary so `uv tool install`d users get it without hunting PATH.
+kernel-lore-sync = "kernel_lore_mcp.cli.sync:main"
 
 [project.urls]
 Homepage = "https://github.com/mjbommar/kernel-lore-mcp"

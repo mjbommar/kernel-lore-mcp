@@ -44,6 +44,9 @@ pub enum Error {
     #[error("state inconsistency: {0}")]
     State(String),
 
+    #[error("sync error: {0}")]
+    Sync(String),
+
     #[error("sqlite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 

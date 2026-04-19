@@ -44,6 +44,7 @@ mod router;
 mod schema;
 mod state;
 mod store;
+pub mod sync;
 mod tid;
 mod timeout;
 mod trigram;
