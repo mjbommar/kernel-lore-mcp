@@ -91,7 +91,11 @@ async def lore_author_profile(
                 "suggested_by / helped_by / assisted_by) on someone "
                 "else's patch. Matches what a full-text lore search "
                 "would show. Costs one extra Parquet scan — slower, "
-                "bounded by `mention_limit`."
+                "bounded by `mention_limit`. REQUIRES a narrowing "
+                "filter (`list_filter` or `since_unix_ns`) on large "
+                "deployments — an unfiltered full-corpus mention scan "
+                "is the shape anonymous users shouldn't be able to "
+                "trigger on demand."
             ),
         ),
     ] = False,
@@ -99,13 +103,16 @@ async def lore_author_profile(
         int,
         Field(
             ge=100,
-            le=20_000,
+            le=500,
             description=(
                 "Upper cap on mention-scope rows. Ignored when "
-                "`include_mentions=False`."
+                "`include_mentions=False`. Ceiling is deliberately "
+                "tight (500) so a single call can't saturate a "
+                "worker under anonymous multi-tenant load; raise "
+                "`limit` for prolific authors instead."
             ),
         ),
-    ] = 2_000,
+    ] = 500,
 ) -> AuthorProfileResponse:
     """Aggregate profile for messages authored by `addr`.
 
@@ -120,6 +127,19 @@ async def lore_author_profile(
             reason="must be an email address",
             value=addr,
             example="gregkh@linuxfoundation.org",
+        )
+    if include_mentions and list_filter is None and since_unix_ns is None:
+        raise invalid_argument(
+            name="include_mentions",
+            reason=(
+                "unbounded mention scan is not allowed on this server; "
+                "pass either `list_filter` (e.g. list_filter='linux-cifs') "
+                "or `since_unix_ns` (a date lower bound) to narrow"
+            ),
+            value={"include_mentions": True, "list_filter": None, "since_unix_ns": None},
+            example=(
+                '{"include_mentions": true, "list_filter": "linux-cifs"}'
+            ),
         )
 
     from kernel_lore_mcp import _core

@@ -259,12 +259,37 @@ async def test_lore_maintainer_profile_with_maintainers_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_lore_author_profile_include_mentions_requires_narrowing(
+    client: Client,
+) -> None:
+    """include_mentions=True without list_filter or since_unix_ns must
+    be rejected — production-hardening for anonymous multi-tenant use.
+    """
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool(
+            "lore_author_profile",
+            {"addr": "carol@example.com", "include_mentions": True},
+        )
+    assert "include_mentions" in str(exc_info.value)
+    assert "list_filter" in str(exc_info.value) or "since" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_lore_author_profile_include_mentions(client: Client) -> None:
     """With include_mentions=True, carol (reviewer on fixture patches)
-    should show zero authored_count but non-zero mention_count."""
+    should show zero authored_count but non-zero mention_count.
+    Requires a narrowing filter on the server side (production
+    hardening) — we pass list_filter to satisfy that.
+    """
     result = await client.call_tool(
         "lore_author_profile",
-        {"addr": "carol@example.com", "include_mentions": True},
+        {
+            "addr": "carol@example.com",
+            "include_mentions": True,
+            "list_filter": "linux-cifs",
+        },
     )
     data = result.data
     assert data.addr_queried == "carol@example.com"

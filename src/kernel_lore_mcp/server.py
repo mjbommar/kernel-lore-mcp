@@ -193,7 +193,41 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.custom_route("/status", methods=["GET"])(status_endpoint)
     mcp.custom_route("/metrics", methods=["GET"])(metrics_endpoint)
 
+    # Boot-time warmup: page in the BM25 mmap and an over.db connection
+    # so the FIRST real request doesn't pay the ~1.3 s cold-cache tail
+    # we measured pre-fix. Any error here is swallowed — a deployment
+    # that hasn't built BM25 yet should still boot the server. Best-
+    # effort; logs emit at debug, not warn, so a missing tier doesn't
+    # look like a production incident.
+    _warmup_tiers(settings)
+
     # TODO(phase-5+): lore_thread, lore_patch, lore_patch_diff,
     # lore_explain_patch once the router lands.
-    _ = settings
     return mcp
+
+
+def _warmup_tiers(settings: Settings) -> None:
+    """Fire one throwaway query against each tier that mmaps large
+    segments. The OS page cache holds the pages after the reader is
+    dropped, so subsequent per-request Readers get warm mmap state.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        from kernel_lore_mcp import _core
+
+        reader = _core.Reader(str(settings.data_dir))
+        # BM25: cheapest valid query that touches segment readers.
+        try:
+            reader.prose_search("the", 1)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("bm25 warmup skipped: %s", exc)
+        # Trigram / store / over.db indexes get touched lazily on first
+        # lookup; one cheap mid-shape router query exercises them.
+        try:
+            reader.router_search("list:lkml", 1)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("router warmup skipped: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("warmup skipped entirely: %s", exc)
