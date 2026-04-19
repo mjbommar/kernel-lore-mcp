@@ -349,8 +349,21 @@ pub fn ingest_shard_with_bm25(
     // caller bumps generation AFTER committing BM25 + rebuilding tid
     // so readers never see metadata/trigram at gen N while BM25/tid
     // are still stale at gen N-1.
+    //
+    // Per-tier generation markers: the main generation always
+    // advances (Parquet is the source of truth and succeeded if we
+    // got here). Tier markers advance only when THAT tier committed
+    // cleanly. On an over.db failure the main gen moves to N but
+    // `over.generation` stays at N-1 — Reader::new sees the drift
+    // and disables over.db routing until the next successful ingest
+    // reconciles.
     if shared_bm25.is_none() {
-        state.bump_generation()?;
+        let new_gen = state.bump_generation()?;
+        if !stats.over_failed {
+            state.set_tier_generation("over", new_gen)?;
+        }
+        state.set_tier_generation("bm25", new_gen)?;
+        state.set_tier_generation("trigram", new_gen)?;
     }
 
     Ok(stats)

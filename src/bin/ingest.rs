@@ -202,13 +202,11 @@ fn main() -> Result<()> {
         "tid rebuild done"
     );
 
-    // Bump generation ONCE, after BM25 commit + tid rebuild, so
-    // readers never see an inconsistent snapshot. Individual
-    // ingest_shard_with_bm25 calls skip the bump when a shared
-    // BM25 writer is in use.
-    let new_gen = state.bump_generation().context("bump generation")?;
-    tracing::info!(generation = new_gen, "generation bumped");
-
+    // Tally shard results BEFORE bumping generation so we can decide
+    // which per-tier generation markers are safe to advance. A shard
+    // with over.db-write-failed must not contribute to advancing the
+    // `over.generation` marker — readers will then see the drift and
+    // disable over.db routing until the next clean ingest.
     let mut total_ingested: u64 = 0;
     let mut total_failed: u64 = 0;
     let mut total_over_rows: u64 = 0;
@@ -245,6 +243,37 @@ fn main() -> Result<()> {
             }
         }
     }
+
+    // Bump generation ONCE, after BM25 commit + tid rebuild, so
+    // readers never see an inconsistent snapshot. Individual
+    // ingest_shard_with_bm25 calls skip the bump when a shared
+    // BM25 writer is in use.
+    let new_gen = state.bump_generation().context("bump generation")?;
+    tracing::info!(generation = new_gen, "generation bumped");
+
+    // Per-tier generation markers. Write the "over" marker only when
+    // every shard's over.db write succeeded — otherwise readers stay
+    // on the Parquet path until the next ingest reconciles.
+    if with_over && total_over_failed == 0 {
+        state
+            .set_tier_generation("over", new_gen)
+            .context("set over.generation marker")?;
+    } else if with_over {
+        tracing::warn!(
+            over_failed_shards = total_over_failed,
+            corpus_gen = new_gen,
+            "over.generation marker NOT advanced: readers will bypass over.db until reconciled"
+        );
+    }
+    state
+        .set_tier_generation("bm25", new_gen)
+        .context("set bm25.generation marker")?;
+    state
+        .set_tier_generation("trigram", new_gen)
+        .context("set trigram.generation marker")?;
+    state
+        .set_tier_generation("tid", new_gen)
+        .context("set tid.generation marker")?;
 
     tracing::info!(
         elapsed_secs = start.elapsed().as_secs_f64(),

@@ -33,6 +33,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use crate::error::{Error, Result};
 use crate::over::OverDb;
 use crate::schema as sc;
+use crate::state::State;
 
 /// One row's worth of metadata, flattened for consumption.
 #[derive(Debug, Clone, Default)]
@@ -113,7 +114,7 @@ impl Reader {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
         let data_dir = data_dir.as_ref().to_owned();
         let over_path = data_dir.join("over.db");
-        let over = if over_path.exists() {
+        let over = if over_path.exists() && Self::over_db_is_current(&data_dir) {
             match OverDb::open(&over_path) {
                 Ok(db) => {
                     tracing::debug!(
@@ -135,6 +136,51 @@ impl Reader {
             None
         };
         Self { data_dir, over }
+    }
+
+    /// Check whether over.db's per-tier generation marker matches the
+    /// corpus generation. If ingest wrote Parquet successfully but the
+    /// over.db insert_batch failed, the main generation advances while
+    /// the over.db marker stays behind — readers MUST bypass over.db
+    /// in that window or they'll return silently-incomplete results.
+    ///
+    /// Returns `true` when it's safe to use over.db:
+    ///   * both counters exist and match (healthy), OR
+    ///   * the corpus generation is 0 (fresh, no ingest yet — open
+    ///     over.db anyway; nothing to be stale against).
+    ///
+    /// A read error on either marker file returns `false` (fail safe:
+    /// if we can't verify the marker, don't trust over.db).
+    fn over_db_is_current(data_dir: &Path) -> bool {
+        let Ok(state) = State::new(data_dir) else {
+            return false;
+        };
+        let corpus_gen = match state.generation() {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "Reader: cannot read corpus generation; disabling over.db");
+                return false;
+            }
+        };
+        if corpus_gen == 0 {
+            return true;
+        }
+        let over_gen = match state.tier_generation("over") {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(error = %e, "Reader: cannot read over.generation; disabling over.db");
+                return false;
+            }
+        };
+        if over_gen < corpus_gen {
+            tracing::warn!(
+                over_gen,
+                corpus_gen,
+                "Reader: over.db generation behind corpus; disabling over.db until next ingest reconciles"
+            );
+            return false;
+        }
+        true
     }
 
     /// Borrow the optional over.db handle. `None` when the data dir
@@ -423,11 +469,23 @@ impl Reader {
         // over.db: indexed point lookup by message_id (sub-ms typical).
         // Cross-posts collapse to the freshest by date_unix_ns inside
         // OverDb::get, matching the mtime-DESC + dedup behavior the
-        // legacy Parquet scan provided. When over.db is present it
-        // is authoritative; SQL errors propagate (we don't paper over
-        // them with a 30-second Parquet rescan).
+        // legacy Parquet scan provided.
+        //
+        // Fall-through contract: a `Some(Ok(None))` from over.db means
+        // "row not in over.db", not "row not in the corpus". A partial
+        // ingest (Parquet success + over.db insert failure) leaves
+        // rows visible in Parquet but absent from over.db. Return the
+        // over.db hit when one exists; otherwise fall through to the
+        // Parquet scan so we don't silently swallow real rows.
         if let Some(res) = self.with_over(|db| db.get(&needle)) {
-            return res;
+            match res? {
+                Some(row) => return Ok(Some(row)),
+                None => {
+                    // Miss — fall through. The Reader-open check guards
+                    // against long-lived staleness; this guards against
+                    // a per-row inconsistency within a single generation.
+                }
+            }
         }
         let mut found: Option<MessageRow> = None;
         self.scan(
@@ -1072,27 +1130,36 @@ impl Reader {
         // `WHERE message_id IN (...)` lookup. The legacy path here
         // did a full Parquet scan (~3 minutes on the 29M-row corpus)
         // which is the bug Phase 3 exists to fix.
+        //
+        // Miss-fallback: any mid that tantivy returned but over.db
+        // doesn't have (partial-ingest drift) falls through to a
+        // single Parquet scan that filters just for those missing
+        // mids. Bounded: |missing| ≤ |top| ≤ limit.
         let ids: Vec<String> = top.iter().map(|(m, _)| m.clone()).collect();
+        let mut rows: Vec<MessageRow> = Vec::new();
+        let mut missing: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Some(res) = self.with_over(|db| db.get_many(&ids)) {
             let map = res?;
-            let mut scored: Vec<(MessageRow, f32)> = map
-                .into_iter()
-                .filter_map(|(mid, row)| wanted.get(&mid).map(|s| (row, *s)))
-                .collect();
-            scored
-                .sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(limit);
-            return Ok(scored);
+            for mid in &ids {
+                match map.get(mid) {
+                    Some(row) => rows.push(row.clone()),
+                    None => {
+                        missing.insert(mid.clone());
+                    }
+                }
+            }
+        } else {
+            missing.extend(ids.iter().cloned());
         }
-
-        let mut rows = Vec::new();
-        self.scan(
-            |r| wanted.contains_key(&r.message_id),
-            |r| {
-                rows.push(r);
-                true
-            },
-        )?;
+        if !missing.is_empty() {
+            self.scan(
+                |r| missing.contains(&r.message_id),
+                |r| {
+                    rows.push(r);
+                    true
+                },
+            )?;
+        }
         let mut scored: Vec<(MessageRow, f32)> = rows
             .into_iter()
             .filter_map(|r| wanted.get(&r.message_id).map(|s| (r, *s)))
@@ -1177,38 +1244,52 @@ impl Reader {
         candidates: &std::collections::HashSet<String>,
         list_filter: Option<&str>,
     ) -> Result<Vec<MessageRow>> {
+        let want_list = list_filter.map(str::to_owned);
+        let mut hits: Vec<MessageRow> = Vec::new();
+        let mut missing: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         if let Some(res) = self.with_over(|db| {
             let ids: Vec<String> = candidates.iter().cloned().collect();
             db.get_many(&ids)
         }) {
             let map = res?;
-            let want_list = list_filter.map(str::to_owned);
-            let out: Vec<MessageRow> = map
-                .into_values()
-                .filter(|r| match &want_list {
-                    Some(l) => &r.list == l,
-                    None => true,
-                })
-                .collect();
-            return Ok(out);
+            for mid in candidates {
+                match map.get(mid) {
+                    Some(row) => {
+                        // Apply list_filter at the over.db layer.
+                        if want_list.as_deref().is_none_or(|l| row.list == l) {
+                            hits.push(row.clone());
+                        }
+                    }
+                    None => {
+                        missing.insert(mid.clone());
+                    }
+                }
+            }
+        } else {
+            missing.extend(candidates.iter().cloned());
         }
 
-        let list_owned = list_filter.map(str::to_owned);
-        let mut hits = Vec::new();
-        self.scan(
-            |r| {
-                if let Some(ref lst) = list_owned
-                    && &r.list != lst
-                {
-                    return false;
-                }
-                candidates.contains(&r.message_id)
-            },
-            |r| {
-                hits.push(r);
-                true
-            },
-        )?;
+        // Miss-fallback: any candidate mid not in over.db falls through
+        // to a Parquet scan for just the missing IDs. Bounded to |missing|.
+        if !missing.is_empty() {
+            let list_owned = want_list.clone();
+            self.scan(
+                |r| {
+                    if let Some(ref lst) = list_owned
+                        && &r.list != lst
+                    {
+                        return false;
+                    }
+                    missing.contains(&r.message_id)
+                },
+                |r| {
+                    hits.push(r);
+                    true
+                },
+            )?;
+        }
         Ok(hits)
     }
 
@@ -2488,5 +2569,103 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
             .all_rows(Some("linux-cifs"), None, Some(100))
             .unwrap();
         assert_eq!(all.len(), 2);
+    }
+
+    // ---- Tier-consistency fixes (#1+#2) ----------------------------
+    //
+    // The three tests below lock in the hybrid fix documented in the
+    // research brief:
+    //   * per-tier generation marker guards against long-lived over.db
+    //     drift at Reader-open time;
+    //   * per-row fallback from over.db MISS to Parquet scan guards
+    //     against within-generation partial drift (e.g. a shard's
+    //     over.db INSERT failed while Parquet succeeded).
+
+    /// Reader must refuse to open over.db when its per-tier generation
+    /// marker is behind the corpus generation. Without this guard,
+    /// readers silently return stale/incomplete results from a
+    /// known-inconsistent over.db.
+    #[test]
+    fn reader_disables_over_db_when_marker_behind() {
+        use crate::over::OverDb;
+        use crate::state::State;
+
+        let dir = tempdir().unwrap();
+        let state = State::new(dir.path()).unwrap();
+
+        // Simulate: corpus generation advanced to 5, but the over.db
+        // marker is stuck at 3 (e.g. a shard's over.db write failed).
+        std::fs::write(dir.path().join("state").join("generation"), "5\n").unwrap();
+        state.set_tier_generation("over", 3).unwrap();
+        // Open an over.db so the file exists on disk.
+        let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
+
+        let reader = Reader::new(dir.path());
+        // over.db is present on disk but must NOT be used by Reader
+        // because the marker says it's stale.
+        assert!(
+            reader.over_db().is_none(),
+            "Reader opened stale over.db; marker=3 vs corpus=5"
+        );
+    }
+
+    /// Reader must use over.db when the marker is current.
+    #[test]
+    fn reader_uses_over_db_when_marker_current() {
+        use crate::over::OverDb;
+        use crate::state::State;
+
+        let dir = tempdir().unwrap();
+        let state = State::new(dir.path()).unwrap();
+        std::fs::write(dir.path().join("state").join("generation"), "5\n").unwrap();
+        state.set_tier_generation("over", 5).unwrap();
+        let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
+
+        let reader = Reader::new(dir.path());
+        assert!(
+            reader.over_db().is_some(),
+            "Reader disabled over.db despite marker being current"
+        );
+    }
+
+    /// fetch_message MUST fall through to Parquet on an over.db miss.
+    /// This is the core correctness fix: before, an over.db `Ok(None)`
+    /// return caused fetch_message to return Ok(None) itself, even
+    /// when the row was sitting in a Parquet file — silently dropping
+    /// real corpus rows inside the partial-ingest window.
+    #[test]
+    fn fetch_message_falls_through_to_parquet_on_over_db_miss() {
+        use crate::over::OverDb;
+        use crate::state::State;
+
+        // Build Parquet via the normal ingest path. This writes
+        // over.db rows too if we were to pass one through — but
+        // ingest_shard (the non-over variant) does not. So Parquet
+        // has rows, over.db is empty. That's our "partial" scenario.
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+
+        // Create an EMPTY over.db at the expected location, and mark
+        // it current so the Reader decides to use it.
+        let state = State::new(d.path()).unwrap();
+        let corpus_gen = state.generation().unwrap();
+        let _empty_db = OverDb::open(&d.path().join("over.db")).unwrap();
+        drop(_empty_db);
+        state.set_tier_generation("over", corpus_gen).unwrap();
+
+        let reader = Reader::new(d.path());
+        assert!(
+            reader.over_db().is_some(),
+            "sanity: Reader should have opened over.db in this scenario"
+        );
+
+        // over.db knows about zero rows. Without the fix this returns
+        // Ok(None) and the test would fail. With the fix the fallback
+        // Parquet scan kicks in and finds the real row.
+        let got = reader
+            .fetch_message("m1@x")
+            .unwrap()
+            .expect("fetch_message must fall through to Parquet on over.db miss");
+        assert_eq!(got.message_id, "m1@x");
     }
 }

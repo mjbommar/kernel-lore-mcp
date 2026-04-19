@@ -108,6 +108,51 @@ impl State {
         Ok(next)
     }
 
+    // --- Per-tier generation markers --------------------------------
+    //
+    // The top-level `generation` counter is bumped after a successful
+    // multi-tier ingest. But a single tier (e.g. over.db) can fail its
+    // write while Parquet / trigram / BM25 succeed — ingest.rs tolerates
+    // that and flags `over_failed`. Before per-tier markers existed,
+    // readers had no way to know "over.db is at generation N-1 while
+    // the corpus is at N"; they trusted over.db first and silently
+    // returned incomplete results.
+    //
+    // A tier marker is written by the ingest side AFTER that tier's
+    // commit succeeded. Readers compare the marker to the corpus
+    // generation on open; mismatch = tier is stale, fall back to
+    // Parquet. The "main" Parquet tier doesn't need its own marker
+    // (Parquet is the source of truth; its generation is the corpus
+    // generation by definition).
+
+    fn tier_generation_path(&self, tier: &str) -> PathBuf {
+        self.root.join(format!("{tier}.generation"))
+    }
+
+    /// Read the generation marker for `tier` (e.g. "over", "trigram",
+    /// "bm25", "tid"). `0` when no marker exists (fresh data_dir or
+    /// the tier has never been committed).
+    pub fn tier_generation(&self, tier: &str) -> Result<u64> {
+        match fs::read_to_string(self.tier_generation_path(tier)) {
+            Ok(s) => s
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| Error::State(format!("{tier}.generation parse: {e}"))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Set the generation marker for `tier` atomically. Call after
+    /// the tier's own commit (e.g. over.db transaction, tantivy
+    /// IndexWriter::commit) has succeeded.
+    pub fn set_tier_generation(&self, tier: &str, generation: u64) -> Result<()> {
+        atomic_write(
+            &self.tier_generation_path(tier),
+            format!("{generation}\n").as_bytes(),
+        )
+    }
+
     /// Acquire an exclusive writer lock. Returns a guard that releases
     /// on drop.
     ///
