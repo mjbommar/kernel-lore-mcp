@@ -94,11 +94,19 @@ pub fn parse_message(bytes: &[u8], commit_date_unix_ns: Option<i64>) -> ParsedMe
         if let Ok(parsed) =
             time::OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339)
         {
-            out.date_unix_ns = Some(parsed.unix_timestamp_nanos() as i64);
+            let ns = parsed.unix_timestamp_nanos() as i64;
+            if is_plausible_message_date(ns) {
+                out.date_unix_ns = Some(ns);
+            }
+            // else: reject the parsed date as implausible — some
+            // MUAs / patchwork artifacts leave the Date: header
+            // garbled, producing dates hundreds of years in the
+            // future or past. We fall through to the commit-date
+            // fallback below.
         }
     }
     // Fallback: use the git commit's author date when the RFC822
-    // Date: header is missing or unparseable.
+    // Date: header is missing, unparseable, or implausible.
     if out.date_unix_ns.is_none() {
         out.date_unix_ns = commit_date_unix_ns;
     }
@@ -150,6 +158,31 @@ pub fn minimal_headers_only(bytes: &[u8]) -> Option<String> {
         .lines()
         .next()
         .map(String::from)
+}
+
+/// True when `ns` is a Unix-epoch nanosecond timestamp inside the
+/// window where a kernel mailing-list message could plausibly have
+/// been sent. Rejects the two observed garbage shapes we see in
+/// the corpus:
+///   * dates in the 1850s (typically negative-timestamp parse
+///     artifacts — mail-parser returning a sentinel the caller
+///     didn't catch, or an RFC822 parse that silently wrapped).
+///   * dates in the far future (2040s through 2180s — the ones we
+///     saw come from message-ids of the form "20770915-..." where
+///     the leading "20770915" gets treated as a YYYYMMDD-like
+///     timestamp by some tools).
+///
+/// Lower bound: 1990-01-01. No kernel mailing list predates this.
+/// Upper bound: now + 7 days. Tolerance for one-week clock skew
+/// between senders and our ingest box without dropping real mail.
+fn is_plausible_message_date(ns: i64) -> bool {
+    const MIN_NS: i64 = 631_152_000_000_000_000; // 1990-01-01 UTC
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i64)
+        .unwrap_or(i64::MAX);
+    let upper = now_ns.saturating_add(7 * 86_400 * 1_000_000_000);
+    ns >= MIN_NS && ns <= upper
 }
 
 fn strip_angles(s: &str) -> &str {
@@ -493,6 +526,55 @@ fn trailing_identifier(s: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn implausible_future_date_rejected() {
+        // "Date: Sun, 15 Sep 2077 00:13:51 +0000" — observed in the
+        // real corpus from a patchwork-id-style message.
+        let bytes = b"\
+From: Alice <alice@example.com>\r\n\
+Subject: [PATCH] x\r\n\
+Date: Sun, 15 Sep 2077 00:13:51 +0000\r\n\
+Message-ID: <20770915-nolibc@x>\r\n\
+\r\n\
+body\r\n";
+        let p = parse_message(bytes, Some(1_700_000_000_000_000_000));
+        // Date header parsed to 2077 → rejected; fallback to
+        // commit date.
+        assert_eq!(p.date_unix_ns, Some(1_700_000_000_000_000_000));
+    }
+
+    #[test]
+    fn implausible_past_date_rejected() {
+        // "Date: Sat, 3 Sep 1853 01:11:18 +0000" — similar shape,
+        // observed in the corpus from a broken parser earlier.
+        let bytes = b"\
+From: Alice <alice@example.com>\r\n\
+Subject: [PATCH] x\r\n\
+Date: Sat, 3 Sep 1853 01:11:18 +0000\r\n\
+Message-ID: <x@y>\r\n\
+\r\n\
+body\r\n";
+        let p = parse_message(bytes, Some(1_700_000_000_000_000_000));
+        assert_eq!(p.date_unix_ns, Some(1_700_000_000_000_000_000));
+    }
+
+    #[test]
+    fn normal_date_accepted() {
+        let bytes = b"\
+From: Alice <alice@example.com>\r\n\
+Subject: [PATCH] x\r\n\
+Date: Mon, 14 Apr 2026 19:15:33 +0000\r\n\
+Message-ID: <x@y>\r\n\
+\r\n\
+body\r\n";
+        let p = parse_message(bytes, None);
+        assert!(p.date_unix_ns.is_some());
+        let ns = p.date_unix_ns.unwrap();
+        // 2026-04-14 UTC ≈ 1.776e18 ns.
+        assert!(ns > 1_770_000_000_000_000_000);
+        assert!(ns < 1_780_000_000_000_000_000);
+    }
 
     const SAMPLE_PATCH: &[u8] = b"\
 From: Alice <alice@example.com>\r\n\

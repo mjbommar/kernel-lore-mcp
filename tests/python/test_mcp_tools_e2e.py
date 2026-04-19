@@ -259,6 +259,21 @@ async def test_lore_maintainer_profile_with_maintainers_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_lore_author_profile_include_mentions(client: Client) -> None:
+    """With include_mentions=True, carol (reviewer on fixture patches)
+    should show zero authored_count but non-zero mention_count."""
+    result = await client.call_tool(
+        "lore_author_profile",
+        {"addr": "carol@example.com", "include_mentions": True},
+    )
+    data = result.data
+    assert data.addr_queried == "carol@example.com"
+    assert data.authored_count == 0
+    assert data.mention_count >= 1
+    assert data.sampled == data.authored_count + data.mention_count
+
+
+@pytest.mark.asyncio
 async def test_lore_author_profile_rejects_non_email(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 

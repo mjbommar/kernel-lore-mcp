@@ -127,6 +127,8 @@ class Reader:
         list: str | None = ...,
         since_unix_ns: int | None = ...,
         limit: int = ...,
+        include_mentions: bool = ...,
+        mention_limit: int = ...,
     ) -> dict[str, Any]: ...
     def maintainer_profile(
         self,

@@ -447,8 +447,19 @@ impl PyReader {
     }
 
     /// Aggregate profile for one author. Samples their most-recent
-    /// `limit` messages via the indexed from_addr path.
-    #[pyo3(signature = (addr, list=None, since_unix_ns=None, limit=10_000))]
+    /// `limit` messages via the indexed from_addr path. Optionally
+    /// expands scope with `include_mentions=True` to also aggregate
+    /// rows where the address appears in any trailer on someone
+    /// else's patch (bounded by `mention_limit`, one extra Parquet
+    /// scan — slower, matches what a full-text search on lore shows).
+    #[pyo3(signature = (
+        addr,
+        list=None,
+        since_unix_ns=None,
+        limit=10_000,
+        include_mentions=false,
+        mention_limit=2_000,
+    ))]
     fn author_profile<'py>(
         &self,
         py: Python<'py>,
@@ -456,15 +467,25 @@ impl PyReader {
         list: Option<String>,
         since_unix_ns: Option<i64>,
         limit: usize,
+        include_mentions: bool,
+        mention_limit: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
         let profile = py.detach(|| {
-            self.inner
-                .author_profile(&addr, list.as_deref(), since_unix_ns, limit)
+            self.inner.author_profile_extended(
+                &addr,
+                list.as_deref(),
+                since_unix_ns,
+                limit,
+                include_mentions,
+                mention_limit,
+            )
         })?;
 
         let d = PyDict::new(py);
         d.set_item("addr_queried", &profile.addr_queried)?;
         d.set_item("sampled", profile.sampled)?;
+        d.set_item("authored_count", profile.authored_count)?;
+        d.set_item("mention_count", profile.mention_count)?;
         d.set_item("limit_hit", profile.limit_hit)?;
         d.set_item("oldest_unix_ns", profile.oldest_unix_ns)?;
         d.set_item("newest_unix_ns", profile.newest_unix_ns)?;

@@ -954,14 +954,77 @@ impl Reader {
         since_unix_ns: Option<i64>,
         limit: usize,
     ) -> Result<AuthorProfile> {
-        let rows = self.eq(EqField::FromAddr, addr, since_unix_ns, list_filter, limit)?;
-        let sampled = rows.len() as u64;
+        self.author_profile_inner(addr, list_filter, since_unix_ns, limit, false, 0)
+    }
+
+    /// Same as `author_profile`, but optionally ALSO aggregates rows
+    /// where `addr` appears in any trailer (reviewed_by / acked_by /
+    /// ...) on someone else's patch. The expanded view matches what
+    /// a full-text search on lore would show; the cost is one extra
+    /// Parquet scan bounded by `mention_limit`.
+    pub fn author_profile_extended(
+        &self,
+        addr: &str,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+        include_mentions: bool,
+        mention_limit: usize,
+    ) -> Result<AuthorProfile> {
+        self.author_profile_inner(
+            addr,
+            list_filter,
+            since_unix_ns,
+            limit,
+            include_mentions,
+            mention_limit,
+        )
+    }
+
+    fn author_profile_inner(
+        &self,
+        addr: &str,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+        include_mentions: bool,
+        mention_limit: usize,
+    ) -> Result<AuthorProfile> {
+        let mut rows = self.eq(EqField::FromAddr, addr, since_unix_ns, list_filter, limit)?;
+        let authored_count = rows.len() as u64;
         let limit_hit = (rows.len() >= limit) && limit > 0;
+
+        // Dedup set keyed by message_id so mentions don't double-count
+        // rows we already have as authored.
+        let mut seen: std::collections::HashSet<String> =
+            rows.iter().map(|r| r.message_id.clone()).collect();
+        let mut mentions_count: u64 = 0;
+        let mut mention_limit_hit = false;
+
+        if include_mentions && mention_limit > 0 {
+            let mention_rows = self.trailer_mentions(
+                addr,
+                list_filter,
+                since_unix_ns,
+                mention_limit,
+            )?;
+            mention_limit_hit = mention_rows.len() >= mention_limit;
+            for r in mention_rows {
+                if seen.insert(r.message_id.clone()) {
+                    rows.push(r);
+                    mentions_count += 1;
+                }
+            }
+        }
+
+        let sampled = rows.len() as u64;
 
         let mut out = AuthorProfile {
             addr_queried: addr.to_owned(),
             sampled,
-            limit_hit,
+            limit_hit: limit_hit || mention_limit_hit,
+            authored_count,
+            mention_count: mentions_count,
             ..AuthorProfile::default()
         };
 
@@ -1026,6 +1089,48 @@ impl Reader {
         subs.sort_by_key(|s| std::cmp::Reverse(s.patches));
         out.subsystems = subs;
 
+        Ok(out)
+    }
+
+    /// Find messages that MENTION `addr` in any common trailer
+    /// (signed_off_by, reviewed_by, acked_by, tested_by,
+    /// co_developed_by, reported_by, suggested_by, helped_by,
+    /// assisted_by). One Parquet scan — not one per trailer kind.
+    ///
+    /// `author_profile(include_mentions=true)` uses this to expand
+    /// beyond "messages you authored" to "messages that name you".
+    /// Inherently O(corpus) without a reverse-trailer index; narrow
+    /// with `list_filter` + `since_unix_ns` when possible.
+    pub fn trailer_mentions(
+        &self,
+        addr: &str,
+        list_filter: Option<&str>,
+        since_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let needle_lc = addr.to_ascii_lowercase();
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned
+                    && &r.list != l
+                {
+                    return false;
+                }
+                if let Some(t) = since_unix_ns
+                    && r.date_unix_ns.is_some_and(|d| d < t)
+                {
+                    return false;
+                }
+                any_trailer_contains_email(r, &needle_lc)
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit
+            },
+        )?;
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
         Ok(out)
     }
 
@@ -1939,6 +2044,12 @@ pub struct AuthorProfile {
     pub addr_queried: String,
     /// How many rows the aggregation walked. Capped by `limit`.
     pub sampled: u64,
+    /// Subset of `sampled` where the author was the From: address.
+    pub authored_count: u64,
+    /// Subset of `sampled` that came from `include_mentions` —
+    /// rows where the author appeared in a trailer on someone
+    /// else's patch. Always 0 when `include_mentions=false`.
+    pub mention_count: u64,
     /// `true` when `sampled == limit`; caller may be looking at a
     /// recent-only slice of a prolific author's history.
     pub limit_hit: bool,
@@ -2035,6 +2146,32 @@ pub struct MaintainerProfile {
     pub active_unlisted: Vec<ObservedAddr>,
     /// How many messages matched the path-in-window query.
     pub sampled_patches: u64,
+}
+
+/// True when `addr_lc` (pre-lowercased email) appears in any of
+/// the common trailer arrays of `row`. Used by `trailer_mentions`.
+/// We compare via lowercase substring so "Alice <ALICE@X>" matches
+/// the canonical "alice@x" form.
+fn any_trailer_contains_email(row: &MessageRow, addr_lc: &str) -> bool {
+    let lists: [&[String]; 9] = [
+        &row.signed_off_by,
+        &row.reviewed_by,
+        &row.acked_by,
+        &row.tested_by,
+        &row.co_developed_by,
+        &row.reported_by,
+        &row.suggested_by,
+        &row.helped_by,
+        &row.assisted_by,
+    ];
+    for l in lists {
+        for t in l {
+            if t.to_ascii_lowercase().contains(addr_lc) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Extract `user@host` from a "Name <email>" style string. Returns
@@ -2950,6 +3087,48 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let prof = r.author_profile("alice@example.com", None, None, 1).unwrap();
         assert_eq!(prof.sampled, 1);
         assert!(prof.limit_hit);
+    }
+
+    #[test]
+    fn author_profile_include_mentions_finds_trailer_rows() {
+        // The sample corpus has alice@example.com authoring 2 patches
+        // with carol@example.com in Reviewed-by on at least one.
+        // Default scope: carol has 0 authored, 0 mentions.
+        // Extended scope: carol picks up the Reviewed-by rows.
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+
+        let default_scope = r
+            .author_profile("carol@example.com", None, None, 1000)
+            .unwrap();
+        assert_eq!(default_scope.sampled, 0);
+        assert_eq!(default_scope.authored_count, 0);
+        assert_eq!(default_scope.mention_count, 0);
+
+        let extended = r
+            .author_profile_extended(
+                "carol@example.com",
+                None,
+                None,
+                1000,
+                true,
+                500,
+            )
+            .unwrap();
+        assert!(
+            extended.mention_count >= 1,
+            "extended scope must pick up reviewed_by mentions; got {}",
+            extended.mention_count
+        );
+        assert_eq!(
+            extended.authored_count, 0,
+            "carol still shouldn't be counted as author"
+        );
+        assert_eq!(
+            extended.sampled,
+            extended.authored_count + extended.mention_count
+        );
     }
 
     #[test]

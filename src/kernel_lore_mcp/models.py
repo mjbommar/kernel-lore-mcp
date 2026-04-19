@@ -308,6 +308,18 @@ class AuthorProfileResponse(BaseModel):
     sampled: int = Field(
         description="How many rows were aggregated. Capped by the limit parameter."
     )
+    authored_count: int = Field(
+        default=0,
+        description="Subset of `sampled` where the address was the From: (authored).",
+    )
+    mention_count: int = Field(
+        default=0,
+        description=(
+            "Subset of `sampled` that came from the expanded scope "
+            "(appearing in a trailer on someone else's patch). Always "
+            "zero when `include_mentions=False`."
+        ),
+    )
     limit_hit: bool = Field(
         description=(
             "True when `sampled == limit`; the caller may be seeing a "

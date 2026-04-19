@@ -81,6 +81,31 @@ async def lore_author_profile(
             ),
         ),
     ] = 10_000,
+    include_mentions: Annotated[
+        bool,
+        Field(
+            description=(
+                "When True, also aggregate messages where the address "
+                "appears in any trailer (signed_off_by / reviewed_by / "
+                "acked_by / tested_by / co_developed_by / reported_by / "
+                "suggested_by / helped_by / assisted_by) on someone "
+                "else's patch. Matches what a full-text lore search "
+                "would show. Costs one extra Parquet scan — slower, "
+                "bounded by `mention_limit`."
+            ),
+        ),
+    ] = False,
+    mention_limit: Annotated[
+        int,
+        Field(
+            ge=100,
+            le=20_000,
+            description=(
+                "Upper cap on mention-scope rows. Ignored when "
+                "`include_mentions=False`."
+            ),
+        ),
+    ] = 2_000,
 ) -> AuthorProfileResponse:
     """Aggregate profile for messages authored by `addr`.
 
@@ -107,6 +132,8 @@ async def lore_author_profile(
         list_filter,
         since_unix_ns,
         limit,
+        include_mentions,
+        mention_limit,
         echoed_input={"addr": addr},
     )
 
@@ -125,6 +152,8 @@ async def lore_author_profile(
     return AuthorProfileResponse(
         addr_queried=raw["addr_queried"],
         sampled=raw["sampled"],
+        authored_count=raw.get("authored_count", raw["sampled"]),
+        mention_count=raw.get("mention_count", 0),
         limit_hit=raw["limit_hit"],
         oldest_unix_ns=raw.get("oldest_unix_ns"),
         newest_unix_ns=raw.get("newest_unix_ns"),
