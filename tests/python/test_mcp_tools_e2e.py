@@ -102,6 +102,31 @@ async def test_lore_author_profile_unknown_addr_empty(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_stable_backport_status_rejects_non_hex(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool("lore_stable_backport_status", {"sha": "not-a-sha"})
+    assert "invalid_argument" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_lore_stable_backport_status_unknown_sha_no_evidence(client: Client) -> None:
+    """On the synthetic corpus there's no stable/stable-commits data;
+    the tool should return a structured `no_evidence` result with the
+    honest caveat, not an error."""
+    result = await client.call_tool(
+        "lore_stable_backport_status",
+        {"sha": "deadbeef01234567"},
+    )
+    data = result.data
+    assert data.sha_queried == "deadbeef01234567"
+    assert data.status in {"no_evidence", "pending", "picked_up"}
+    # The caveat must mention linux-stable.git limitation explicitly.
+    assert "linux-stable" in data.caveat or "lore-only" in data.caveat
+
+
+@pytest.mark.asyncio
 async def test_lore_maintainer_profile_without_maintainers_file(client: Client) -> None:
     """Without a MAINTAINERS snapshot in data_dir, the tool must
     return `maintainers_available: False` but still report observed

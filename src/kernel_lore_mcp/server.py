@@ -84,6 +84,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
     from kernel_lore_mcp.tools.search import lore_search
     from kernel_lore_mcp.tools.series import lore_series_timeline
+    from kernel_lore_mcp.tools.stable_backport import lore_stable_backport_status
     from kernel_lore_mcp.tools.thread import lore_thread
 
     # Every tool shares the same four-annotation shape. Corpus grows
@@ -126,6 +127,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(
         lore_maintainer_profile,
         annotations=ann("Declared vs. observed ownership for a kernel path"),
+    )
+    mcp.tool(
+        lore_stable_backport_status,
+        annotations=ann("Was this mainline SHA picked up by -stable?"),
     )
 
     # Embedding tier (Phase 8). Both tools fail loudly with an
