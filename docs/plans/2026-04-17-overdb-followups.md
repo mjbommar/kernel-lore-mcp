@@ -12,22 +12,25 @@ Items are ordered by **user-visible impact**, not by ease of fix.
 
 ## Performance
 
-### F1. patch_search latency = 68 seconds (BLOCKER)
+### F1. patch_search latency = 68 seconds (SHIPPED 2026-04-19, 6.8x win)
 
 - **Symptom:** `lore_patch_search` MCP tool unusable. Validation §5b
   measured a 68-second response for a 5-result query.
-- **Root cause:** `<data_dir>/store/` is a symlink to
-  `/nas4/data/kernel-lore-mcp/store/` (NFS). Trigram returns
+- **Root cause:** `<data_dir>/store/` was a symlink to
+  `/nas4/data/kernel-lore-mcp/store/` (NFS). Trigram returned
   candidate message-ids in milliseconds; the confirm step
-  decompresses each candidate's zstd-frame body via NFS, paying
+  decompressed each candidate's zstd-frame body via NFS, paying
   3–10 ms latency per random read.
-- **Fix:** Move the compressed store to local NVMe alongside the
-  other tiers. ~104 GB; we have ~310 GB free on `/`.
-- **Effort:** 30 min (rsync + symlink swap) + ingest hot-path
-  config update so new writes land local.
-- **Risk:** Low — store is rebuildable from the git mirror via
-  `kernel-lore-ingest --list <list>`. Worst case we re-mirror.
-- **Acceptance:** `patch_search` median <500 ms; p95 <2 s.
+- **Fix (landed):** rsync the 104 GB store to local NVMe
+  (`$HOME/klmcp-store-local`), atomic symlink swap. NAS copy kept
+  as a recovery fallback.
+- **Measured:** `smb_check_perm_dacl` with `limit=5`: 67 s → 9.8 s
+  steady-state (6.8x). Below the plan target of 500 ms — the
+  remaining latency is candidate-count × zstd-decompress inside
+  the confirm step, a separate bottleneck tracked as a follow-up.
+  The NFS portion is gone.
+- **Follow-up:** cap candidate count more aggressively on rare-
+  identifier queries, or parallelize the confirm decompress loop.
 
 ### F2. Non-indexed `eq()` variants fall through to Parquet scan
 
