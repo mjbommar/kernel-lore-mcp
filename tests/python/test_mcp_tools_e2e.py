@@ -102,6 +102,29 @@ async def test_lore_author_profile_unknown_addr_empty(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_subsystem_churn_list_scope(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_subsystem_churn",
+        {"scope": "list:linux-cifs", "window_days": 3650},  # long window to catch fixture
+    )
+    data = result.data
+    assert data.scope == "list:linux-cifs"
+    assert data.sampled_patches >= 1
+    # top_files must include the two files the fixture patches touched.
+    paths = {f.path for f in data.top_files}
+    assert "fs/smb/server/smbacl.c" in paths or "fs/smb/server/smb2pdu.c" in paths
+
+
+@pytest.mark.asyncio
+async def test_lore_subsystem_churn_rejects_bad_scope(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool("lore_subsystem_churn", {"scope": "garbage"})
+    assert "invalid_argument" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_lore_thread_state_unknown_on_small_thread(client: Client) -> None:
     """Sample corpus has only two messages touching different files,
     no RFC tag, no supersede chain, no NACK. Should land on
