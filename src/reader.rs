@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use arrow::array::{
     Array, BooleanArray, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
@@ -108,6 +108,18 @@ const MAX_PATCH_CANDIDATES: usize = 100_000;
 pub struct Reader {
     data_dir: PathBuf,
     over: Option<Arc<Mutex<OverDb>>>,
+    /// Per-list read-only Store cache. Patch-search confirmation and
+    /// prose-body fetches re-open the same per-list Store on every
+    /// query; `Store::open` does `fs::create_dir_all` + `SegmentWriter`
+    /// init (reads the dir to find the active segment). Caching
+    /// amortizes that across the Reader's lifetime.
+    stores: RwLock<HashMap<String, Arc<crate::store::Store>>>,
+    /// Lazily-opened BM25 reader. Opening the tantivy `Index` and
+    /// constructing an `IndexReader` is hundreds of milliseconds on
+    /// a cold OS page cache; doing it on every `prose_search` call
+    /// was a hot-path bug. Inner reader holds the shared IndexReader
+    /// and a `last_reloaded_generation` atomic — see `bm25::BmReader`.
+    bm25: RwLock<Option<Arc<crate::bm25::BmReader>>>,
 }
 
 impl Reader {
@@ -135,7 +147,72 @@ impl Reader {
         } else {
             None
         };
-        Self { data_dir, over }
+        Self {
+            data_dir,
+            over,
+            stores: RwLock::new(HashMap::new()),
+            bm25: RwLock::new(None),
+        }
+    }
+
+    /// Return a shared `BmReader`, opening (and caching) it on first
+    /// call. Subsequent calls return the same handle; each call also
+    /// triggers a `maybe_reload` so the reader picks up new segments
+    /// whenever the generation file has advanced since the last query.
+    fn bm25(&self) -> Result<Arc<crate::bm25::BmReader>> {
+        if let Ok(guard) = self.bm25.read()
+            && let Some(ref r) = *guard
+        {
+            let r = Arc::clone(r);
+            if let Ok(gen_val) = self.generation() {
+                r.maybe_reload(gen_val)?;
+            }
+            return Ok(r);
+        }
+        let mut guard = self
+            .bm25
+            .write()
+            .map_err(|_| Error::State("bm25 cache poisoned".to_owned()))?;
+        if let Some(ref r) = *guard {
+            let r = Arc::clone(r);
+            if let Ok(gen_val) = self.generation() {
+                r.maybe_reload(gen_val)?;
+            }
+            return Ok(r);
+        }
+        let fresh = Arc::new(crate::bm25::BmReader::open(&self.data_dir)?);
+        if let Ok(gen_val) = self.generation() {
+            fresh.maybe_reload(gen_val)?;
+        }
+        *guard = Some(Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Return an `Arc<Store>` for `list`, opening it on first access
+    /// and caching the handle for subsequent query-path reads. The
+    /// Store's internal `SegmentWriter` is unused on this path — read
+    /// queries only call `read_at`. Safe to share across threads:
+    /// `Store::read_at` opens a fresh `File` per call and doesn't
+    /// touch the writer lock.
+    fn store_for(&self, list: &str) -> Result<Arc<crate::store::Store>> {
+        // Fast path: reader lock, clone out the Arc.
+        if let Ok(guard) = self.stores.read()
+            && let Some(s) = guard.get(list)
+        {
+            return Ok(Arc::clone(s));
+        }
+        // Slow path: upgrade to writer, check-then-insert so a racing
+        // second caller doesn't open a duplicate Store.
+        let mut guard = self
+            .stores
+            .write()
+            .map_err(|_| Error::State("store cache poisoned".to_owned()))?;
+        if let Some(s) = guard.get(list) {
+            return Ok(Arc::clone(s));
+        }
+        let store = Arc::new(crate::store::Store::open(&self.data_dir, list)?);
+        guard.insert(list.to_owned(), Arc::clone(&store));
+        Ok(store)
     }
 
     /// Check whether over.db's per-tier generation marker matches the
@@ -145,12 +222,17 @@ impl Reader {
     /// in that window or they'll return silently-incomplete results.
     ///
     /// Returns `true` when it's safe to use over.db:
-    ///   * both counters exist and match (healthy), OR
-    ///   * the corpus generation is 0 (fresh, no ingest yet — open
-    ///     over.db anyway; nothing to be stale against).
+    ///   * marker exists AND matches (or exceeds) the corpus generation;
+    ///   * marker file does NOT exist — a legacy deployment ingested
+    ///     before per-tier markers shipped. We honor backward-compat
+    ///     and trust over.db; the next ingest with the new code will
+    ///     start writing markers and kick in strict checking;
+    ///   * the corpus generation is 0 (fresh data_dir, nothing to
+    ///     be stale against).
     ///
-    /// A read error on either marker file returns `false` (fail safe:
-    /// if we can't verify the marker, don't trust over.db).
+    /// Returns `false` only when the marker is PRESENT and behind.
+    /// That's a positive signal of drift, not a missing/unknown
+    /// state. Any read error also returns `false` (fail safe).
     fn over_db_is_current(data_dir: &Path) -> bool {
         let Ok(state) = State::new(data_dir) else {
             return false;
@@ -165,22 +247,28 @@ impl Reader {
         if corpus_gen == 0 {
             return true;
         }
-        let over_gen = match state.tier_generation("over") {
-            Ok(g) => g,
+        match state.tier_generation("over") {
+            Ok(None) => {
+                // Legacy deployment — no marker file. Trust over.db;
+                // operators running the new ingest will get strict
+                // marker-based coherence once the first post-upgrade
+                // ingest completes.
+                true
+            }
+            Ok(Some(over_gen)) if over_gen >= corpus_gen => true,
+            Ok(Some(over_gen)) => {
+                tracing::warn!(
+                    over_gen,
+                    corpus_gen,
+                    "Reader: over.db generation behind corpus; disabling over.db until next ingest reconciles"
+                );
+                false
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Reader: cannot read over.generation; disabling over.db");
-                return false;
+                false
             }
-        };
-        if over_gen < corpus_gen {
-            tracing::warn!(
-                over_gen,
-                corpus_gen,
-                "Reader: over.db generation behind corpus; disabling over.db until next ingest reconciles"
-            );
-            return false;
         }
-        true
     }
 
     /// Borrow the optional over.db handle. `None` when the data dir
@@ -1116,8 +1204,7 @@ impl Reader {
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<(MessageRow, f32)>> {
-        use crate::bm25::BmReader;
-        let bm = BmReader::open(&self.data_dir)?;
+        let bm = self.bm25()?;
         let top = bm.search_filtered(query, list_filter, limit)?;
         if top.is_empty() {
             return Ok(Vec::new());
@@ -1221,7 +1308,7 @@ impl Reader {
         // Confirm: decompress + byte-scan. Dropping ambiguous hits.
         let mut confirmed = Vec::new();
         for row in hits {
-            let store = crate::store::Store::open(&self.data_dir, &row.list)?;
+            let store = self.store_for(&row.list)?;
             let body = store.read_at(row.body_segment_id, row.body_offset)?;
             if memchr::memmem::find(&body, &needle_bytes).is_some() {
                 confirmed.push(row);
@@ -1340,7 +1427,7 @@ impl Reader {
 
         let mut confirmed = Vec::new();
         for row in hits {
-            let store = crate::store::Store::open(&self.data_dir, &row.list)?;
+            let store = self.store_for(&row.list)?;
             let body = store.read_at(row.body_segment_id, row.body_offset)?;
             let is_match = if fuzzy_edits == 0 {
                 memchr::memmem::find(&body, &needle_bytes).is_some()
@@ -1381,7 +1468,7 @@ impl Reader {
         // segment 0, which is what we write at v0.5 (no rollover in tests).
         // TODO(phase-2): add `segment_id` column to metadata so we aren't
         // relying on this convention on the reader side.
-        let store = crate::store::Store::open(&self.data_dir, &row.list)?;
+        let store = self.store_for(&row.list)?;
         let body = store.read_at(row.body_segment_id, row.body_offset)?;
         Ok(Some(body))
     }
@@ -2626,6 +2713,43 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
             reader.over_db().is_some(),
             "Reader disabled over.db despite marker being current"
         );
+    }
+
+    /// Backward-compat: a legacy deployment has a corpus generation
+    /// advanced past 0 but never wrote per-tier marker files. The
+    /// Reader must NOT disable over.db in that case — the missing
+    /// marker is "pre-upgrade state", not "known drift". Strict
+    /// checking kicks in only after the first post-upgrade ingest
+    /// writes the marker.
+    #[test]
+    fn reader_uses_over_db_when_marker_absent_but_corpus_nonzero() {
+        use crate::over::OverDb;
+
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+        std::fs::write(dir.path().join("state").join("generation"), "17\n").unwrap();
+        // Deliberately do NOT write state/over.generation.
+        let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
+
+        let reader = Reader::new(dir.path());
+        assert!(
+            reader.over_db().is_some(),
+            "Reader must trust over.db on a legacy deployment (corpus advanced, no tier marker yet)"
+        );
+    }
+
+    /// Repeated Store opens for the same list resolve to the same
+    /// underlying cached handle. Not a perf test (hard to measure
+    /// without a bench harness on this box) — an identity check that
+    /// pins the cache contract.
+    #[test]
+    fn store_cache_returns_same_handle() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let reader = Reader::new(d.path());
+        let a = reader.store_for("linux-cifs").unwrap();
+        let b = reader.store_for("linux-cifs").unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "store cache returned a new Store");
     }
 
     /// fetch_message MUST fall through to Parquet on an over.db miss.

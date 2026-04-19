@@ -246,6 +246,19 @@ impl BmWriter {
 pub struct BmReader {
     index: Index,
     schema: BmSchema,
+    /// Cached `IndexReader`. Construction of this field is expensive
+    /// (opens all segment readers, mmap-registers files); `reload()`
+    /// on an existing reader is cheap (reads only new segment meta).
+    /// Before this field existed, `search_filtered` called
+    /// `reader_builder().try_into()` on every query — paying the
+    /// full open cost on the hot path.
+    reader: tantivy::IndexReader,
+    /// Last generation we reloaded at. `maybe_reload` compares against
+    /// the current `state/generation` counter and only calls
+    /// `reader.reload()` when it advanced. Wrapped in `AtomicU64` so
+    /// a `&self` search method can bump it after a successful reload
+    /// without needing interior mutability on the whole struct.
+    last_reloaded_generation: std::sync::atomic::AtomicU64,
 }
 
 impl BmReader {
@@ -257,11 +270,42 @@ impl BmReader {
         let (schema, bm) = build_schema();
         let index = Index::open_or_create(mmap, schema)?;
         register_analyzers(&index);
-        Ok(Self { index, schema: bm })
+        let reader = index
+            .reader_builder()
+            .reload_policy(tantivy::ReloadPolicy::Manual)
+            .try_into()?;
+        Ok(Self {
+            index,
+            schema: bm,
+            reader,
+            last_reloaded_generation: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
     pub fn schema(&self) -> BmSchema {
         self.schema
+    }
+
+    /// Reload the IndexReader iff `current_generation` is strictly
+    /// greater than the one we last reloaded at. `generation` is
+    /// `State::generation()` — a stat on `state/generation`, cheap.
+    /// Callers (the Reader's prose_search path) check the generation
+    /// file once per query and pass it here.
+    pub fn maybe_reload(&self, current_generation: u64) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let seen = self.last_reloaded_generation.load(Ordering::Acquire);
+        if current_generation > seen {
+            self.reader.reload()?;
+            // Use compare-exchange to avoid a reader racing to an older
+            // generation; last-writer-wins is fine if both are up-to-date.
+            let _ = self.last_reloaded_generation.compare_exchange(
+                seen,
+                current_generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
+        Ok(())
     }
 
     /// Run a free-text query against `body_prose` + `subject_normalized`
@@ -297,13 +341,12 @@ impl BmReader {
             ));
         }
 
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(tantivy::ReloadPolicy::Manual)
-            .try_into()?;
-        reader.reload()?;
-        let searcher = reader.searcher();
+        // Use the cached reader. Callers responsible for `maybe_reload`
+        // before hitting us — that's a Reader-layer concern (it owns
+        // the generation file stat). If a caller skips it, worst case
+        // is serving the last-reloaded snapshot of the index, which is
+        // still a valid query answer.
+        let searcher = self.reader.searcher();
 
         let parser = QueryParser::for_index(
             &self.index,

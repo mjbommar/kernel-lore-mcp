@@ -130,15 +130,23 @@ impl State {
     }
 
     /// Read the generation marker for `tier` (e.g. "over", "trigram",
-    /// "bm25", "tid"). `0` when no marker exists (fresh data_dir or
-    /// the tier has never been committed).
-    pub fn tier_generation(&self, tier: &str) -> Result<u64> {
+    /// "bm25", "tid").
+    ///
+    /// Returns:
+    ///   * `Ok(Some(n))` — marker file exists and parses as a u64.
+    ///   * `Ok(None)`   — marker file does NOT exist. This is the
+    ///     legacy-deployment signal: pre-marker ingests never wrote
+    ///     the file, so its absence is "don't know", not "stale".
+    ///     Readers interpret this as backward-compatibility fallback.
+    ///   * `Err(...)`   — IO or parse failure.
+    pub fn tier_generation(&self, tier: &str) -> Result<Option<u64>> {
         match fs::read_to_string(self.tier_generation_path(tier)) {
             Ok(s) => s
                 .trim()
                 .parse::<u64>()
+                .map(Some)
                 .map_err(|e| Error::State(format!("{tier}.generation parse: {e}"))),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
         }
     }
