@@ -60,6 +60,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.activity import lore_activity
     from kernel_lore_mcp.tools.author_profile import lore_author_profile
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
+    from kernel_lore_mcp.tools.file_timeline import lore_file_timeline
     from kernel_lore_mcp.tools.maintainer_profile import lore_maintainer_profile
     from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.message import lore_message
@@ -131,6 +132,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     mcp.tool(
         lore_stable_backport_status,
         annotations=ann("Was this mainline SHA picked up by -stable?"),
+    )
+    mcp.tool(
+        lore_file_timeline,
+        annotations=ann("Chronological patch activity on one file (with histogram)"),
     )
 
     # Embedding tier (Phase 8). Both tools fail loudly with an

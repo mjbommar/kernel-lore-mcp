@@ -102,6 +102,41 @@ async def test_lore_author_profile_unknown_addr_empty(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_file_timeline_default_asc(client: Client) -> None:
+    """Timeline with default asc order + quarter bucket. Fixture has
+    two patches touching fs/smb/server/smbacl.c; both land in the
+    same quarter bucket."""
+    result = await client.call_tool(
+        "lore_file_timeline",
+        {"path": "fs/smb/server/smbacl.c"},
+    )
+    data = result.data
+    assert data.path_queried == "fs/smb/server/smbacl.c"
+    assert data.order == "asc"
+    assert data.bucket == "quarter"
+    assert data.total_matching >= 1
+    # Histogram shape: at least one bucket, patches count matches.
+    assert len(data.histogram) >= 1
+    assert sum(b.patches for b in data.histogram) == data.total_matching
+
+
+@pytest.mark.asyncio
+async def test_lore_file_timeline_window_rejects_inverted(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool(
+            "lore_file_timeline",
+            {
+                "path": "fs/smb/server/smbacl.c",
+                "since_unix_ns": 2_000_000_000_000_000_000,
+                "until_unix_ns": 1_000_000_000_000_000_000,
+            },
+        )
+    assert "invalid_argument" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_lore_stable_backport_status_rejects_non_hex(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 
