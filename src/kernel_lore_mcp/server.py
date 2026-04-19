@@ -105,66 +105,76 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             "openWorldHint": True,
         }
 
+    # Cost-class concurrency wrapper. Each tool's Cost: docstring line
+    # determines its class (cheap/moderate/expensive); the wrapper
+    # enforces a per-class in-flight cap and rejects with a structured
+    # `rate_limited` error when the class is saturated. See
+    # kernel_lore_mcp.cost_class for the limits and rationale.
+    from kernel_lore_mcp.cost_class import cost_limited
+
+    def _reg(fn, title: str) -> None:
+        mcp.tool(cost_limited(fn), annotations=ann(title))
+
     # Higher-level / orchestrating tools.
-    mcp.tool(lore_search, annotations=ann("Search lore (fused tiers)"))
-    mcp.tool(lore_activity, annotations=ann("File / function activity over lore"))
-    mcp.tool(lore_message, annotations=ann("Fetch one message (prose + patch split)"))
-    mcp.tool(lore_expand_citation, annotations=ann("Expand Message-ID / SHA / CVE"))
-    mcp.tool(lore_series_timeline, annotations=ann("Sibling versions of a patch series"))
-    mcp.tool(lore_patch_search, annotations=ann("Literal substring search in patch bodies"))
-    mcp.tool(lore_thread, annotations=ann("Walk a full conversation thread"))
-    mcp.tool(lore_patch, annotations=ann("Raw patch text for one message"))
-    mcp.tool(lore_patch_diff, annotations=ann("Diff two patch versions of a series"))
-    mcp.tool(lore_explain_patch, annotations=ann("One-call deep view of a patch"))
+    _reg(lore_search, "Search lore (fused tiers)")
+    _reg(lore_activity, "File / function activity over lore")
+    _reg(lore_message, "Fetch one message (prose + patch split)")
+    _reg(lore_expand_citation, "Expand Message-ID / SHA / CVE")
+    _reg(lore_series_timeline, "Sibling versions of a patch series")
+    _reg(lore_patch_search, "Literal substring search in patch bodies")
+    _reg(lore_thread, "Walk a full conversation thread")
+    _reg(lore_patch, "Raw patch text for one message")
+    _reg(lore_patch_diff, "Diff two patch versions of a series")
+    _reg(lore_explain_patch, "One-call deep view of a patch")
 
     # Low-level retrieval primitives. Agents stack these themselves
     # when they want one well-defined query against one tier.
-    mcp.tool(lore_eq, annotations=ann("Exact-equality scan on a column"))
-    mcp.tool(lore_in_list, annotations=ann("Set-membership scan on a column"))
-    mcp.tool(lore_count, annotations=ann("Count + distinct-authors + date range"))
-    mcp.tool(lore_substr_subject, annotations=ann("Case-insensitive substring on subject"))
-    mcp.tool(lore_substr_trailers, annotations=ann("Substring inside a named trailer"))
-    mcp.tool(lore_regex, annotations=ann("DFA-only regex scan"))
-    mcp.tool(lore_diff, annotations=ann("Message-vs-message diff (patch / prose / raw)"))
-    mcp.tool(lore_author_profile, annotations=ann("Aggregate profile for one from_addr"))
-    mcp.tool(
+    _reg(lore_eq, "Exact-equality scan on a column")
+    _reg(lore_in_list, "Set-membership scan on a column")
+    _reg(lore_count, "Count + distinct-authors + date range")
+    _reg(lore_substr_subject, "Case-insensitive substring on subject")
+    _reg(lore_substr_trailers, "Substring inside a named trailer")
+    _reg(lore_regex, "DFA-only regex scan")
+    _reg(lore_diff, "Message-vs-message diff (patch / prose / raw)")
+    _reg(lore_author_profile, "Aggregate profile for one from_addr")
+    _reg(
         lore_maintainer_profile,
-        annotations=ann("Declared vs. observed ownership for a kernel path"),
+        "Declared vs. observed ownership for a kernel path",
     )
-    mcp.tool(
+    _reg(
         lore_stable_backport_status,
-        annotations=ann("Was this mainline SHA picked up by -stable?"),
+        "Was this mainline SHA picked up by -stable?",
     )
-    mcp.tool(
+    _reg(
         lore_file_timeline,
-        annotations=ann("Chronological patch activity on one file (with histogram)"),
+        "Chronological patch activity on one file (with histogram)",
     )
-    mcp.tool(
+    _reg(
         lore_thread_state,
-        annotations=ann("Classify a thread (rfc/superseded/nacked/...)"),
+        "Classify a thread (rfc/superseded/nacked/...)",
     )
-    mcp.tool(
+    _reg(
         lore_subsystem_churn,
-        annotations=ann("Hot files in a list/subsystem (top-N + histogram)"),
+        "Hot files in a list/subsystem (top-N + histogram)",
     )
 
     # Embedding tier (Phase 8). Both tools fail loudly with an
     # actionable ToolError when the index hasn't been built yet.
-    mcp.tool(lore_nearest, annotations=ann("Semantic nearest-neighbour on free text"))
-    mcp.tool(lore_similar, annotations=ann("Nearest-neighbour on a seed message-id"))
+    _reg(lore_nearest, "Semantic nearest-neighbour on free text")
+    _reg(lore_similar, "Nearest-neighbour on a seed message-id")
 
     # Phase 13a-file — Aho-Corasick path-mention reverse index.
-    mcp.tool(lore_path_mentions, annotations=ann("Find messages mentioning a file path"))
+    _reg(lore_path_mentions, "Find messages mentioning a file path")
 
     # Phase 12 — sampling-backed tools with graceful extractive
     # fallback. `backend` on every response tells the agent which
     # path fired (sampled / extractive) so downstream confidence
     # stays honest.
-    mcp.tool(lore_summarize_thread, annotations=ann("Summarize a thread (LLM or extractive)"))
-    mcp.tool(lore_classify_patch, annotations=ann("Classify a patch into a fixed label set"))
-    mcp.tool(
+    _reg(lore_summarize_thread, "Summarize a thread (LLM or extractive)")
+    _reg(lore_classify_patch, "Classify a patch into a fixed label set")
+    _reg(
         lore_explain_review_status,
-        annotations=ann("Explain open reviewer concerns + trailers seen"),
+        "Explain open reviewer concerns + trailers seen",
     )
 
     # Register blind_spots as an MCP resource — fetch once per session.
