@@ -510,6 +510,69 @@ impl PyReader {
         Ok(d)
     }
 
+    /// Cross-reference a kernel path against the MAINTAINERS snapshot
+    /// + observed lore activity.
+    #[pyo3(signature = (path, window_days=180, activity_limit=5000))]
+    fn maintainer_profile<'py>(
+        &self,
+        py: Python<'py>,
+        path: String,
+        window_days: u32,
+        activity_limit: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let profile = py.detach(|| {
+            self.inner
+                .maintainer_profile(&path, window_days, activity_limit)
+        })?;
+
+        let out = PyDict::new(py);
+        out.set_item("path_queried", &profile.path_queried)?;
+        out.set_item("maintainers_available", profile.maintainers_available)?;
+        out.set_item("sampled_patches", profile.sampled_patches)?;
+
+        let declared: Vec<Bound<'py, PyDict>> = profile
+            .declared
+            .iter()
+            .map(|e| {
+                let d = PyDict::new(py);
+                d.set_item("name", &e.name)?;
+                d.set_item("status", e.status.clone())?;
+                d.set_item("depth", e.depth)?;
+                d.set_item("lists", &e.lists)?;
+                d.set_item("maintainers", &e.maintainers)?;
+                d.set_item("reviewers", &e.reviewers)?;
+                Ok::<_, PyErr>(d)
+            })
+            .collect::<PyResult<_>>()?;
+        out.set_item("declared", declared)?;
+        out.set_item("stale_declared", profile.stale_declared)?;
+
+        let obs_to_py = |o: &crate::reader::ObservedAddr| -> PyResult<Bound<'py, PyDict>> {
+            let d = PyDict::new(py);
+            d.set_item("email", &o.email)?;
+            d.set_item("reviewed_by", o.reviewed_by)?;
+            d.set_item("acked_by", o.acked_by)?;
+            d.set_item("tested_by", o.tested_by)?;
+            d.set_item("signed_off_by", o.signed_off_by)?;
+            d.set_item("last_seen_unix_ns", o.last_seen_unix_ns)?;
+            Ok(d)
+        };
+        let active: Vec<Bound<'py, PyDict>> = profile
+            .active_unlisted
+            .iter()
+            .map(&obs_to_py)
+            .collect::<PyResult<_>>()?;
+        out.set_item("active_unlisted", active)?;
+        let observed: Vec<Bound<'py, PyDict>> = profile
+            .observed
+            .iter()
+            .map(&obs_to_py)
+            .collect::<PyResult<_>>()?;
+        out.set_item("observed", observed)?;
+
+        Ok(out)
+    }
+
     /// Case-insensitive byte substring scan over `subject_raw`.
     #[pyo3(signature = (needle, list=None, since_unix_ns=None, limit=100))]
     fn substr_subject<'py>(

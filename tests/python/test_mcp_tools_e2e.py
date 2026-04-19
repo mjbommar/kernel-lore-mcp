@@ -102,6 +102,52 @@ async def test_lore_author_profile_unknown_addr_empty(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_maintainer_profile_without_maintainers_file(client: Client) -> None:
+    """Without a MAINTAINERS snapshot in data_dir, the tool must
+    return `maintainers_available: False` but still report observed
+    trailer activity from the sample corpus."""
+    result = await client.call_tool(
+        "lore_maintainer_profile",
+        {"path": "fs/smb/server/smbacl.c"},
+    )
+    data = result.data
+    assert data.maintainers_available is False
+    assert data.declared == []
+    assert data.sampled_patches >= 1
+
+
+@pytest.mark.asyncio
+async def test_lore_maintainer_profile_with_maintainers_snapshot(
+    client: Client, tmp_path: Path
+) -> None:
+    """Drop a minimal MAINTAINERS into the data_dir used by the
+    fixture and re-open the reader via the tool — declared entries
+    must populate and the cross-reference must flag the silent
+    reviewer as stale."""
+    import os
+
+    data_dir = Path(os.environ["KLMCP_DATA_DIR"])
+    (data_dir / "MAINTAINERS").write_text(
+        "KSMBD\n"
+        "M:\tAlice <alice@example.com>\n"
+        "R:\tDavid Dormant <david@example.com>\n"
+        "L:\tlinux-cifs@vger.kernel.org\n"
+        "S:\tMaintained\n"
+        "F:\tfs/smb/server/\n"
+    )
+    result = await client.call_tool(
+        "lore_maintainer_profile",
+        {"path": "fs/smb/server/smbacl.c"},
+    )
+    data = result.data
+    assert data.maintainers_available is True
+    assert len(data.declared) == 1
+    assert data.declared[0].name == "KSMBD"
+    stale = set(data.stale_declared)
+    assert "david@example.com" in stale, f"david should be stale: {stale}"
+
+
+@pytest.mark.asyncio
 async def test_lore_author_profile_rejects_non_email(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 

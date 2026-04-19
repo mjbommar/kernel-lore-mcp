@@ -32,6 +32,7 @@ mod bm25;
 mod embedding;
 mod error;
 mod ingest;
+mod maintainers;
 mod metadata;
 mod over;
 mod parse;

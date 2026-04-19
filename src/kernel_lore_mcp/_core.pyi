@@ -128,6 +128,12 @@ class Reader:
         since_unix_ns: int | None = ...,
         limit: int = ...,
     ) -> dict[str, Any]: ...
+    def maintainer_profile(
+        self,
+        path: str,
+        window_days: int = ...,
+        activity_limit: int = ...,
+    ) -> dict[str, Any]: ...
     def substr_subject(
         self,
         needle: str,

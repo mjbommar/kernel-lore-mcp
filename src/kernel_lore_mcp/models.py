@@ -329,6 +329,77 @@ class AuthorProfileResponse(BaseModel):
     blind_spots_ref: str = "blind-spots://coverage"
 
 
+class DeclaredMaintainerEntry(BaseModel):
+    """One MAINTAINERS section that claims this path."""
+
+    name: str
+    status: str | None = None
+    depth: int = Field(
+        description=(
+            "Pattern-specificity score — number of `/` in the F: glob "
+            "that matched. Deeper = more specific; ties broken by "
+            "declaration order."
+        )
+    )
+    lists: list[str] = Field(default_factory=list)
+    maintainers: list[str] = Field(default_factory=list)
+    reviewers: list[str] = Field(default_factory=list)
+
+
+class ObservedAddr(BaseModel):
+    """One person who has actually been active on patches touching
+    the queried path, by trailer kind."""
+
+    email: str
+    reviewed_by: int = 0
+    acked_by: int = 0
+    tested_by: int = 0
+    signed_off_by: int = 0
+    last_seen_unix_ns: int | None = None
+    last_seen_utc: datetime | None = None
+
+
+class MaintainerProfileResponse(BaseModel):
+    """Declared (MAINTAINERS) vs. observed (lore trailers) view of
+    one kernel path. See `lore_maintainer_profile`.
+    """
+
+    path_queried: str
+    maintainers_available: bool = Field(
+        description=(
+            "False when the server has no MAINTAINERS snapshot loaded. "
+            "In that case `declared` is empty; observed activity is "
+            "still useful on its own."
+        )
+    )
+    sampled_patches: int = Field(
+        description=(
+            "How many patches touching this path were aggregated from "
+            "the observation window."
+        )
+    )
+    declared: list[DeclaredMaintainerEntry]
+    observed: list[ObservedAddr] = Field(
+        description="Top-N observed reviewers/ackers/testers/signers."
+    )
+    stale_declared: list[str] = Field(
+        description=(
+            "Emails declared in MAINTAINERS (M: or R:) that had ZERO "
+            "observed activity in the window — candidates for the "
+            "subsystem maintainers to prune or refresh."
+        )
+    )
+    active_unlisted: list[ObservedAddr] = Field(
+        description=(
+            "Observed addresses NOT in MAINTAINERS for this path. "
+            "Ranked by reviews + acks. Heavy hitters here often "
+            "should be promoted to R: or M:."
+        )
+    )
+    freshness: Freshness
+    blind_spots_ref: str = "blind-spots://coverage"
+
+
 class DiffResponse(BaseModel):
     """Generalized message-vs-message diff."""
 

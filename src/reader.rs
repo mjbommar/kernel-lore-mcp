@@ -31,6 +31,7 @@ use arrow::array::{
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::error::{Error, Result};
+use crate::maintainers::MaintainersIndex;
 use crate::over::{OverDb, OverDbPool};
 use crate::schema as sc;
 use crate::state::State;
@@ -113,6 +114,41 @@ pub struct MessageRow {
 /// lookups, sub-100ms BM25 hydration) lock contention is well
 /// below the SQLite work itself. If Phase 5 stress tests show the
 /// mutex becoming the bottleneck we'll switch to an r2d2 pool.
+/// Resolve a MAINTAINERS snapshot from either:
+///   1. `$KLMCP_MAINTAINERS_FILE` (explicit absolute path)
+///   2. `<data_dir>/MAINTAINERS` (convention: operator drops a snapshot here)
+/// Returns `None` when neither exists or parsing fails (logged).
+fn load_maintainers(data_dir: &Path) -> Option<Arc<MaintainersIndex>> {
+    let env_path = std::env::var_os("KLMCP_MAINTAINERS_FILE").map(std::path::PathBuf::from);
+    let candidates: Vec<std::path::PathBuf> = env_path
+        .into_iter()
+        .chain(std::iter::once(data_dir.join("MAINTAINERS")))
+        .collect();
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match MaintainersIndex::parse_file(&path) {
+            Ok(idx) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    entries = idx.len(),
+                    "Reader: MAINTAINERS index loaded"
+                );
+                return Some(Arc::new(idx));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Reader: MAINTAINERS parse failed"
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Hard cap on patch_search candidate union size. A degenerate needle
 /// (e.g. a single common trigram, list=None) could otherwise match
 /// most of the 17.6M-message corpus and accumulate ~700 MB of
@@ -134,6 +170,10 @@ pub struct Reader {
     /// was a hot-path bug. Inner reader holds the shared IndexReader
     /// and a `last_reloaded_generation` atomic — see `bm25::BmReader`.
     bm25: RwLock<Option<Arc<crate::bm25::BmReader>>>,
+    /// Parsed MAINTAINERS index. Populated at Reader::new from
+    /// `$KLMCP_MAINTAINERS_FILE` or `<data_dir>/MAINTAINERS`. Missing
+    /// is fine — tools that need it surface "MAINTAINERS unavailable".
+    maintainers: Option<Arc<MaintainersIndex>>,
 }
 
 impl Reader {
@@ -163,12 +203,20 @@ impl Reader {
         } else {
             None
         };
+        let maintainers = load_maintainers(&data_dir);
         Self {
             data_dir,
             over,
             stores: RwLock::new(HashMap::new()),
             bm25: RwLock::new(None),
+            maintainers,
         }
+    }
+
+    /// Expose the parsed MAINTAINERS index for the `lore_maintainer_profile`
+    /// tool. `None` when no snapshot is configured.
+    pub fn maintainers(&self) -> Option<&MaintainersIndex> {
+        self.maintainers.as_deref()
     }
 
     /// Return a shared `BmReader`, opening (and caching) it on first
@@ -977,6 +1025,140 @@ impl Reader {
         let mut subs: Vec<SubsystemBucket> = subsystems.into_values().collect();
         subs.sort_by_key(|s| std::cmp::Reverse(s.patches));
         out.subsystems = subs;
+
+        Ok(out)
+    }
+
+    /// Cross-reference a kernel path against the MAINTAINERS file and
+    /// observed lore activity. Declared = MAINTAINERS M:/R: for the
+    /// subsystem(s) claiming this path. Observed = who has actually
+    /// reviewed / acked / tested patches touching this path inside
+    /// the window. The gap between the two (stale_declared,
+    /// active_unlisted) is the most useful signal.
+    pub fn maintainer_profile(
+        &self,
+        path: &str,
+        window_days: u32,
+        activity_limit: usize,
+    ) -> Result<MaintainerProfile> {
+        let mut out = MaintainerProfile {
+            path_queried: path.to_owned(),
+            maintainers_available: self.maintainers.is_some(),
+            ..MaintainerProfile::default()
+        };
+
+        if let Some(idx) = self.maintainers.as_deref() {
+            let hits = idx.lookup(path);
+            for entry in hits {
+                out.declared.push(DeclaredEntry {
+                    name: entry.name.clone(),
+                    status: entry.status.clone(),
+                    lists: entry.lists.clone(),
+                    maintainers: entry.maintainers.clone(),
+                    reviewers: entry.reviewers.clone(),
+                    depth: entry.depth() as u32,
+                });
+            }
+        }
+
+        // Gather observed activity on this path within the window.
+        // `activity` routes through the indexed list-date scan when
+        // a list_filter is present; without one it does a metadata
+        // scan filtered on touched_files (post-filter). Good enough
+        // for a single-path profile.
+        let since_unix_ns = if window_days > 0 {
+            let secs = (window_days as u64) * 24 * 3600;
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as i64)
+                .unwrap_or(i64::MAX);
+            Some(now_ns - (secs as i64) * 1_000_000_000)
+        } else {
+            None
+        };
+        let rows = self.activity(Some(path), None, since_unix_ns, None, activity_limit)?;
+        out.sampled_patches = rows.len() as u64;
+
+        // Aggregate observed trailer counts per address.
+        let mut observed: HashMap<String, ObservedAddr> = HashMap::new();
+        let record = |map: &mut HashMap<String, ObservedAddr>,
+                      raw: &str,
+                      kind: TrailerKind,
+                      date_ns: Option<i64>| {
+            let email = extract_email(raw);
+            if email.is_empty() {
+                return;
+            }
+            let entry = map.entry(email.clone()).or_insert_with(|| ObservedAddr {
+                email,
+                ..Default::default()
+            });
+            match kind {
+                TrailerKind::ReviewedBy => entry.reviewed_by += 1,
+                TrailerKind::AckedBy => entry.acked_by += 1,
+                TrailerKind::TestedBy => entry.tested_by += 1,
+                TrailerKind::SignedOffBy => entry.signed_off_by += 1,
+            }
+            if let Some(d) = date_ns {
+                entry.last_seen_unix_ns =
+                    Some(entry.last_seen_unix_ns.map_or(d, |e| e.max(d)));
+            }
+        };
+        for row in &rows {
+            for r in &row.reviewed_by {
+                record(&mut observed, r, TrailerKind::ReviewedBy, row.date_unix_ns);
+            }
+            for a in &row.acked_by {
+                record(&mut observed, a, TrailerKind::AckedBy, row.date_unix_ns);
+            }
+            for t in &row.tested_by {
+                record(&mut observed, t, TrailerKind::TestedBy, row.date_unix_ns);
+            }
+            for s in &row.signed_off_by {
+                record(&mut observed, s, TrailerKind::SignedOffBy, row.date_unix_ns);
+            }
+        }
+
+        // Declared address set (normalized to email-only lowercase).
+        let mut declared_emails: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for entry in &out.declared {
+            for s in entry.maintainers.iter().chain(entry.reviewers.iter()) {
+                let e = extract_email(s);
+                if !e.is_empty() {
+                    declared_emails.insert(e);
+                }
+            }
+        }
+
+        // Stale: declared addresses with ZERO observed activity in window.
+        let mut stale: Vec<String> = Vec::new();
+        for addr in &declared_emails {
+            if !observed.contains_key(addr) {
+                stale.push(addr.clone());
+            }
+        }
+        stale.sort();
+        out.stale_declared = stale;
+
+        // Active-unlisted: observed reviewers NOT in the declared set.
+        // Rank by reviews + acks (tests and sobs are weaker signal).
+        let mut unlisted: Vec<ObservedAddr> = observed
+            .values()
+            .filter(|o| !declared_emails.contains(&o.email))
+            .cloned()
+            .collect();
+        unlisted.sort_by_key(|o| std::cmp::Reverse(o.reviewed_by + o.acked_by));
+        unlisted.truncate(20);
+        out.active_unlisted = unlisted;
+
+        // All observed (top by activity) for the full picture.
+        let mut all_observed: Vec<ObservedAddr> = observed.into_values().collect();
+        all_observed.sort_by_key(|o| {
+            std::cmp::Reverse(o.reviewed_by + o.acked_by + o.tested_by)
+        });
+        all_observed.truncate(50);
+        out.observed = all_observed;
 
         Ok(out)
     }
@@ -1803,6 +1985,86 @@ pub struct ReceivedTrailerStats {
     pub cc_stable: u64,
 }
 
+/// Which trailer kind an observed address was seen on — used by
+/// `maintainer_profile` when aggregating declared-vs-observed.
+#[derive(Copy, Clone, Debug)]
+enum TrailerKind {
+    ReviewedBy,
+    AckedBy,
+    TestedBy,
+    SignedOffBy,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ObservedAddr {
+    pub email: String,
+    pub reviewed_by: u64,
+    pub acked_by: u64,
+    pub tested_by: u64,
+    pub signed_off_by: u64,
+    pub last_seen_unix_ns: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DeclaredEntry {
+    pub name: String,
+    pub status: Option<String>,
+    pub lists: Vec<String>,
+    pub maintainers: Vec<String>,
+    pub reviewers: Vec<String>,
+    pub depth: u32,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct MaintainerProfile {
+    pub path_queried: String,
+    /// False when no MAINTAINERS snapshot was configured — in that
+    /// case `declared` is empty; only observed activity is meaningful.
+    pub maintainers_available: bool,
+    /// MAINTAINERS entries whose F:/N: matched the path. Sorted by
+    /// depth descending (most specific first).
+    pub declared: Vec<DeclaredEntry>,
+    /// Observed top-N addresses that reviewed / acked / tested /
+    /// signed-off patches touching this path in the window.
+    pub observed: Vec<ObservedAddr>,
+    /// Addresses in M:/R: of matching MAINTAINERS entries that had
+    /// ZERO observed activity in the window. "stale_declared".
+    pub stale_declared: Vec<String>,
+    /// Observed addresses NOT declared in MAINTAINERS — ranked by
+    /// review + ack count.
+    pub active_unlisted: Vec<ObservedAddr>,
+    /// How many messages matched the path-in-window query.
+    pub sampled_patches: u64,
+}
+
+/// Extract `user@host` from a "Name <email>" style string. Returns
+/// empty when the pattern doesn't match. Case-folded to match the
+/// lowercased indexing in over.db / ddd payloads.
+fn extract_email(s: &str) -> String {
+    let start = match s.rfind('<') {
+        Some(i) => i + 1,
+        None => {
+            // Bare email — take first whitespace-delimited token
+            // that contains `@`.
+            return s
+                .split_whitespace()
+                .find(|tok| tok.contains('@'))
+                .map(|tok| tok.trim_matches(|c: char| !c.is_ascii_graphic()).to_ascii_lowercase())
+                .unwrap_or_default();
+        }
+    };
+    let end = match s[start..].find('>') {
+        Some(i) => start + i,
+        None => return String::new(),
+    };
+    let email = &s[start..end];
+    if email.contains('@') {
+        email.to_ascii_lowercase()
+    } else {
+        String::new()
+    }
+}
+
 pub struct DiffResult {
     pub row_a: MessageRow,
     pub row_b: MessageRow,
@@ -2585,6 +2847,75 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let mids: std::collections::HashSet<&str> =
             rows.iter().map(|r| r.message_id.as_str()).collect();
         assert_eq!(mids, ["m1@x", "m2@x"].into_iter().collect());
+    }
+
+    #[test]
+    fn extract_email_variants() {
+        assert_eq!(
+            extract_email("Greg KH <gregkh@linuxfoundation.org>"),
+            "gregkh@linuxfoundation.org"
+        );
+        assert_eq!(
+            extract_email("gregkh@linuxfoundation.org"),
+            "gregkh@linuxfoundation.org"
+        );
+        assert_eq!(extract_email("just a name"), "");
+        assert_eq!(extract_email("<no@lt@at>"), "no@lt@at");
+    }
+
+    #[test]
+    fn maintainer_profile_cross_references_declared_vs_observed() {
+        use std::io::Write;
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+
+        // Drop a tiny MAINTAINERS at the conventional location.
+        let mpath = d.path().join("MAINTAINERS");
+        let mut f = std::fs::File::create(&mpath).unwrap();
+        writeln!(
+            f,
+            "KSMBD\nM:\tAlice <alice@example.com>\nR:\tDavid Dormant <david@example.com>\nL:\tlinux-cifs@vger.kernel.org\nS:\tMaintained\nF:\tfs/smb/server/"
+        )
+        .unwrap();
+        drop(f);
+
+        let reader = Reader::new(d.path());
+        let profile = reader
+            .maintainer_profile("fs/smb/server/smbacl.c", 365, 500)
+            .unwrap();
+        assert!(profile.maintainers_available);
+        assert_eq!(profile.declared.len(), 1);
+        assert_eq!(profile.declared[0].name, "KSMBD");
+        assert!(profile.sampled_patches >= 1);
+        // Alice is both the declared maintainer AND the sample
+        // corpus author → NOT stale (she's "observed" via SOBs).
+        assert!(
+            !profile.stale_declared.iter().any(|a| a == "alice@example.com"),
+            "alice is active; shouldn't be flagged stale. Got: {:?}",
+            profile.stale_declared
+        );
+        // David Dormant is declared but never appears in the fixture →
+        // must be flagged stale.
+        assert!(
+            profile.stale_declared.iter().any(|a| a == "david@example.com"),
+            "david is declared-but-never-seen; should be stale. Got: {:?}",
+            profile.stale_declared
+        );
+    }
+
+    #[test]
+    fn maintainer_profile_without_maintainers_file_is_empty_but_ok() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let reader = Reader::new(d.path());
+        // No MAINTAINERS dropped into data_dir.
+        let profile = reader
+            .maintainer_profile("fs/smb/server/smbacl.c", 365, 500)
+            .unwrap();
+        assert!(!profile.maintainers_available);
+        assert!(profile.declared.is_empty());
+        // Observed activity still populated from over.db / parquet scan.
+        assert!(profile.sampled_patches >= 1);
     }
 
     #[test]
