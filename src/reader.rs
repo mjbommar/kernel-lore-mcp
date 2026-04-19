@@ -34,6 +34,7 @@ use crate::error::{Error, Result};
 use crate::over::{OverDb, OverDbPool};
 use crate::schema as sc;
 use crate::state::State;
+use crate::timeout::Deadline;
 
 /// Default over.db read-side connection fanout. 3 connections give
 /// meaningful concurrency on a 4-vCPU deploy (the `r7g.xlarge` per
@@ -1149,7 +1150,18 @@ impl Reader {
         let mut queue: VecDeque<String> = VecDeque::from([needle]);
         let mut collected: Vec<MessageRow> = Vec::new();
 
+        // Defense in depth: Python already enforces a 5 s wall-clock
+        // cap via asyncio.wait_for, but that can't cancel the Rust
+        // thread — it just abandons the future, leaking a `std::thread`
+        // worker until Rust returns naturally. A pathological fresh-
+        // deployment thread walk (no over.db tid backfill yet + a
+        // seed mid with a long reply chain) could pin a worker for
+        // the whole scan. The deadline check between BFS iterations
+        // bounds that to ~5 s.
+        let deadline = Deadline::new(crate::router::query_wall_clock_ms());
+
         while let Some(mid) = queue.pop_front() {
+            deadline.check()?;
             if visited.contains(&mid) || collected.len() >= max_messages {
                 continue;
             }

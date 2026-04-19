@@ -43,6 +43,7 @@ mod schema;
 mod state;
 mod store;
 mod tid;
+mod timeout;
 mod trigram;
 
 // Library re-exports for the `kernel-lore-ingest` binary (and any
