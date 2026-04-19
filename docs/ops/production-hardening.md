@@ -50,6 +50,7 @@ at the open internet.
 | `KLMCP_MAINTAINERS_FILE` | `<data_dir>/MAINTAINERS` | Custom kernel-tree snapshot path |
 | `KLMCP_CURSOR_KEY` | (unset) | Required in http mode once pagination ships |
 | `KLMCP_LOG_LEVEL` | INFO | DEBUG when diagnosing a specific request |
+| `KLMCP_DISABLE_OVER` | (unset) | Set to `1` for parity tests that compare the over.db indexed paths against the legacy Parquet scan. Production leaves this unset. |
 | `KLMCP_BIND` | 127.0.0.1 | **`0.0.0.0` only when behind a reverse proxy** |
 
 ## Capacity planning

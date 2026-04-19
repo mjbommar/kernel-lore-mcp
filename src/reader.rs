@@ -178,6 +178,12 @@ pub struct Reader {
 
 impl Reader {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
+        let disabled = std::env::var_os("KLMCP_DISABLE_OVER")
+            .is_some_and(|v| !v.is_empty() && v != "0");
+        if disabled {
+            tracing::debug!("Reader: over.db disabled via KLMCP_DISABLE_OVER");
+            return Self::new_no_over(data_dir);
+        }
         let data_dir = data_dir.as_ref().to_owned();
         let over_path = data_dir.join("over.db");
         let over = if over_path.exists() && Self::over_db_is_current(&data_dir) {
@@ -207,6 +213,23 @@ impl Reader {
         Self {
             data_dir,
             over,
+            stores: RwLock::new(HashMap::new()),
+            bm25: RwLock::new(None),
+            maintainers,
+        }
+    }
+
+    /// Construct a Reader that explicitly bypasses `over.db`, forcing
+    /// every query onto the legacy Parquet-scan path. Used by parity
+    /// tests that want to compare indexed-vs-scan results without
+    /// touching the filesystem (the old rename-and-restore protocol
+    /// crashed a live deploy mid-test; see overdb-followups C2).
+    pub fn new_no_over(data_dir: impl AsRef<Path>) -> Self {
+        let data_dir = data_dir.as_ref().to_owned();
+        let maintainers = load_maintainers(&data_dir);
+        Self {
+            data_dir,
+            over: None,
             stores: RwLock::new(HashMap::new()),
             bm25: RwLock::new(None),
             maintainers,
@@ -3461,6 +3484,45 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
             reader.over_db().is_none(),
             "Reader opened stale over.db; marker=3 vs corpus=5"
         );
+    }
+
+    /// `KLMCP_DISABLE_OVER=1` forces the over-free Parquet path even
+    /// when over.db is present and current. This replaces the old
+    /// rename-the-file parity-test protocol that once left a live
+    /// deploy with a 0-byte over.db when the test crashed mid-run.
+    #[test]
+    fn reader_respects_klmcp_disable_over() {
+        use crate::over::OverDb;
+        use crate::state::State;
+
+        let dir = tempdir().unwrap();
+        let state = State::new(dir.path()).unwrap();
+        std::fs::write(dir.path().join("state").join("generation"), "5\n").unwrap();
+        state.set_tier_generation("over", 5).unwrap();
+        let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
+
+        // Baseline: the Reader would normally enable over.db here.
+        let baseline = Reader::new(dir.path());
+        assert!(baseline.over_db().is_some());
+        drop(baseline);
+
+        // SAFETY: env mutation is process-global; this test must not
+        // run in parallel with reader_uses_over_db_when_marker_current
+        // (cargo test serializes within a module by default, so the
+        // risk is hypothetical). We restore on exit regardless.
+        // SAFETY: std::env::set_var is unsafe in edition 2024+.
+        unsafe { std::env::set_var("KLMCP_DISABLE_OVER", "1") };
+        let disabled = Reader::new(dir.path());
+        // SAFETY: std::env::remove_var is unsafe in edition 2024+.
+        unsafe { std::env::remove_var("KLMCP_DISABLE_OVER") };
+        assert!(
+            disabled.over_db().is_none(),
+            "KLMCP_DISABLE_OVER=1 did not suppress over.db"
+        );
+
+        // new_no_over() is the explicit constructor equivalent.
+        let explicit = Reader::new_no_over(dir.path());
+        assert!(explicit.over_db().is_none());
     }
 
     /// Reader must use over.db when the marker is current.
