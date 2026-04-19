@@ -259,6 +259,33 @@ async def test_lore_maintainer_profile_with_maintainers_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_lore_author_footprint_unions_sources(client: Client) -> None:
+    """Footprint unions authored + body-mention rows. On the sample
+    corpus alice authored 2 patches; body mentions may or may not
+    surface depending on the synthetic fixture content."""
+    result = await client.call_tool(
+        "lore_author_footprint",
+        {"addr": "alice@example.com"},
+    )
+    data = result.data
+    assert data.addr_queried == "alice@example.com"
+    assert data.total_distinct >= 2, f"expected >=2 distinct hits, got {data.total_distinct}"
+    assert data.authored_count >= 2
+    # Each hit carries at least one role.
+    for h in data.hits:
+        assert h.roles, f"hit missing roles: {h.message_id}"
+
+
+@pytest.mark.asyncio
+async def test_lore_author_footprint_rejects_non_email(client: Client) -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc_info:
+        await client.call_tool("lore_author_footprint", {"addr": "not-an-email"})
+    assert "invalid_argument" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_lore_author_profile_include_mentions_requires_narrowing(
     client: Client,
 ) -> None:

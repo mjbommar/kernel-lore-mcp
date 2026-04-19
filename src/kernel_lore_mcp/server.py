@@ -58,6 +58,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
     # Explicit tool registration.
     from kernel_lore_mcp.tools.activity import lore_activity
+    from kernel_lore_mcp.tools.author_footprint import lore_author_footprint
     from kernel_lore_mcp.tools.author_profile import lore_author_profile
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.file_timeline import lore_file_timeline
@@ -137,6 +138,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     _reg(lore_regex, "DFA-only regex scan")
     _reg(lore_diff, "Message-vs-message diff (patch / prose / raw)")
     _reg(lore_author_profile, "Aggregate profile for one from_addr")
+    _reg(
+        lore_author_footprint,
+        "Every lore message that mentions an address",
+    )
     _reg(
         lore_maintainer_profile,
         "Declared vs. observed ownership for a kernel path",
