@@ -71,6 +71,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(crate::python::py_rebuild_tid, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_rebuild_bm25, m)?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_backfill_subject_normalized,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_build_embedding_index,
         m
     )?)?;

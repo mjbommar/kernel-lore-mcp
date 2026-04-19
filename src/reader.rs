@@ -2253,6 +2253,7 @@ fn eq_field_is_over_indexed(field: EqField) -> bool {
             | EqField::Tid
             | EqField::BodySha256
             | EqField::CommitOid
+            | EqField::SubjectNormalized
     )
 }
 

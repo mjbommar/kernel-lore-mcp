@@ -299,27 +299,28 @@ impl OverDb {
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS over (
-                rowid           INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id      TEXT    NOT NULL,
-                list            TEXT    NOT NULL,
-                from_addr       TEXT,
-                date_unix_ns    INTEGER,
-                in_reply_to     TEXT,
-                tid             TEXT,
-                body_segment_id INTEGER NOT NULL,
-                body_offset     INTEGER NOT NULL,
-                body_length     INTEGER NOT NULL,
-                body_sha256     TEXT    NOT NULL,
-                has_patch       INTEGER NOT NULL DEFAULT 0,
-                is_cover_letter INTEGER NOT NULL DEFAULT 0,
-                series_version  INTEGER,
-                series_index    INTEGER,
-                series_total    INTEGER,
-                files_changed   INTEGER,
-                insertions      INTEGER,
-                deletions       INTEGER,
-                commit_oid      TEXT,
-                ddd             BLOB    NOT NULL
+                rowid               INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id          TEXT    NOT NULL,
+                list                TEXT    NOT NULL,
+                from_addr           TEXT,
+                date_unix_ns        INTEGER,
+                in_reply_to         TEXT,
+                tid                 TEXT,
+                body_segment_id     INTEGER NOT NULL,
+                body_offset         INTEGER NOT NULL,
+                body_length         INTEGER NOT NULL,
+                body_sha256         TEXT    NOT NULL,
+                has_patch           INTEGER NOT NULL DEFAULT 0,
+                is_cover_letter     INTEGER NOT NULL DEFAULT 0,
+                series_version      INTEGER,
+                series_index        INTEGER,
+                series_total        INTEGER,
+                files_changed       INTEGER,
+                insertions          INTEGER,
+                deletions           INTEGER,
+                commit_oid          TEXT,
+                subject_normalized  TEXT,
+                ddd                 BLOB    NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS meta (
@@ -335,6 +336,14 @@ impl OverDb {
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?1)",
             [SCHEMA_VERSION.to_string()],
         )?;
+
+        // Idempotent in-place migrations for older over.db files.
+        // SQLite has no `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`,
+        // so we probe PRAGMA table_info. Keep these cheap — they run
+        // on every open.
+        if !column_exists(conn, "over", "subject_normalized")? {
+            conn.execute_batch("ALTER TABLE over ADD COLUMN subject_normalized TEXT;")?;
+        }
         conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('source_tier', 'parquet:metadata/')",
             [],
@@ -370,6 +379,15 @@ impl OverDb {
             CREATE INDEX IF NOT EXISTS over_body_sha256 ON over (body_sha256);
             CREATE INDEX IF NOT EXISTS over_commit_oid  ON over (commit_oid)
                 WHERE commit_oid IS NOT NULL;
+
+            -- Partial index on populated rows only: backfill of existing
+            -- over.db files is an explicit operation (kernel-lore-backfill-
+            -- over subject_normalized) so the column may legitimately be
+            -- NULL on older rows. Partial indexes keep the on-disk size
+            -- proportional to the populated fraction.
+            CREATE INDEX IF NOT EXISTS over_subject_normalized
+                ON over (subject_normalized)
+                WHERE subject_normalized IS NOT NULL;
 
             -- (message_id, list) is the natural identity key. Cross-posts
             -- legitimately share message_id across lists, so we cannot
@@ -452,6 +470,68 @@ impl OverDb {
         Ok(total)
     }
 
+    /// Fill the `subject_normalized` column in-place for rows where
+    /// it's currently NULL by decoding the `ddd` blob. Used to
+    /// migrate over.db files built before subject_normalized was
+    /// promoted to a column, without paying the full ~30 min rebuild
+    /// cost of `kernel-lore-build-over`.
+    ///
+    /// Chunked writes with WAL checkpoints between batches, following
+    /// the pattern established by `update_tids` to keep the WAL
+    /// bounded. Returns the count of rows updated.
+    pub fn backfill_subject_normalized(&mut self) -> Result<u64> {
+        const CHUNK: usize = 50_000;
+        // Rowid-cursor walk so rows whose decoded subject_normalized is
+        // legitimately None don't get revisited on the next iteration
+        // (WHERE subject_normalized IS NULL would loop forever on
+        // those). Forward-only: we never revisit, so the cost is one
+        // full pass over the table.
+        let mut cursor: i64 = 0;
+        let mut total: u64 = 0;
+        loop {
+            let mut pending: Vec<(i64, Option<String>)> = Vec::with_capacity(CHUNK);
+            let mut last_rowid: i64 = cursor;
+            {
+                let mut stmt = self.conn.prepare(
+                    "SELECT rowid, ddd FROM over \
+                     WHERE rowid > ?1 AND subject_normalized IS NULL \
+                     ORDER BY rowid ASC LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                while let Some(r) = rows.next()? {
+                    let rowid: i64 = r.get(0)?;
+                    let blob: Vec<u8> = r.get(1)?;
+                    let subj = match decode_ddd(&blob) {
+                        Ok(p) => p.subject_normalized,
+                        Err(_) => None,
+                    };
+                    pending.push((rowid, subj));
+                    last_rowid = rowid;
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "UPDATE over SET subject_normalized = ?1 \
+                     WHERE rowid = ?2 AND subject_normalized IS NULL",
+                )?;
+                for (rowid, subj) in &pending {
+                    if subj.is_some() {
+                        total += stmt.execute(rusqlite::params![subj, rowid])? as u64;
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            cursor = last_rowid;
+        }
+        Ok(total)
+    }
+
     fn insert_batch_in_tx(tx: &Transaction<'_>, rows: &[OverRow]) -> Result<()> {
         let mut stmt = tx.prepare(
             "INSERT OR REPLACE INTO over (
@@ -460,14 +540,14 @@ impl OverDb {
                 has_patch, is_cover_letter,
                 series_version, series_index, series_total,
                 files_changed, insertions, deletions, commit_oid,
-                ddd
+                subject_normalized, ddd
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10,
                 ?11, ?12,
                 ?13, ?14, ?15,
                 ?16, ?17, ?18, ?19,
-                ?20
+                ?20, ?21
             )",
         )?;
         for row in rows {
@@ -496,6 +576,7 @@ impl OverDb {
                 row.insertions,
                 row.deletions,
                 row.commit_oid,
+                row.ddd.subject_normalized.as_deref(),
                 blob,
             ])?;
         }
@@ -590,6 +671,9 @@ impl OverDb {
             EqField::Tid => ("tid = ?1", value.to_string()),
             EqField::BodySha256 => ("body_sha256 = ?1", value.to_string()),
             EqField::CommitOid => ("commit_oid = ?1", value.to_string()),
+            EqField::SubjectNormalized => {
+                ("subject_normalized = ?1", value.to_string())
+            }
             _ => {
                 tracing::warn!(
                     field = ?field,
@@ -678,6 +762,20 @@ impl OverDb {
         let _ = next_idx;
         Ok(out)
     }
+}
+
+/// PRAGMA table_info probe for idempotent ALTER TABLE ADD COLUMN
+/// migrations. Returns true when `table.column` exists.
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table});"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        let name: String = r.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn filters_ok(mr: &MessageRow, since: Option<i64>, list_filter: Option<&str>) -> bool {
@@ -1048,6 +1146,111 @@ mod tests {
         for h in &hits {
             assert!(h.date_unix_ns.unwrap() >= 105);
         }
+    }
+
+    #[test]
+    fn backfill_subject_normalized_populates_column() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        // Insert via raw SQL bypassing the write path, simulating legacy rows.
+        let rows = vec![
+            sample_row("<bf1@x>", "lkml", 1, "a@x"),
+            sample_row("<bf2@x>", "lkml", 2, "a@x"),
+        ];
+        db.insert_batch(&rows).unwrap();
+        // Clear the column on every row so backfill has work to do.
+        db.conn
+            .execute("UPDATE over SET subject_normalized = NULL", [])
+            .unwrap();
+
+        let updated = db.backfill_subject_normalized().unwrap();
+        assert_eq!(updated, 2);
+
+        // Indexed lookup now succeeds.
+        let hits = db
+            .scan_eq(EqField::SubjectNormalized, "subj for <bf2@x>", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<bf2@x>");
+
+        // Second run is a no-op (rowid cursor walked past everything).
+        let updated_again = db.backfill_subject_normalized().unwrap();
+        assert_eq!(updated_again, 0);
+    }
+
+    #[test]
+    fn scan_eq_subject_normalized_indexed() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let rows = vec![
+            sample_row("<s1@x>", "lkml", 1_000, "a@x"),
+            sample_row("<s2@x>", "lkml", 2_000, "a@x"),
+        ];
+        db.insert_batch(&rows).unwrap();
+
+        // sample_row sets subject_normalized = "subj for <mid>"
+        let hits = db
+            .scan_eq(EqField::SubjectNormalized, "subj for <s2@x>", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<s2@x>");
+    }
+
+    #[test]
+    fn legacy_schema_migrates_in_place_for_subject_normalized() {
+        // Build a v0 over.db shape (no subject_normalized column),
+        // then reopen through OverDb::open and verify the migration
+        // ran without data loss.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE over (
+                    rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT NOT NULL,
+                    list TEXT NOT NULL,
+                    from_addr TEXT,
+                    date_unix_ns INTEGER,
+                    in_reply_to TEXT,
+                    tid TEXT,
+                    body_segment_id INTEGER NOT NULL,
+                    body_offset INTEGER NOT NULL,
+                    body_length INTEGER NOT NULL,
+                    body_sha256 TEXT NOT NULL,
+                    has_patch INTEGER NOT NULL DEFAULT 0,
+                    is_cover_letter INTEGER NOT NULL DEFAULT 0,
+                    series_version INTEGER,
+                    series_index INTEGER,
+                    series_total INTEGER,
+                    files_changed INTEGER,
+                    insertions INTEGER,
+                    deletions INTEGER,
+                    commit_oid TEXT,
+                    ddd BLOB NOT NULL
+                );
+                CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                INSERT INTO meta VALUES ('schema_version', '1');
+                INSERT INTO over (message_id, list, body_segment_id, body_offset,
+                    body_length, body_sha256, ddd)
+                VALUES ('<legacy@x>', 'lkml', 1, 0, 100, 'sha-legacy',
+                    x'');",
+            )
+            .unwrap();
+        }
+        // Reopen through the full OverDb migration path.
+        let db = OverDb::open(&path).unwrap();
+        // Column must now be present.
+        let exists = column_exists(&db.conn, "over", "subject_normalized").unwrap();
+        assert!(exists, "migration should have added subject_normalized");
+        // Existing row survived and has NULL subject_normalized.
+        let v: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT subject_normalized FROM over WHERE message_id = ?1",
+                ["<legacy@x>"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(v.is_none());
     }
 
     #[test]

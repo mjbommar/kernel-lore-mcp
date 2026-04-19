@@ -79,6 +79,22 @@ pub fn py_rebuild_tid<'py>(py: Python<'py>, data_dir: PathBuf) -> PyResult<Bound
     Ok(d)
 }
 
+/// One-off backfill pass: fill the `subject_normalized` column in
+/// existing over.db rows whose ddd blob carries that field. New rows
+/// write the column natively; this is the migration path for
+/// over.db files built before the column was promoted. Returns the
+/// number of rows updated.
+#[pyfunction]
+#[pyo3(name = "backfill_subject_normalized")]
+pub fn py_backfill_subject_normalized(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let n = py.detach(|| -> crate::error::Result<u64> {
+        let over_path = data_dir.join("over.db");
+        let mut db = crate::over::OverDb::open(&over_path)?;
+        db.backfill_subject_normalized()
+    })?;
+    Ok(n)
+}
+
 /// Rebuild the BM25 index from the compressed store + metadata.
 /// Returns the number of docs indexed.
 #[pyfunction]
