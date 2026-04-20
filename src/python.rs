@@ -110,6 +110,22 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
     Ok(n)
 }
 
+/// One-off backfill for the touched-files side table. Walks every
+/// existing over.db row, decodes its ddd blob, and materializes
+/// `touched_files` entries so `eq('touched_files', path)` and the
+/// cross-list `lore_activity(file=...)` shape hit the indexed JOIN
+/// path instead of a full Parquet scan. Returns rows inserted.
+#[pyfunction]
+#[pyo3(name = "backfill_touched_files")]
+pub fn py_backfill_touched_files(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let n = py.detach(|| -> crate::error::Result<u64> {
+        let over_path = data_dir.join("over.db");
+        let mut db = crate::over::OverDb::open(&over_path)?;
+        db.backfill_touched_files()
+    })?;
+    Ok(n)
+}
+
 /// Rebuild the BM25 index from the compressed store + metadata.
 /// Returns the number of docs indexed.
 #[pyfunction]

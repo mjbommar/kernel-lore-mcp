@@ -827,17 +827,49 @@ impl Reader {
         let f_func = function.map(str::to_owned);
         let list_filter = list.map(str::to_owned);
 
-        // over.db: when scoped to a single list (the dominant query
-        // shape from `lore_activity` / router), use the
-        // `over_list_date` index to pull just that list's rows in
-        // date-DESC order, then filter on touched_files / touched_functions
-        // (which live in the zstd-compressed ddd blob — decoded as part
-        // of MessageRow materialization, no extra round trips).
+        // Cross-list fast path: `activity(file=X, list=None)` used to
+        // fall through to a full Parquet scan. With the
+        // `over_touched_file` side table populated (F2b / #68), we
+        // can serve this as an indexed JOIN. Still apply `function`
+        // as a post-filter on the returned rows because
+        // touched_functions lives in the ddd blob.
+        if let (Some(path), true) = (&f_path, list_filter.is_none())
+            && let Some(res) = self.with_over(|db| {
+                db.scan_eq(
+                    EqField::TouchedFile,
+                    path,
+                    since_unix_ns,
+                    None,
+                    limit.saturating_mul(4).max(256),
+                )
+            })
+        {
+            let rows = res?;
+            let mut out: Vec<MessageRow> = rows
+                .into_iter()
+                .filter(|r| {
+                    if let Some(ref fn_) = f_func
+                        && !r.touched_functions.iter().any(|x| x == fn_)
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .take(limit)
+                .collect();
+            out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+            return Ok(out);
+        }
+
+        // Single-list path: over.db's `over_list_date` index pulls
+        // that list's rows in date-DESC order, then we filter on
+        // touched_files / touched_functions (ddd blob fields —
+        // decoded as part of MessageRow materialization, no extra
+        // round trips).
         //
-        // We over-fetch to compensate for in-memory predicate selectivity:
-        // most rows in a list don't touch any given file. The 4096 cap
-        // matches the maximum reasonable activity window without
-        // pulling enough rows to blow query budget.
+        // Over-fetch 64× to compensate for in-memory predicate
+        // selectivity: most rows in a list don't touch any given
+        // file.
         if let Some(l) = &list_filter
             && let Some(res) = self.with_over(|db| {
                 let scan_limit = limit.saturating_mul(64).max(4_096);
@@ -2551,6 +2583,7 @@ fn eq_field_is_over_indexed(field: EqField) -> bool {
             | EqField::TestedBy
             | EqField::CoDevelopedBy
             | EqField::ReportedBy
+            | EqField::TouchedFile
     )
 }
 

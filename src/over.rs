@@ -384,6 +384,19 @@ impl OverDb {
                 list       TEXT NOT NULL,
                 PRIMARY KEY (kind, email, message_id, list)
             );
+
+            -- Side table for the list-shaped `touched_files` field.
+            -- One row per (path, source over row). Same shape as the
+            -- trailer-email table but keyed by file path instead of
+            -- email, because touched_files is a distinct semantic
+            -- axis and mixing them in one "kind" table would muddy
+            -- schema comments + widen the primary-key collisions.
+            CREATE TABLE IF NOT EXISTS over_touched_file (
+                path       TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                list       TEXT NOT NULL,
+                PRIMARY KEY (path, message_id, list)
+            );
             "#,
         )?;
 
@@ -451,6 +464,8 @@ impl OverDb {
             -- already supports the forward lookup used by scan_eq.
             CREATE INDEX IF NOT EXISTS over_trailer_email_mid_list
                 ON over_trailer_email (message_id, list);
+            CREATE INDEX IF NOT EXISTS over_touched_file_mid_list
+                ON over_touched_file (message_id, list);
 
             -- (message_id, list) is the natural identity key. Cross-posts
             -- legitimately share message_id across lists, so we cannot
@@ -595,6 +610,67 @@ impl OverDb {
         Ok(total)
     }
 
+    /// Populate `over_touched_file` for every existing row by
+    /// decoding its `ddd` blob and expanding `touched_files`.
+    /// Idempotent — DELETE before INSERT per (message_id, list).
+    /// Same rowid-cursor chunked pattern as the other backfills.
+    pub fn backfill_touched_files(&mut self) -> Result<u64> {
+        const CHUNK: usize = 50_000;
+        let mut cursor: i64 = 0;
+        let mut total: u64 = 0;
+        loop {
+            let mut pending: Vec<(String, String, Vec<String>)> = Vec::with_capacity(CHUNK);
+            let mut last_rowid = cursor;
+            {
+                let mut stmt = self.conn.prepare(
+                    "SELECT rowid, message_id, list, ddd FROM over \
+                     WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                while let Some(r) = rows.next()? {
+                    let rowid: i64 = r.get(0)?;
+                    let mid: String = r.get(1)?;
+                    let list: String = r.get(2)?;
+                    let blob: Vec<u8> = r.get(3)?;
+                    let paths = decode_ddd(&blob)
+                        .map(|p| p.touched_files)
+                        .unwrap_or_default();
+                    pending.push((mid, list, paths));
+                    last_rowid = rowid;
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction()?;
+            {
+                let mut del = tx.prepare(
+                    "DELETE FROM over_touched_file \
+                     WHERE message_id = ?1 AND list = ?2",
+                )?;
+                let mut ins = tx.prepare(
+                    "INSERT OR IGNORE INTO over_touched_file \
+                        (path, message_id, list) \
+                     VALUES (?1, ?2, ?3)",
+                )?;
+                for (mid, list, paths) in &pending {
+                    del.execute(rusqlite::params![mid, list])?;
+                    for path in paths {
+                        if !path.is_empty() {
+                            total += ins.execute(rusqlite::params![path, mid, list])?
+                                as u64;
+                        }
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            cursor = last_rowid;
+        }
+        Ok(total)
+    }
+
     /// Populate `over_trailer_email` for every existing row by
     /// decoding its `ddd` blob and extracting signed-off-by emails.
     /// Idempotent — DELETEs before INSERTing per (message_id, list).
@@ -691,6 +767,15 @@ impl OverDb {
                 (kind, email, message_id, list) \
              VALUES (?1, ?2, ?3, ?4)",
         )?;
+        let mut tf_del = tx.prepare(
+            "DELETE FROM over_touched_file \
+             WHERE message_id = ?1 AND list = ?2",
+        )?;
+        let mut tf_ins = tx.prepare(
+            "INSERT OR IGNORE INTO over_touched_file \
+                (path, message_id, list) \
+             VALUES (?1, ?2, ?3)",
+        )?;
         for row in rows {
             // Defensive lowercase: the indexed column is the lookup
             // surface, and `f:Foo@Bar` from the router resolves
@@ -733,6 +818,18 @@ impl OverDb {
                             row.list
                         ])?;
                     }
+                }
+            }
+
+            // touched_files side table — same REPLACE discipline.
+            tf_del.execute(rusqlite::params![row.message_id, row.list])?;
+            for path in &row.ddd.touched_files {
+                if !path.is_empty() {
+                    tf_ins.execute(rusqlite::params![
+                        path,
+                        row.message_id,
+                        row.list
+                    ])?;
                 }
             }
         }
@@ -834,6 +931,18 @@ impl OverDb {
             );
         }
 
+        // touched_files side-table fast path. Case-sensitive exact
+        // match because kernel paths are case-sensitive (`fs/smb/...`
+        // != `fs/SMB/...`).
+        if matches!(field, EqField::TouchedFile) {
+            return self.scan_eq_via_touched_file(
+                value,
+                since_unix_ns,
+                list_filter,
+                limit,
+            );
+        }
+
         let (where_clause, primary): (&str, String) = match field {
             EqField::FromAddr => ("from_addr = ?1", value.to_ascii_lowercase()),
             EqField::List => ("list = ?1", value.to_string()),
@@ -881,6 +990,57 @@ impl OverDb {
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        while let Some(r) = rows.next()? {
+            out.push(row_to_message(r)?);
+        }
+        Ok(out)
+    }
+
+    /// Indexed path for `eq('touched_files', <path>)`. JOIN against
+    /// `over_touched_file` (populated at insert time) rebuilds full
+    /// MessageRows in date-DESC order — same shape as the trailer-
+    /// email fast path.
+    fn scan_eq_via_touched_file(
+        &self,
+        path: &str,
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let mut sql = String::from(
+            "SELECT \
+                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
+                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
+                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
+                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
+             FROM over_touched_file t \
+             INNER JOIN over o \
+                ON o.message_id = t.message_id AND o.list = t.list \
+             WHERE t.path = ?1",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(path.to_string())];
+        let mut next_idx = 2_usize;
+        if let Some(since) = since_unix_ns {
+            sql.push_str(&format!(" AND o.date_unix_ns >= ?{next_idx}"));
+            params.push(Box::new(since));
+            next_idx += 1;
+        }
+        if let Some(list) = list_filter {
+            sql.push_str(&format!(" AND o.list = ?{next_idx}"));
+            params.push(Box::new(list.to_string()));
+            next_idx += 1;
+        }
+        sql.push_str(&format!(
+            " ORDER BY o.date_unix_ns DESC LIMIT ?{next_idx}"
+        ));
+        params.push(Box::new(limit as i64));
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
         let mut rows = stmt.query(param_refs.as_slice())?;
         let mut out = Vec::with_capacity(limit.min(1024));
         while let Some(r) = rows.next()? {
@@ -1414,6 +1574,87 @@ mod tests {
             .map(|e| format!("Someone <{e}>"))
             .collect();
         row
+    }
+
+    #[test]
+    fn scan_eq_touched_files_joins_side_table() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut r1 = sample_row("<t1@x>", "netdev", 1_000, "a@x");
+        r1.ddd.touched_files = vec![
+            "drivers/net/foo.c".into(),
+            "include/linux/foo.h".into(),
+        ];
+        let mut r2 = sample_row("<t2@x>", "linux-fs", 2_000, "b@x");
+        r2.ddd.touched_files = vec!["drivers/net/foo.c".into()];
+        let mut r3 = sample_row("<t3@x>", "netdev", 3_000, "c@x");
+        r3.ddd.touched_files = vec!["drivers/net/bar.c".into()];
+        db.insert_batch(&[r1, r2, r3]).unwrap();
+
+        // Cross-list lookup by exact path; newest-first.
+        let hits = db
+            .scan_eq(EqField::TouchedFile, "drivers/net/foo.c", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].message_id, "<t2@x>");
+        assert_eq!(hits[1].message_id, "<t1@x>");
+
+        // list_filter narrows.
+        let hits = db
+            .scan_eq(
+                EqField::TouchedFile,
+                "drivers/net/foo.c",
+                None,
+                Some("netdev"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<t1@x>");
+
+        // Non-matching path returns empty without a scan.
+        let hits = db
+            .scan_eq(EqField::TouchedFile, "kernel/sched/core.c", None, None, 10)
+            .unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn backfill_touched_files_populates_side_table() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut r1 = sample_row("<b1@x>", "lkml", 1, "a@x");
+        r1.ddd.touched_files = vec!["fs/x.c".into(), "fs/y.c".into()];
+        db.insert_batch(&[r1]).unwrap();
+        // Wipe the side table to simulate an older over.db.
+        db.conn
+            .execute("DELETE FROM over_touched_file", [])
+            .unwrap();
+
+        let n = db.backfill_touched_files().unwrap();
+        assert_eq!(n, 2);
+        let hits = db
+            .scan_eq(EqField::TouchedFile, "fs/x.c", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn insert_or_replace_prunes_stale_touched_file_rows() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut v1 = sample_row("<r@x>", "lkml", 1, "a@x");
+        v1.ddd.touched_files = vec!["fs/old.c".into()];
+        db.insert_batch(&[v1]).unwrap();
+        let mut v2 = sample_row("<r@x>", "lkml", 2, "a@x");
+        v2.ddd.touched_files = vec!["fs/new.c".into()];
+        db.insert_batch(&[v2]).unwrap();
+
+        let old_hits = db
+            .scan_eq(EqField::TouchedFile, "fs/old.c", None, None, 10)
+            .unwrap();
+        assert!(old_hits.is_empty(), "stale touched_file entry survived");
+        let new_hits = db
+            .scan_eq(EqField::TouchedFile, "fs/new.c", None, None, 10)
+            .unwrap();
+        assert_eq!(new_hits.len(), 1);
     }
 
     #[test]
