@@ -107,6 +107,16 @@ pub struct DddPayload {
     pub shard: Option<String>,
 }
 
+/// One row of per-list corpus stats. Produced by `per_list_stats`
+/// and surfaced through the `stats://coverage` MCP resource.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PerListStats {
+    pub list: String,
+    pub rows: u64,
+    pub earliest_date_unix_ns: Option<i64>,
+    pub latest_date_unix_ns: Option<i64>,
+}
+
 /// Owning handle around a rusqlite `Connection` plus the bookkeeping
 /// we want to keep with it (path, schema version checks).
 pub struct OverDb {
@@ -259,6 +269,35 @@ impl OverDb {
             .conn
             .query_row("SELECT COUNT(*) FROM over", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+
+    /// Coverage stats by list — one row per mailing list the corpus
+    /// has data for, with the window of dates we hold and the row
+    /// count. Powers the `stats://coverage` MCP resource and the
+    /// `lore_corpus_stats` tool so agents can ask "what IS in here,
+    /// and how fresh per list" without a private channel.
+    ///
+    /// Walks `over` GROUP BY list. The composite `over_list_date`
+    /// index lets the planner stream the group-by without a sort;
+    /// measured ~1 s on the 17.7M-row klmcp-local corpus. Deliberately
+    /// does NOT compute DISTINCT from_addr per list — that would
+    /// double the cost and callers who care can ask separately.
+    pub fn per_list_stats(&self) -> Result<Vec<PerListStats>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT list, COUNT(*), MIN(date_unix_ns), MAX(date_unix_ns) \
+             FROM over GROUP BY list ORDER BY list ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(PerListStats {
+                list: r.get(0)?,
+                rows: r.get::<_, i64>(1)? as u64,
+                earliest_date_unix_ns: r.get(2)?,
+                latest_date_unix_ns: r.get(3)?,
+            });
+        }
+        Ok(out)
     }
 
     /// Test-only constructor that uses an in-memory database.
@@ -1436,6 +1475,38 @@ mod tests {
             )
             .unwrap();
         assert!(hits3.is_empty());
+    }
+
+    #[test]
+    fn per_list_stats_reports_row_counts_and_date_windows() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let rows = vec![
+            sample_row("<a1@x>", "lkml", 1_000, "a@x"),
+            sample_row("<a2@x>", "lkml", 3_000, "b@x"),
+            sample_row("<a3@x>", "lkml", 2_000, "a@x"),
+            sample_row("<n1@x>", "netdev", 5_000, "c@x"),
+            sample_row("<e1@x>", "empty", 0, "d@x"),
+        ];
+        // mutate 'empty' row to have no date so MIN/MAX pick up NULLs
+        let mut rows = rows;
+        rows[4].date_unix_ns = None;
+        db.insert_batch(&rows).unwrap();
+
+        let stats = db.per_list_stats().unwrap();
+        assert_eq!(stats.len(), 3);
+        // Alphabetical order.
+        assert_eq!(stats[0].list, "empty");
+        assert_eq!(stats[0].rows, 1);
+        assert_eq!(stats[0].earliest_date_unix_ns, None);
+        assert_eq!(stats[0].latest_date_unix_ns, None);
+
+        assert_eq!(stats[1].list, "lkml");
+        assert_eq!(stats[1].rows, 3);
+        assert_eq!(stats[1].earliest_date_unix_ns, Some(1_000));
+        assert_eq!(stats[1].latest_date_unix_ns, Some(3_000));
+
+        assert_eq!(stats[2].list, "netdev");
+        assert_eq!(stats[2].rows, 1);
     }
 
     #[test]

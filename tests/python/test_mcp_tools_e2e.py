@@ -286,6 +286,38 @@ async def test_lore_author_footprint_rejects_non_email(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_corpus_stats_surfaces_per_list_rows(client: Client) -> None:
+    """The sample corpus has a handful of lists; corpus_stats should
+    surface each with a positive row count, coherent tier markers,
+    and a last_ingest_utc timestamp after ingest ran."""
+    result = await client.call_tool("lore_corpus_stats")
+    data = result.data
+    assert data.total_rows >= 1
+    assert data.lists_covered >= 1
+    assert len(data.lists) == data.lists_covered
+    assert data.generation >= 1
+    assert data.last_ingest_utc is not None
+    assert data.schema_version >= 1
+
+    for per_list in data.lists:
+        assert per_list.rows >= 1
+        # Earliest / latest populated unless the sample fixture had a
+        # row with no date (shouldn't).
+        assert per_list.earliest_date_unix_ns is not None
+        assert per_list.latest_date_unix_ns is not None
+        assert per_list.latest_date_unix_ns >= per_list.earliest_date_unix_ns
+
+    # Every tier marker present; status reflects the corpus gen.
+    tier_names = {t.tier for t in data.tiers}
+    assert tier_names == {"over", "bm25", "trigram", "tid"}
+    for tier in data.tiers:
+        assert tier.status in {
+            "in sync",
+            "marker absent",
+        } or tier.status.startswith(("behind by ", "ahead by "))
+
+
+@pytest.mark.asyncio
 async def test_lore_author_profile_include_mentions_requires_narrowing(
     client: Client,
 ) -> None:

@@ -12,6 +12,10 @@ from fastmcp import FastMCP
 from kernel_lore_mcp.config import Settings
 from kernel_lore_mcp.prompts import register_prompts
 from kernel_lore_mcp.resources.blind_spots import BLIND_SPOTS_URI, blind_spots_text
+from kernel_lore_mcp.resources.coverage_stats import (
+    COVERAGE_STATS_URI,
+    render_coverage_stats,
+)
 from kernel_lore_mcp.resources.templates import register_templated_resources
 from kernel_lore_mcp.routes.metrics import metrics_endpoint
 from kernel_lore_mcp.routes.status import status_endpoint
@@ -60,6 +64,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.activity import lore_activity
     from kernel_lore_mcp.tools.author_footprint import lore_author_footprint
     from kernel_lore_mcp.tools.author_profile import lore_author_profile
+    from kernel_lore_mcp.tools.corpus_stats import lore_corpus_stats
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.file_timeline import lore_file_timeline
     from kernel_lore_mcp.tools.maintainer_profile import lore_maintainer_profile
@@ -138,6 +143,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     _reg(lore_regex, "DFA-only regex scan")
     _reg(lore_diff, "Message-vs-message diff (patch / prose / raw)")
     _reg(lore_author_profile, "Aggregate profile for one from_addr")
+    _reg(lore_corpus_stats, "Coverage stats: per-list rows + tier freshness")
     _reg(
         lore_author_footprint,
         "Every lore message that mentions an address",
@@ -191,6 +197,34 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     )
     def _blind_spots() -> str:
         return blind_spots_text()
+
+    # Companion to blind_spots: `stats://coverage` answers "what IS
+    # in here" — per-list row counts, date windows, tier freshness.
+    # Markdown body so an LLM can cite it directly; the
+    # `lore_corpus_stats` tool returns the same data as a structured
+    # pydantic response for programmatic callers.
+    @mcp.resource(
+        uri=COVERAGE_STATS_URI,
+        name="coverage_stats",
+        description="Which lists ARE indexed, per-list row counts, tier freshness.",
+        mime_type="text/markdown",
+    )
+    def _coverage_stats() -> str:
+        # Share the cache with lore_corpus_stats so an agent that
+        # reads the resource and then calls the tool pays the GROUP
+        # BY once.
+        from kernel_lore_mcp import _core
+        from kernel_lore_mcp.config import get_settings
+        from kernel_lore_mcp.tools.corpus_stats import _cached_corpus_stats
+
+        settings = get_settings()
+        reader = _core.Reader(settings.data_dir)
+        try:
+            generation = reader.generation()
+        except Exception:
+            generation = 0
+        snap = _cached_corpus_stats(reader, str(settings.data_dir), generation)
+        return render_coverage_stats(snap)
 
     # Phase 10 — RFC-6570 templated resources. `lore://message/{mid}`,
     # `lore://thread/{tid}`, `lore://patch/{mid}` wrap existing reader

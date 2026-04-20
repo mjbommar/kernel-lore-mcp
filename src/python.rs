@@ -801,6 +801,52 @@ impl PyReader {
         Ok(ns)
     }
 
+    /// Corpus-level stats for the `stats://coverage` MCP resource +
+    /// `lore_corpus_stats` tool. Returns a dict shaped like:
+    ///
+    ///     {
+    ///       "total_rows": int,
+    ///       "generation": int,
+    ///       "generation_mtime_ns": int | None,
+    ///       "schema_version": int,
+    ///       "tier_generations": {"over": int|None, "bm25": ..., ...},
+    ///       "per_list": [
+    ///         {"list": str, "rows": int,
+    ///          "earliest_date_unix_ns": int|None,
+    ///          "latest_date_unix_ns": int|None},
+    ///         ...
+    ///       ],
+    ///     }
+    fn corpus_stats<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let stats = py.detach(|| self.inner.corpus_stats())?;
+        let out = PyDict::new(py);
+        out.set_item("total_rows", stats.total_rows)?;
+        out.set_item("generation", stats.generation)?;
+        out.set_item("generation_mtime_ns", stats.generation_mtime_ns)?;
+        out.set_item("schema_version", stats.schema_version)?;
+
+        let tiers = PyDict::new(py);
+        for (name, gen_val) in &stats.tier_generations {
+            tiers.set_item(name, gen_val)?;
+        }
+        out.set_item("tier_generations", tiers)?;
+
+        let lists = pyo3::types::PyList::empty(py);
+        for row in &stats.per_list {
+            let d = PyDict::new(py);
+            d.set_item("list", &row.list)?;
+            d.set_item("rows", row.rows)?;
+            d.set_item("earliest_date_unix_ns", row.earliest_date_unix_ns)?;
+            d.set_item("latest_date_unix_ns", row.latest_date_unix_ns)?;
+            lists.append(d)?;
+        }
+        out.set_item("per_list", lists)?;
+        Ok(out)
+    }
+
     /// Path tier: search for messages mentioning a file path.
     ///
     /// `match_mode`: "exact" | "basename" | "prefix".

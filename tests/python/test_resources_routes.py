@@ -88,6 +88,27 @@ async def test_blind_spots_resource_body_warns_on_declassification(client: Clien
     assert "security@kernel.org" in text
 
 
+@pytest.mark.asyncio
+async def test_coverage_stats_resource_listed(client: Client) -> None:
+    resources = await client.list_resources()
+    uris = {str(r.uri) for r in resources}
+    assert "stats://coverage" in uris
+
+
+@pytest.mark.asyncio
+async def test_coverage_stats_resource_renders_corpus_facts(
+    client: Client,
+) -> None:
+    contents = await client.read_resource("stats://coverage")
+    text = "".join(getattr(c, "text", "") or "" for c in contents)
+    # Headline facts the markdown must surface so an LLM can cite.
+    assert "Total indexed messages" in text
+    assert "linux-cifs" in text
+    assert "Tier generations" in text
+    # Complementary resource referenced for what is NOT in.
+    assert "blind-spots://coverage" in text
+
+
 def test_status_route_reports_generation_and_per_list(http_client: TestClient) -> None:
     r = http_client.get("/status")
     assert r.status_code == 200

@@ -50,6 +50,23 @@ fn over_pool_size() -> usize {
         .unwrap_or(3)
 }
 
+/// Corpus-level freshness + coverage snapshot. Populated by
+/// `Reader::corpus_stats`; surfaced through PyO3 as a dict of lists
+/// and scalars for the `lore_corpus_stats` MCP tool and the
+/// `stats://coverage` resource.
+#[derive(Debug, Clone)]
+pub struct CorpusStats {
+    pub total_rows: u64,
+    pub generation: u64,
+    pub generation_mtime_ns: Option<i64>,
+    pub schema_version: u32,
+    /// (tier_name, per-tier generation or None when the marker is
+    /// absent — legacy pre-marker deployment or a tier never
+    /// written).
+    pub tier_generations: Vec<(String, Option<u64>)>,
+    pub per_list: Vec<crate::over::PerListStats>,
+}
+
 /// One row's worth of metadata, flattened for consumption.
 #[derive(Debug, Clone, Default)]
 pub struct MessageRow {
@@ -393,6 +410,92 @@ impl Reader {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Corpus-level summary: total rows, per-list breakdown, main
+    /// generation + per-tier generations. Powers the
+    /// `stats://coverage` MCP resource and the `lore_corpus_stats`
+    /// tool so agents can see which lists are indexed and how fresh
+    /// each tier is, without having to hit `/status` (HTTP-only).
+    ///
+    /// `None` from any tier generation means "marker not set" —
+    /// legacy deployments pre-dating per-tier markers, or a tier
+    /// that hasn't yet been written. Callers should treat NULL and
+    /// `Some(corpus_gen)` as both-fine for freshness display;
+    /// `Some(older)` is the drift signal.
+    pub fn corpus_stats(&self) -> Result<CorpusStats> {
+        let state = crate::state::State::new(&self.data_dir)?;
+        let generation = state.generation().unwrap_or(0);
+        let generation_mtime_ns = self.generation_mtime_ns()?;
+        let tier_names = ["over", "bm25", "trigram", "tid"];
+        let mut tier_generations = Vec::with_capacity(tier_names.len());
+        for name in &tier_names {
+            let g = state.tier_generation(name).ok().flatten();
+            tier_generations.push(((*name).to_string(), g));
+        }
+        // Per-list stats come from over.db when available (fast,
+        // indexed); a fresh deployment without over.db falls back to
+        // an empty list — `lore_corpus_stats` callers already know
+        // over.db is how we answer this, and a no-over deployment is
+        // explicitly documented as slower.
+        let per_list = match self.with_over(|db| db.per_list_stats()) {
+            Some(res) => res?,
+            None => self.per_list_stats_via_parquet()?,
+        };
+        let total_rows: u64 = per_list.iter().map(|s| s.rows).sum();
+        Ok(CorpusStats {
+            total_rows,
+            generation,
+            generation_mtime_ns,
+            schema_version: crate::over::SCHEMA_VERSION as u32,
+            tier_generations,
+            per_list,
+        })
+    }
+
+    /// Parquet-only fallback for per-list stats on deployments
+    /// without over.db. Streams every row once, aggregates into a
+    /// BTreeMap so output stays deterministic. O(N) — acceptable
+    /// because corpus_stats is cached by the Python caller on the
+    /// 30s TTL, so a pristine-new deployment pays this once per
+    /// generation until over.db lands. The over.db-backed path is
+    /// ~60x faster on lore scale.
+    fn per_list_stats_via_parquet(&self) -> Result<Vec<crate::over::PerListStats>> {
+        use std::collections::BTreeMap;
+        struct Agg {
+            rows: u64,
+            earliest: Option<i64>,
+            latest: Option<i64>,
+        }
+        let mut by_list: BTreeMap<String, Agg> = BTreeMap::new();
+        self.scan_streaming(None, |row| {
+            let entry = by_list.entry(row.list.clone()).or_insert(Agg {
+                rows: 0,
+                earliest: None,
+                latest: None,
+            });
+            entry.rows += 1;
+            if let Some(ns) = row.date_unix_ns {
+                entry.earliest = Some(match entry.earliest {
+                    Some(e) if e <= ns => e,
+                    _ => ns,
+                });
+                entry.latest = Some(match entry.latest {
+                    Some(l) if l >= ns => l,
+                    _ => ns,
+                });
+            }
+            true
+        })?;
+        Ok(by_list
+            .into_iter()
+            .map(|(list, agg)| crate::over::PerListStats {
+                list,
+                rows: agg.rows,
+                earliest_date_unix_ns: agg.earliest,
+                latest_date_unix_ns: agg.latest,
+            })
+            .collect())
     }
 
     /// Last-mutation time of the generation file, in nanoseconds since
