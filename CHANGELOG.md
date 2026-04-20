@@ -8,6 +8,101 @@ Unreleased changes accumulate under an `## [Unreleased]` heading;
 release tags move them into a dated section. Release process in
 [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
+## [Unreleased]
+
+### Added
+
+**v0.2.0 sync pipeline.** The legacy `grok-pull` (Python grokmirror)
++ separate `kernel-lore-ingest` two-process chain is replaced by a
+single `kernel-lore-sync` Rust binary that holds the writer lock
+across manifest fetch → gix smart-HTTP fetch → ingest → tid rebuild
+→ generation bump → per-tier markers → manifest cache save. Ships
+as `klmcp-sync.{service,timer}`; the old three-unit chain is marked
+LEGACY but still works. Exit codes (0/2/3) distinguish success /
+partial-shard failure / manifest unreachable for systemd alerting.
+
+**Four perf wins on the primary hot paths.**
+- `patch_search` cross-list: 9.8 s → 360 ms warm (27×). Parallel
+  trigram segment walk with an atomic candidate cap, per-segment
+  reader cache, date-sorted + parallel confirm that early-exits at
+  `limit`.
+- `activity(file=…, list=None)` cross-list: full Parquet scan →
+  5–44 ms. New `over_touched_file` SQLite side table populated at
+  insert time; 15 M row backfill on lore scale.
+- `eq('signed_off_by', …)` (+ reviewed_by/acked_by/tested_by/co_
+  developed_by/reported_by): full ddd-blob scan → ≤0.15 ms. New
+  `over_trailer_email(kind, email, mid, list)` side table; 12 M
+  row backfill.
+- `eq('subject_normalized', …)`: ddd-blob scan → 10 ms via a
+  promoted column on `over`, populated in-place on existing DBs
+  via the new `backfill_subject_normalized` helper.
+- `eq('body_sha256' | 'commit_oid', …)`: timeout → <0.1 ms via
+  partial indexes on existing columns.
+
+**MCP surface expansion.**
+- `stats://coverage` resource + `lore_corpus_stats` tool — closes
+  the "what IS in here" transparency gap. Per-list row counts +
+  date windows, tier drift status, 30 s in-process cache keyed on
+  `(data_dir, generation)` with automatic invalidation on ingest.
+- `lore_author_footprint` — every lore message mentioning an
+  address (authored + trailer mentions + BM25 body match).
+  Complements `lore_author_profile`'s narrower authored-only
+  surface.
+- HMAC-signed pagination cursors wired through `lore_search`.
+  Query-scoped `query_hash` prevents cross-query replay; tampering
+  surfaces as `invalid_argument` rather than silent acceptance.
+- Git-sidecar wiring into `lore_stable_backport_status` + `lore_
+  thread_state`. When `kernel-lore-build-git-sidecar` has been run
+  against `linux-stable*` / mainline trees, both tools upgrade
+  from pure-lore heuristic to authoritative git-history answers,
+  with a `backend` discriminator on every response so callers can
+  weight confidence.
+
+**Production hardening.**
+- Per-cost-class concurrency caps (`cost_class.py`) with a
+  structured `rate_limited` error shape; per-class asyncio
+  Semaphore (cheap=1024 / moderate=32 / expensive=4).
+- Thread-local `Deadline` wiring through Rust scan paths so
+  adversarial queries terminate at the `asyncio.wait_for` boundary
+  instead of wedging the thread pool.
+- `KLMCP_DISABLE_OVER` env var + `Reader::new_no_over` constructor
+  for safer parity testing — replaces the old rename-the-file
+  protocol that once corrupted a live deploy.
+- `include_mentions=True` on `lore_author_profile` now requires
+  `list_filter` or `since_unix_ns` — prevents unbounded trailer
+  scans on anonymous multi-tenant instances.
+- Compressed store moved from NFS to local NVMe (F1 in the
+  over.db follow-ups doc).
+
+**Primitives layer.**
+- `_core.sign_cursor` / `_core.verify_cursor` PyO3 bindings.
+- `_core.git_sidecar_find_sha` / `_core.git_sidecar_find_by_
+  subject_author` / `_core.git_sidecar_repos` for tool-layer access
+  to the git-sidecar tier.
+- `_core.backfill_*` family (subject_normalized, trailer_emails,
+  touched_files) for in-place migration of existing over.db files.
+
+### Changed
+
+- `ingest_shard_with_bm25` generation-bump gate corrected: was
+  firing whenever `shared_bm25.is_none()`, which caused the new
+  multi-shard sync/ingest binaries (`skip_bm25=true`, no shared
+  BM25) to double-bump per run. Now gated on
+  `shared_bm25.is_some() || skip_bm25`, so callers that orchestrate
+  BM25/tid/gen themselves don't get an intermediate bump.
+- `kernel_prose` analyzer, trigram tier, tokenizer fingerprint —
+  all unchanged; on-disk format stable across this release.
+
+### Deprecated
+
+- Legacy `klmcp-grokmirror.{service,timer}` +
+  `klmcp-ingest.{path,service}` systemd units. Marked LEGACY in
+  their unit descriptions; removal scheduled for v0.3.0.
+- `KLMCP_GROKMIRROR_INTERVAL_SECONDS` and
+  `KLMCP_INGEST_DEBOUNCE_SECONDS` env vars. Replaced by the
+  systemd timer `OnUnitActiveSec` + the writer-lock flock (no
+  debounce needed when one binary holds the lock end-to-end).
+
 ## [0.1.0] — 2026-04-15
 
 Inaugural public release. Anonymous read-only MCP server over

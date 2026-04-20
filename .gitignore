@@ -58,3 +58,6 @@ manifest.js.gz
 
 # Local scratch / validation harnesses (not part of the shipping surface).
 scratch/
+
+# Claude Code session state (scheduled task locks, wake-ups, etc.)
+.claude/
