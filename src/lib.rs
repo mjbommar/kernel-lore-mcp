@@ -84,6 +84,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_backfill_side_table_dates,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_rebuild_path_vocab,
         m
     )?)?;

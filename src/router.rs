@@ -428,10 +428,18 @@ fn rrf_merge(tiers: HashMap<&'static str, Vec<MessageRow>>, limit: usize) -> Vec
 // --------------------------------------------------------------------
 // Cursor: HMAC-signed opaque pagination token.
 
+/// Pagination cursor payload.
+///
+/// `last_seen_score` is overloaded to carry either a relevance
+/// score (`lore_search` RRF) or a `date_unix_ns` tiebreak (the
+/// newest-first tools like `lore_patch_search`, `lore_activity`,
+/// `lore_regex`, `lore_author_footprint`). `f64` precision keeps
+/// nanosecond dates exact; for relevance scores in `[0, 1]` it's
+/// overkill but harmless.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CursorPayload {
     pub query_hash: u64,
-    pub last_seen_score: f32,
+    pub last_seen_score: f64,
     pub last_seen_mid: String,
 }
 

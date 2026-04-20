@@ -110,6 +110,26 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
     Ok(n)
 }
 
+/// Backfill the denormalized `date_unix_ns` column on the trailer
+/// and touched-file side tables. Needed once on over.db files
+/// built before the #64 composite-index optimization — rows with
+/// a NULL `date_unix_ns` are skipped by the covering index, so
+/// the popular-maintainer fast path only engages after this runs.
+/// Returns total rows updated. Idempotent; safe to re-run.
+#[pyfunction]
+#[pyo3(name = "backfill_side_table_dates")]
+pub fn py_backfill_side_table_dates(
+    py: Python<'_>,
+    data_dir: PathBuf,
+) -> PyResult<u64> {
+    let n = py.detach(|| -> crate::error::Result<u64> {
+        let over_path = data_dir.join("over.db");
+        let mut db = crate::over::OverDb::open(&over_path)?;
+        db.backfill_side_table_dates()
+    })?;
+    Ok(n)
+}
+
 /// Rebuild `<data_dir>/paths/vocab.txt` from the distinct set of
 /// paths already indexed in over.db's `over_touched_file` side
 /// table. Returns the number of paths written. A return value of
@@ -295,7 +315,7 @@ pub fn py_git_sidecar_repos<'py>(
 pub fn py_sign_cursor(
     secret: &[u8],
     query_hash: u64,
-    last_seen_score: f32,
+    last_seen_score: f64,
     last_seen_mid: String,
 ) -> PyResult<String> {
     let payload = crate::router::CursorPayload {
@@ -317,7 +337,7 @@ pub fn py_sign_cursor(
 pub fn py_verify_cursor(
     secret: &[u8],
     token: &str,
-) -> PyResult<(u64, f32, String)> {
+) -> PyResult<(u64, f64, String)> {
     let payload = crate::router::verify_cursor(secret, token)?;
     Ok((
         payload.query_hash,

@@ -18,6 +18,7 @@ from typing import Annotated
 from pydantic import Field
 
 from kernel_lore_mcp.config import get_settings
+from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.kwic import build_snippet_from_body
 from kernel_lore_mcp.mapping import row_to_search_hit
@@ -56,6 +57,18 @@ async def lore_patch_search(
             ),
         ),
     ] = 0,
+    cursor: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Opaque HMAC-signed pagination token. Pass a "
+                "`next_cursor` from a prior response to resume after "
+                "the last returned hit (newest-first by message "
+                "date). Bound to the `needle` + `list` + `fuzzy_edits` "
+                "combination — changing any invalidates the cursor."
+            ),
+        ),
+    ] = None,
 ) -> SearchResponse:
     """Substring search over patch bodies (exact or fuzzy).
 
@@ -66,19 +79,59 @@ async def lore_patch_search(
 
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
+
+    # Cursor scope: needle + list + fuzzy_edits uniquely define the
+    # sorted result set. `limit` is NOT part of the hash so callers
+    # can change page size between calls without re-issuing the
+    # query.
+    q_hash = query_hash("lore_patch_search", needle, list or "", fuzzy_edits)
+    resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
+
+    # Oversample 2× so we have headroom for the cursor skip PLUS a
+    # one-row look-ahead to detect "more pages exist." Trigram-
+    # confirm is the expensive step; the cap protects against
+    # runaway confirm cost (MAX_PATCH_CANDIDATES still applies).
+    fetch_budget = max(limit * 2 + 1, 16)
     rows = await run_with_timeout(
         reader.patch_search,
         needle,
         list,
-        limit,
+        fetch_budget,
         fuzzy_edits,
         echoed_input={"needle": needle, "fuzzy_edits": fuzzy_edits},
     )
+
+    # Rows come back newest-first by date_unix_ns. Skip past the
+    # resume point: strictly older date OR same-date + mid > last.
+    if resume is not None:
+        last_date, last_mid = resume
+        kept: list[dict] = []
+        for r in rows:
+            date = float(r.get("date_unix_ns") or 0)
+            mid = str(r.get("message_id") or "")
+            if date < last_date or (date == last_date and mid > last_mid):
+                kept.append(r)
+        rows = kept
+
+    total_available = len(rows)
+    page = rows[:limit]
+
     hits = []
-    for r in rows:
+    for r in page:
         body = await asyncio.to_thread(reader.fetch_body, r["message_id"])
         snippet = build_snippet_from_body(body, needle, r.get("body_sha256"))
         hits.append(row_to_search_hit(r, tier_provenance=["trigram"], snippet=snippet))
+
+    # Emit cursor from the last returned row when more hits remain
+    # beyond this page.
+    next_cursor: str | None = None
+    if page and total_available > limit:
+        last = page[-1]
+        next_cursor = mint_cursor(
+            q_hash=q_hash,
+            last_score=float(last.get("date_unix_ns") or 0),
+            last_mid=str(last.get("message_id") or ""),
+        )
 
     default_applied: list[str] = []
     if fuzzy_edits > 0:
@@ -86,7 +139,7 @@ async def lore_patch_search(
 
     return SearchResponse(
         results=hits,
-        next_cursor=None,
+        next_cursor=next_cursor,
         query_tiers_hit=["trigram"] if hits else [],
         default_applied=default_applied,
         freshness=build_freshness(reader),

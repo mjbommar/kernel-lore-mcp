@@ -378,10 +378,16 @@ impl OverDb {
             -- Entries preserving the full trailer text live in the
             -- `over.ddd` blob; this table is purely an index surface.
             CREATE TABLE IF NOT EXISTS over_trailer_email (
-                kind       TEXT NOT NULL,
-                email      TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                list       TEXT NOT NULL,
+                kind          TEXT NOT NULL,
+                email         TEXT NOT NULL,
+                message_id    TEXT NOT NULL,
+                list          TEXT NOT NULL,
+                -- Denormalized from `over.date_unix_ns` so the
+                -- (kind, email, date DESC) index can serve top-N
+                -- popular-maintainer lookups without a TEMP B-TREE
+                -- sort (#64). NULL is valid for pre-migration rows;
+                -- the sort places them last.
+                date_unix_ns  INTEGER,
                 PRIMARY KEY (kind, email, message_id, list)
             );
 
@@ -392,9 +398,11 @@ impl OverDb {
             -- axis and mixing them in one "kind" table would muddy
             -- schema comments + widen the primary-key collisions.
             CREATE TABLE IF NOT EXISTS over_touched_file (
-                path       TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                list       TEXT NOT NULL,
+                path          TEXT NOT NULL,
+                message_id    TEXT NOT NULL,
+                list          TEXT NOT NULL,
+                -- Denormalized date; see the trailer-email notes.
+                date_unix_ns  INTEGER,
                 PRIMARY KEY (path, message_id, list)
             );
             "#,
@@ -413,6 +421,16 @@ impl OverDb {
         // on every open.
         if !column_exists(conn, "over", "subject_normalized")? {
             conn.execute_batch("ALTER TABLE over ADD COLUMN subject_normalized TEXT;")?;
+        }
+        if !column_exists(conn, "over_trailer_email", "date_unix_ns")? {
+            conn.execute_batch(
+                "ALTER TABLE over_trailer_email ADD COLUMN date_unix_ns INTEGER;",
+            )?;
+        }
+        if !column_exists(conn, "over_touched_file", "date_unix_ns")? {
+            conn.execute_batch(
+                "ALTER TABLE over_touched_file ADD COLUMN date_unix_ns INTEGER;",
+            )?;
         }
         conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('source_tier', 'parquet:metadata/')",
@@ -466,6 +484,19 @@ impl OverDb {
                 ON over_trailer_email (message_id, list);
             CREATE INDEX IF NOT EXISTS over_touched_file_mid_list
                 ON over_touched_file (message_id, list);
+
+            -- Covering indexes for the "popular maintainer" access
+            -- pattern (#64). Prior to denormalizing date_unix_ns
+            -- into the side tables, the top-N ORDER BY required
+            -- walking every matching row (28k+ SOBs for gregkh) +
+            -- a TEMP B-TREE sort. With this index the planner
+            -- streams top-N directly and stops early.
+            CREATE INDEX IF NOT EXISTS over_trailer_email_kind_email_date
+                ON over_trailer_email (kind, email, date_unix_ns DESC)
+                WHERE date_unix_ns IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS over_touched_file_path_date
+                ON over_touched_file (path, date_unix_ns DESC)
+                WHERE date_unix_ns IS NOT NULL;
 
             -- (message_id, list) is the natural identity key. Cross-posts
             -- legitimately share message_id across lists, so we cannot
@@ -610,6 +641,96 @@ impl OverDb {
         Ok(total)
     }
 
+    /// Fill the denormalized `date_unix_ns` column on existing
+    /// `over_trailer_email` and `over_touched_file` rows by copying
+    /// from the `over` table. Idempotent — skips rows where
+    /// `date_unix_ns IS NOT NULL`. Returns total updates.
+    ///
+    /// Needed once on every over.db built before #64 landed so the
+    /// popular-maintainer fast path actually engages (the covering
+    /// index only indexes rows with a non-NULL date).
+    ///
+    /// Chunked by rowid to keep the WAL bounded — the naive single
+    /// correlated-UPDATE rewrite generates a 10+ GB WAL on lore
+    /// scale and either hangs or blows disk.
+    pub fn backfill_side_table_dates(&mut self) -> Result<u64> {
+        let mut total: u64 = 0;
+        total += self.backfill_dates_for_table("over_trailer_email")?;
+        total += self.backfill_dates_for_table("over_touched_file")?;
+        Ok(total)
+    }
+
+    fn backfill_dates_for_table(&mut self, table: &str) -> Result<u64> {
+        const CHUNK: usize = 50_000;
+        let select_sql = format!(
+            "SELECT rowid, message_id, list FROM {table} \
+             WHERE rowid > ?1 AND date_unix_ns IS NULL \
+             ORDER BY rowid ASC LIMIT ?2"
+        );
+        let update_sql = format!(
+            "UPDATE {table} SET date_unix_ns = ?1 \
+             WHERE rowid = ?2 AND date_unix_ns IS NULL"
+        );
+        let mut cursor: i64 = 0;
+        let mut total: u64 = 0;
+        loop {
+            let mut pending: Vec<(i64, String, String)> = Vec::with_capacity(CHUNK);
+            let mut last_rowid = cursor;
+            {
+                let mut stmt = self.conn.prepare(&select_sql)?;
+                let mut rows =
+                    stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                while let Some(r) = rows.next()? {
+                    let rowid: i64 = r.get(0)?;
+                    let mid: String = r.get(1)?;
+                    let list: String = r.get(2)?;
+                    pending.push((rowid, mid, list));
+                    last_rowid = rowid;
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            // Look up dates from over in one bounded SELECT per
+            // chunk — avoids the correlated subquery plan that
+            // SQLite otherwise turns into a nested-loop full scan.
+            let mut date_lookup =
+                std::collections::HashMap::<(String, String), i64>::with_capacity(
+                    pending.len(),
+                );
+            {
+                let mut get = self.conn.prepare(
+                    "SELECT date_unix_ns FROM over \
+                     WHERE message_id = ?1 AND list = ?2 \
+                       AND date_unix_ns IS NOT NULL",
+                )?;
+                for (_, mid, list) in &pending {
+                    if let Ok(d) = get.query_row(
+                        rusqlite::params![mid, list],
+                        |r| r.get::<_, i64>(0),
+                    ) {
+                        date_lookup.insert((mid.clone(), list.clone()), d);
+                    }
+                }
+            }
+
+            let tx = self.conn.transaction()?;
+            {
+                let mut upd = tx.prepare(&update_sql)?;
+                for (rowid, mid, list) in &pending {
+                    if let Some(d) = date_lookup.get(&(mid.clone(), list.clone())) {
+                        total += upd.execute(rusqlite::params![d, rowid])? as u64;
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            cursor = last_rowid;
+        }
+        Ok(total)
+    }
+
     /// Populate `over_touched_file` for every existing row by
     /// decoding its `ddd` blob and expanding `touched_files`.
     /// Idempotent — DELETE before INSERT per (message_id, list).
@@ -619,11 +740,12 @@ impl OverDb {
         let mut cursor: i64 = 0;
         let mut total: u64 = 0;
         loop {
-            let mut pending: Vec<(String, String, Vec<String>)> = Vec::with_capacity(CHUNK);
+            let mut pending: Vec<(String, String, Option<i64>, Vec<String>)> =
+                Vec::with_capacity(CHUNK);
             let mut last_rowid = cursor;
             {
                 let mut stmt = self.conn.prepare(
-                    "SELECT rowid, message_id, list, ddd FROM over \
+                    "SELECT rowid, message_id, list, date_unix_ns, ddd FROM over \
                      WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
                 )?;
                 let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
@@ -631,11 +753,12 @@ impl OverDb {
                     let rowid: i64 = r.get(0)?;
                     let mid: String = r.get(1)?;
                     let list: String = r.get(2)?;
-                    let blob: Vec<u8> = r.get(3)?;
+                    let date: Option<i64> = r.get(3)?;
+                    let blob: Vec<u8> = r.get(4)?;
                     let paths = decode_ddd(&blob)
                         .map(|p| p.touched_files)
                         .unwrap_or_default();
-                    pending.push((mid, list, paths));
+                    pending.push((mid, list, date, paths));
                     last_rowid = rowid;
                 }
             }
@@ -650,15 +773,16 @@ impl OverDb {
                 )?;
                 let mut ins = tx.prepare(
                     "INSERT OR IGNORE INTO over_touched_file \
-                        (path, message_id, list) \
-                     VALUES (?1, ?2, ?3)",
+                        (path, message_id, list, date_unix_ns) \
+                     VALUES (?1, ?2, ?3, ?4)",
                 )?;
-                for (mid, list, paths) in &pending {
+                for (mid, list, date, paths) in &pending {
                     del.execute(rusqlite::params![mid, list])?;
                     for path in paths {
                         if !path.is_empty() {
-                            total += ins.execute(rusqlite::params![path, mid, list])?
-                                as u64;
+                            total += ins.execute(rusqlite::params![
+                                path, mid, list, date
+                            ])? as u64;
                         }
                     }
                 }
@@ -681,11 +805,12 @@ impl OverDb {
         let mut cursor: i64 = 0;
         let mut total: u64 = 0;
         loop {
-            let mut pending: Vec<(String, String, DddPayload)> = Vec::with_capacity(CHUNK);
+            let mut pending: Vec<(String, String, Option<i64>, DddPayload)> =
+                Vec::with_capacity(CHUNK);
             let mut last_rowid = cursor;
             {
                 let mut stmt = self.conn.prepare(
-                    "SELECT rowid, message_id, list, ddd FROM over \
+                    "SELECT rowid, message_id, list, date_unix_ns, ddd FROM over \
                      WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
                 )?;
                 let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
@@ -693,9 +818,10 @@ impl OverDb {
                     let rowid: i64 = r.get(0)?;
                     let mid: String = r.get(1)?;
                     let list: String = r.get(2)?;
-                    let blob: Vec<u8> = r.get(3)?;
+                    let date: Option<i64> = r.get(3)?;
+                    let blob: Vec<u8> = r.get(4)?;
                     let ddd = decode_ddd(&blob).unwrap_or_default();
-                    pending.push((mid, list, ddd));
+                    pending.push((mid, list, date, ddd));
                     last_rowid = rowid;
                 }
             }
@@ -710,17 +836,17 @@ impl OverDb {
                 )?;
                 let mut ins = tx.prepare(
                     "INSERT OR IGNORE INTO over_trailer_email \
-                        (kind, email, message_id, list) \
-                     VALUES (?1, ?2, ?3, ?4)",
+                        (kind, email, message_id, list, date_unix_ns) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
                 )?;
-                for (mid, list, ddd) in &pending {
+                for (mid, list, date, ddd) in &pending {
                     del.execute(rusqlite::params![mid, list])?;
                     for (kind, raws) in trailer_email_sources(ddd) {
                         for raw in raws {
                             let email = crate::reader::extract_email(raw);
                             if !email.is_empty() {
                                 total += ins.execute(rusqlite::params![
-                                    kind, email, mid, list
+                                    kind, email, mid, list, date
                                 ])? as u64;
                             }
                         }
@@ -764,8 +890,8 @@ impl OverDb {
         )?;
         let mut tr_ins = tx.prepare(
             "INSERT OR IGNORE INTO over_trailer_email \
-                (kind, email, message_id, list) \
-             VALUES (?1, ?2, ?3, ?4)",
+                (kind, email, message_id, list, date_unix_ns) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         let mut tf_del = tx.prepare(
             "DELETE FROM over_touched_file \
@@ -773,8 +899,8 @@ impl OverDb {
         )?;
         let mut tf_ins = tx.prepare(
             "INSERT OR IGNORE INTO over_touched_file \
-                (path, message_id, list) \
-             VALUES (?1, ?2, ?3)",
+                (path, message_id, list, date_unix_ns) \
+             VALUES (?1, ?2, ?3, ?4)",
         )?;
         for row in rows {
             // Defensive lowercase: the indexed column is the lookup
@@ -815,7 +941,8 @@ impl OverDb {
                             kind,
                             email,
                             row.message_id,
-                            row.list
+                            row.list,
+                            row.date_unix_ns,
                         ])?;
                     }
                 }
@@ -828,7 +955,8 @@ impl OverDb {
                     tf_ins.execute(rusqlite::params![
                         path,
                         row.message_id,
-                        row.list
+                        row.list,
+                        row.date_unix_ns,
                     ])?;
                 }
             }
@@ -998,10 +1126,12 @@ impl OverDb {
         Ok(out)
     }
 
-    /// Indexed path for `eq('touched_files', <path>)`. JOIN against
-    /// `over_touched_file` (populated at insert time) rebuilds full
-    /// MessageRows in date-DESC order — same shape as the trailer-
-    /// email fast path.
+    /// Indexed path for `eq('touched_files', <path>)`. Uses the
+    /// `over_touched_file_path_date` covering index to pick the
+    /// top-N (path, date_unix_ns DESC) rows directly, then a
+    /// bounded JOIN against `over` for full MessageRows. Compared
+    /// to the previous full-JOIN-then-sort plan this is
+    /// dramatically faster for prolific paths (#64).
     fn scan_eq_via_touched_file(
         &self,
         path: &str,
@@ -1009,34 +1139,44 @@ impl OverDb {
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
-        let mut sql = String::from(
-            "SELECT \
-                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
-                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
-                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
-                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
-             FROM over_touched_file t \
-             INNER JOIN over o \
-                ON o.message_id = t.message_id AND o.list = t.list \
-             WHERE t.path = ?1",
+        // Inner subquery walks the covering index, filters by
+        // since / list, stops at LIMIT. Outer query rebuilds
+        // MessageRows with a bounded number of JOIN probes.
+        let mut inner = String::from(
+            "SELECT message_id, list, date_unix_ns \
+             FROM over_touched_file \
+             WHERE path = ?1 AND date_unix_ns IS NOT NULL",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(path.to_string())];
         let mut next_idx = 2_usize;
         if let Some(since) = since_unix_ns {
-            sql.push_str(&format!(" AND o.date_unix_ns >= ?{next_idx}"));
+            inner.push_str(&format!(" AND date_unix_ns >= ?{next_idx}"));
             params.push(Box::new(since));
             next_idx += 1;
         }
         if let Some(list) = list_filter {
-            sql.push_str(&format!(" AND o.list = ?{next_idx}"));
+            inner.push_str(&format!(" AND list = ?{next_idx}"));
             params.push(Box::new(list.to_string()));
             next_idx += 1;
         }
-        sql.push_str(&format!(
-            " ORDER BY o.date_unix_ns DESC LIMIT ?{next_idx}"
+        inner.push_str(&format!(
+            " ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"
         ));
         params.push(Box::new(limit as i64));
+
+        let sql = format!(
+            "WITH picked AS ({inner}) \
+             SELECT \
+                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
+                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
+                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
+                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
+             FROM picked p \
+             INNER JOIN over o \
+                ON o.message_id = p.message_id AND o.list = p.list \
+             ORDER BY p.date_unix_ns DESC"
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> =
@@ -1051,8 +1191,13 @@ impl OverDb {
 
     /// Indexed path for list-shaped trailer fields whose extracted
     /// email was materialized into `over_trailer_email` at insert
-    /// time. Joins the side table back against `over` to rebuild
-    /// full MessageRows while walking in date-DESC order.
+    /// time. The `over_trailer_email_kind_email_date` covering
+    /// index lets us pick the top-N newest rows directly, then do
+    /// a bounded JOIN into `over` for full MessageRows. Previously
+    /// popular maintainers (gregkh, kuba, davem) matched 28k+ SOB
+    /// rows that all had to be JOIN'd before a TEMP B-TREE sort —
+    /// 50-60ms on lore scale. Post-fix this runs in single-digit
+    /// ms regardless of how prolific the committer is.
     fn scan_eq_via_trailer_email(
         &self,
         kind: &str,
@@ -1061,34 +1206,41 @@ impl OverDb {
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
-        let mut sql = String::from(
-            "SELECT \
-                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
-                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
-                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
-                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
-             FROM over_trailer_email t \
-             INNER JOIN over o \
-                ON o.message_id = t.message_id AND o.list = t.list \
-             WHERE t.kind = ?1 AND t.email = ?2",
+        let mut inner = String::from(
+            "SELECT message_id, list, date_unix_ns \
+             FROM over_trailer_email \
+             WHERE kind = ?1 AND email = ?2 AND date_unix_ns IS NOT NULL",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> =
             vec![Box::new(kind.to_string()), Box::new(email_lc.to_string())];
         let mut next_idx = 3_usize;
         if let Some(since) = since_unix_ns {
-            sql.push_str(&format!(" AND o.date_unix_ns >= ?{next_idx}"));
+            inner.push_str(&format!(" AND date_unix_ns >= ?{next_idx}"));
             params.push(Box::new(since));
             next_idx += 1;
         }
         if let Some(list) = list_filter {
-            sql.push_str(&format!(" AND o.list = ?{next_idx}"));
+            inner.push_str(&format!(" AND list = ?{next_idx}"));
             params.push(Box::new(list.to_string()));
             next_idx += 1;
         }
-        sql.push_str(&format!(
-            " ORDER BY o.date_unix_ns DESC LIMIT ?{next_idx}"
+        inner.push_str(&format!(
+            " ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"
         ));
         params.push(Box::new(limit as i64));
+
+        let sql = format!(
+            "WITH picked AS ({inner}) \
+             SELECT \
+                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
+                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
+                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
+                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
+             FROM picked p \
+             INNER JOIN over o \
+                ON o.message_id = p.message_id AND o.list = p.list \
+             ORDER BY p.date_unix_ns DESC"
+        );
 
         let mut stmt = self.conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> =

@@ -240,10 +240,16 @@ class RowsResponse(BaseModel):
     primitives (eq / in_list / substr_* / regex) — none of which
     rank, so no fused score and `tier_provenance` is fixed per
     primitive.
+
+    `next_cursor` is populated by tools that paginate (currently
+    `lore_regex` and the low-level `substr_*` primitives with
+    pagination-wired variants); unpaginated tools always return
+    `None` here.
     """
 
     results: list[SearchHit]
     total: int
+    next_cursor: str | None = None
     freshness: Freshness
     blind_spots_ref: str = "blind-spots://coverage"
 

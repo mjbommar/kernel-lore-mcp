@@ -284,5 +284,16 @@ def _warmup_tiers(settings: Settings) -> None:
             reader.router_search("list:lkml", 1)
         except Exception as exc:  # noqa: BLE001
             log.debug("router warmup skipped: %s", exc)
+        # Trigram segment cache: `patch_search` opens ~530 segments
+        # cross-list on lore scale; first call costs ~9 s page-in
+        # even with the per-process cache (#66). Fire a cheap probe
+        # here so the OS page cache holds the fst/postings/docs
+        # files before the first real request. Needle is picked to
+        # hit enough trigrams that the full walk runs but stop at
+        # one result so we don't spend wall-clock on the confirm.
+        try:
+            reader.patch_search("__function__", None, 1)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("trigram warmup skipped: %s", exc)
     except Exception as exc:  # noqa: BLE001
         log.debug("warmup skipped entirely: %s", exc)

@@ -24,6 +24,7 @@ from typing import Annotated
 from pydantic import Field
 
 from kernel_lore_mcp.config import get_settings
+from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.errors import invalid_argument, unknown_enum
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.kwic import build_snippet
@@ -349,6 +350,18 @@ async def lore_regex(
         int | None, Field(description="Date lower-bound (ns since epoch).")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200)] = 100,
+    cursor: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Opaque HMAC-signed pagination token. Pass a prior "
+                "response's `next_cursor` to resume newest-first "
+                "after the last returned hit. Bound to the "
+                "(field, pattern, anchor_required, list, since) "
+                "combination — changing any invalidates the cursor."
+            ),
+        ),
+    ] = None,
 ) -> RowsResponse:
     """DFA-only regex scan over one of {subject, from_addr, body_prose, patch}.
 
@@ -367,6 +380,18 @@ async def lore_regex(
 
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
+
+    q_hash = query_hash(
+        "lore_regex",
+        field,
+        pattern,
+        int(anchor_required),
+        list or "",
+        since_unix_ns or 0,
+    )
+    resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
+
+    fetch_budget = max(limit * 2 + 1, 32)
     rows = await run_with_timeout(
         reader.regex,
         field,
@@ -374,13 +399,32 @@ async def lore_regex(
         anchor_required,
         list,
         since_unix_ns,
-        limit,
+        fetch_budget,
     )
-    return _rows_to_response(
-        rows,
-        tier="metadata" if field in {"subject", "from_addr"} else "trigram",
-        reader=reader,
-    )
+
+    if resume is not None:
+        last_date, last_mid = resume
+        kept: list[dict] = []
+        for r in rows:
+            date = float(r.get("date_unix_ns") or 0)
+            mid = str(r.get("message_id") or "")
+            if date < last_date or (date == last_date and mid > last_mid):
+                kept.append(r)
+        rows = kept
+
+    total_available = len(rows)
+    page = rows[:limit]
+    tier = "metadata" if field in {"subject", "from_addr"} else "trigram"
+    response = _rows_to_response(page, tier=tier, reader=reader)
+
+    if page and total_available > limit:
+        last = page[-1]
+        response.next_cursor = mint_cursor(
+            q_hash=q_hash,
+            last_score=float(last.get("date_unix_ns") or 0),
+            last_mid=str(last.get("message_id") or ""),
+        )
+    return response
 
 
 async def lore_diff(
