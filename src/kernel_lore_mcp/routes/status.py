@@ -91,8 +91,56 @@ def _build_status(settings: Settings) -> dict[str, Any]:
         "configured_interval_seconds": interval,
         "freshness_ok": freshness_ok,
         "per_list": per_list,
+        "capabilities": capabilities(data_dir),
         "blind_spots_ref": "blind-spots://coverage",
     }
+
+
+def capabilities(data_dir: Path) -> dict[str, bool]:
+    """Which optional tiers are provisioned on this deployment?
+
+    Callers + monitoring use this to distinguish "feature returned
+    no results" from "feature not available on this server". Each
+    field is a cheap filesystem probe — no index open, no SQL.
+    """
+    state = data_dir / "state"
+    # Per-tier generation markers are written at the end of ingest
+    # only when the tier committed cleanly; missing marker == tier
+    # never written on this data_dir OR a legacy pre-marker build.
+    return {
+        "metadata_ready": _has_any(data_dir / "metadata"),
+        "over_db_ready": (data_dir / "over.db").exists(),
+        "bm25_ready": (state / "bm25.generation").exists(),
+        "trigram_ready": (state / "trigram.generation").exists(),
+        "tid_ready": (state / "tid.generation").exists(),
+        "path_vocab_ready": (data_dir / "paths" / "vocab.txt").exists(),
+        "embedding_ready": (data_dir / "embeddings" / "meta.json").exists(),
+        "maintainers_ready": _maintainers_ready(data_dir),
+        "git_sidecar_ready": (data_dir / "git_sidecar.db").exists(),
+    }
+
+
+def _has_any(root: Path) -> bool:
+    """True when `root` exists and holds at least one regular file
+    anywhere beneath it. Used to test tiers whose shape is
+    "directory full of Parquet shards" (metadata/ under ingest)."""
+    if not root.exists() or not root.is_dir():
+        return False
+    for _ in root.rglob("*"):
+        return True
+    return False
+
+
+def _maintainers_ready(data_dir: Path) -> bool:
+    """MAINTAINERS can live at `<data_dir>/MAINTAINERS` (the default)
+    or an explicit absolute path in `$KLMCP_MAINTAINERS_FILE` — this
+    mirrors the loader discipline in src/reader.rs."""
+    import os
+
+    override = os.environ.get("KLMCP_MAINTAINERS_FILE")
+    if override:
+        return Path(override).exists()
+    return (data_dir / "MAINTAINERS").exists()
 
 
 def _native_version() -> str:

@@ -110,6 +110,34 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
     Ok(n)
 }
 
+/// Rebuild `<data_dir>/paths/vocab.txt` from the distinct set of
+/// paths already indexed in over.db's `over_touched_file` side
+/// table. Returns the number of paths written. A return value of
+/// `0` means "over.db not present" or "no paths in the corpus yet"
+/// — both recoverable, tools surface the "vocab missing" error
+/// at call time so callers see a clear actionable message.
+#[pyfunction]
+#[pyo3(name = "rebuild_path_vocab")]
+pub fn py_rebuild_path_vocab(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let n = py.detach(|| crate::path_tier::rebuild_vocab_from_over(&data_dir))?;
+    Ok(n)
+}
+
+/// Non-destructive probe: does `<data_dir>/paths/vocab.txt` exist
+/// with at least one entry? Tools and the `/status` endpoint use
+/// this to distinguish "path-tier ready" from "path-tier absent"
+/// without loading the full AhoCorasick automaton.
+#[pyfunction]
+#[pyo3(name = "path_vocab_ready")]
+pub fn py_path_vocab_ready(py: Python<'_>, data_dir: PathBuf) -> PyResult<bool> {
+    let ready = py.detach(|| -> bool {
+        crate::path_tier::load_vocab(&data_dir)
+            .map(|v| v.is_some_and(|vocab| !vocab.is_empty()))
+            .unwrap_or(false)
+    });
+    Ok(ready)
+}
+
 /// One-off backfill for the touched-files side table. Walks every
 /// existing over.db row, decodes its ddd blob, and materializes
 /// `touched_files` entries so `eq('touched_files', path)` and the

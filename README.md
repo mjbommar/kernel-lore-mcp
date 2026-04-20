@@ -12,27 +12,44 @@ everywhere. Every agent that asks us a question is one fewer
 agent scraping lore directly; fanout-to-one is the value
 proposition.
 
-## Quick start (5 minutes, zero accounts)
+## Quick start
+
+Install is one command. The *first sync* is where real time goes —
+budget honestly depending on what you want to cover:
+
+| Shape | Disk | First-sync wall-clock |
+|---|---|---|
+| 1–2 small lists (`wireguard`, `xdp-newbies`) | ~1 GB | 1–5 min |
+| Subsystem slice (lkml + netdev + linux-cifs) | ~25 GB | 15–60 min |
+| Full lore (390 shards, every list) | ~100 GB | 4–12 h |
+
+Steady-state syncs on the 5-min timer after cold-start are seconds.
 
 ```sh
 # 1. install — one command, pre-built abi3 wheel, no Rust toolchain required
 uv tool install kernel-lore-mcp
 
 # 2. first sync — manifest fetch + gix fetch + ingest in one process
-#    under one writer lock. ~10-30 min depending on include scope.
+#    under one writer lock. Pick a small slice for a first experiment:
 export KLMCP_DATA_DIR=~/klmcp-data
 mkdir -p "$KLMCP_DATA_DIR"
 kernel-lore-sync \
     --data-dir "$KLMCP_DATA_DIR" \
     --with-over \
-    --include '/lkml/*' --include '/linux-cifs/*' --include '/netdev/*'
-# Omit --include to mirror all 390 shards (~100+ GB first run).
+    --include '/wireguard/*' --include '/linux-cifs/*'
+# Drop --include to mirror all ~390 lists. Plan the disk + time.
 
-# 3. confirm freshness (no HTTP server needed)
+# 3. (optional, recommended) build the path-mention index. Tiny, fast.
+python -c 'from kernel_lore_mcp import _core; \
+           print(_core.rebuild_path_vocab("'"$KLMCP_DATA_DIR"'"))'
+
+# 4. confirm freshness + which capabilities are provisioned
 kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
-# { "generation": >= 1, "freshness_ok": true, ... }
+# Look at `capabilities`: each over_db / bm25 / path_vocab / embedding /
+# maintainers / git_sidecar boolean tells you which tools will actually
+# return data on this deployment.
 
-# 4. verify the MCP surface — zero API cost
+# 5. verify the MCP surface — zero API cost
 git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp && ./scripts/agentic_smoke.sh local
 # PASS: 6/6 tools, 5/5 resource templates, 5/5 prompts.
@@ -42,6 +59,24 @@ Then pick your agent and copy its snippet from
 [`docs/mcp/client-config.md`](./docs/mcp/client-config.md). All four
 clients (Claude Code, Codex, Cursor, Zed) work over stdio against
 the exact same server binary.
+
+### Optional capabilities — opt in when you need them
+
+The baseline sync gives you everything a typical query asks for.
+Three tiers are explicitly opt-in because they cost disk or time
+and not every deployment wants them:
+
+| Capability | Build | When you want it |
+|---|---|---|
+| BM25 prose search (`b:` / free text) | `kernel-lore-ingest --rebuild-bm25` | semantic-free text search over prose bodies |
+| Semantic embeddings (`lore_nearest`, `lore_similar`) | `kernel-lore-embed --data-dir $KLMCP_DATA_DIR` | "more like this" / free-text → vector ANN |
+| Git-sidecar (authoritative `merged` + `picked_up`) | `kernel-lore-build-git-sidecar --repo linux-stable --path /path/to/linux-stable.git` | upgrades `lore_stable_backport_status` + `lore_thread_state` from lore heuristic to git-history truth |
+| MAINTAINERS snapshot | drop a `MAINTAINERS` file into `$KLMCP_DATA_DIR` or point `$KLMCP_MAINTAINERS_FILE` at one | `lore_maintainer_profile` declared-vs-observed ownership |
+
+`kernel-lore-mcp status` reports which are ready via the
+`capabilities` field, and tools that need an un-provisioned tier
+return a `setup_required` error naming the exact command to fix it
+(no silent empty results).
 
 ### Install from source
 

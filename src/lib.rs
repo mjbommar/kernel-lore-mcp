@@ -83,6 +83,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         crate::python::py_backfill_touched_files,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::python::py_rebuild_path_vocab,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::python::py_path_vocab_ready,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_sign_cursor, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_verify_cursor, m)?)?;
     m.add_function(wrap_pyfunction!(

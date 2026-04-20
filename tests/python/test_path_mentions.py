@@ -27,7 +27,14 @@ from tests.python.fixtures import make_synthetic_shard
 
 
 def _setup_with_vocab(tmp_path: Path) -> Path:
-    """Ingest + build path vocab."""
+    """Ingest + build path vocab via the production helper.
+
+    Historically this test hand-rolled the vocab by scanning
+    `touched_files` and writing `paths/vocab.txt` directly — that
+    drift bait is exactly the "tribal knowledge" the onboarding
+    review flagged. We now call the same `_core.rebuild_path_vocab`
+    helper the runbook documents.
+    """
     shard_dir = tmp_path / "shards" / "0.git"
     shard_dir.parent.mkdir(parents=True)
     make_synthetic_shard(shard_dir)
@@ -40,18 +47,12 @@ def _setup_with_vocab(tmp_path: Path) -> Path:
         shard="0",
         run_id="path-test",
     )
-    # Build the path vocab from the ingested metadata.
-    reader = _core.Reader(data_dir)
-    # Collect all touched_files from all rows.
-    rows = reader.eq("list", "linux-cifs", None, None, 1000)
-    all_paths: set[str] = set()
-    for r in rows:
-        for f in r.get("touched_files") or []:
-            all_paths.add(f)
-    # Write vocab file so path_mentions() can find it.
-    vocab_dir = data_dir / "paths"
-    vocab_dir.mkdir(exist_ok=True)
-    (vocab_dir / "vocab.txt").write_text("\n".join(sorted(all_paths)))
+    # rebuild_path_vocab walks over.db when it's present and falls
+    # back to Parquet when it isn't — the Python single-shard
+    # ingest path doesn't open over.db, so this test exercises the
+    # Parquet fallback.
+    n = _core.rebuild_path_vocab(data_dir)
+    assert n > 0, "rebuild_path_vocab returned 0 — Parquet fallback missed"
     return data_dir
 
 
@@ -121,3 +122,58 @@ def test_rust_path_tier_roundtrip(tmp_path: Path) -> None:
     rows = reader.path_mentions("smbacl.c", "basename")
     mids = {r["message_id"] for r in rows}
     assert "m1@x" in mids
+
+
+@pytest_asyncio.fixture
+async def client_without_vocab(tmp_path: Path) -> AsyncIterator[Client]:
+    """Fresh deployment shape — ingested shard but no vocab built.
+    Used to assert the setup_required error surfaces cleanly
+    instead of the old silent-empty behavior."""
+    shard_dir = tmp_path / "shards" / "0.git"
+    shard_dir.parent.mkdir(parents=True)
+    make_synthetic_shard(shard_dir)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _core.ingest_shard(
+        data_dir=data_dir,
+        shard_path=shard_dir,
+        list="linux-cifs",
+        shard="0",
+        run_id="no-vocab-test",
+    )
+    os.environ["KLMCP_DATA_DIR"] = str(data_dir)
+    try:
+        async with Client(build_server()) as c:
+            yield c
+    finally:
+        os.environ.pop("KLMCP_DATA_DIR", None)
+
+
+@pytest.mark.asyncio
+async def test_path_mentions_surfaces_setup_required_without_vocab(
+    client_without_vocab: Client,
+) -> None:
+    """Without `paths/vocab.txt`, the tool used to return `[]` —
+    indistinguishable from "no matches". Post-#72 it raises a
+    structured `setup_required` that names the build command."""
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as exc:
+        await client_without_vocab.call_tool(
+            "lore_path_mentions",
+            {"path": "fs/smb/server/smbacl.c", "match": "exact"},
+        )
+    msg = str(exc.value)
+    assert "setup_required" in msg
+    assert "rebuild_path_vocab" in msg
+
+
+def test_rebuild_path_vocab_empty_data_dir_returns_zero(tmp_path: Path) -> None:
+    """Fresh data_dir with no over.db → 0, no crash. Lets operators
+    run the helper eagerly without first checking whether ingest
+    has run."""
+    data_dir = tmp_path / "empty"
+    data_dir.mkdir()
+    n = _core.rebuild_path_vocab(data_dir)
+    assert n == 0
+    assert _core.path_vocab_ready(data_dir) is False

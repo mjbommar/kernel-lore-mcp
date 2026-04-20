@@ -80,6 +80,17 @@ def render_coverage_stats(stats: dict) -> str:
         lines.append(f"| {name} | {gen_str} | {status} |")
     lines.append("")
 
+    caps: dict[str, bool] = stats.get("capabilities", {})
+    if caps:
+        lines.append("## Capabilities")
+        lines.append("")
+        lines.append("| capability | ready |")
+        lines.append("|---|---|")
+        for name in sorted(caps):
+            flag = "yes" if caps[name] else "no"
+            lines.append(f"| `{name}` | {flag} |")
+        lines.append("")
+
     if per_list:
         lines.append("## Per-list coverage")
         lines.append("")

@@ -133,6 +133,28 @@ def invalid_cursor(*, reason: str, cursor: str) -> LoreError:
     )
 
 
+def setup_required(
+    *,
+    feature: str,
+    missing: str,
+    build_cmd: str,
+) -> LoreError:
+    """An optional capability was invoked but its prerequisite tier
+    hasn't been built on this deployment. Surface a one-shot command
+    the operator can run to provision it rather than returning an
+    empty result that looks like "no data matches" — silent
+    degradation is the worst UX because it leaves the caller
+    unable to distinguish "nothing there" from "feature not
+    provisioned."
+    """
+    return LoreError(
+        "setup_required",
+        f"{feature} requires {missing!r} but it has not been built on "
+        f"this deployment. Run `{build_cmd}` once, then retry.",
+        valid_example=build_cmd,
+    )
+
+
 def query_too_long(*, name: str, length: int, limit: int) -> LoreError:
     """Request field exceeds the server's length cap.
 
@@ -154,5 +176,6 @@ __all__ = [
     "invalid_cursor",
     "not_found",
     "query_too_long",
+    "setup_required",
     "unknown_enum",
 ]

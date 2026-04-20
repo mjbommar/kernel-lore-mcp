@@ -121,24 +121,15 @@ os.environ["KLMCP_DATA_DIR"] = "$work/data"
 sys.path.insert(0, "$repo_root")
 from fastmcp import Client
 from kernel_lore_mcp.server import build_server
-
-NEED_TOOLS = {
-    "lore_search", "lore_eq", "lore_patch_search",
-    "lore_summarize_thread", "lore_classify_patch",
-    "lore_explain_review_status",
-}
-NEED_TEMPLATES = {
-    "lore://message/{mid}", "lore://thread/{tid}",
-    "lore://patch/{mid}", "lore://maintainer/{path}",
-    "lore://patchwork/{msg_id}",
-}
-NEED_PROMPTS = {
-    "klmcp_pre_disclosure_novelty_check",
-    "klmcp_cve_chain_expand",
-    "klmcp_series_version_diff",
-    "klmcp_recent_reviewers_for",
-    "klmcp_cross_subsystem_pattern_transfer",
-}
+# Single source of truth for the "must exist" surface — see
+# src/kernel_lore_mcp/_surface_manifest.py. Drift between this list
+# and the live server registration fails the paired pytest in CI
+# (tests/python/test_surface_manifest.py).
+from kernel_lore_mcp._surface_manifest import (
+    REQUIRED_TOOLS as NEED_TOOLS,
+    REQUIRED_RESOURCE_TEMPLATES as NEED_TEMPLATES,
+    REQUIRED_PROMPTS as NEED_PROMPTS,
+)
 
 async def main():
     async with Client(build_server()) as c:

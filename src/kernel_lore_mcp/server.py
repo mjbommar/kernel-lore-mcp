@@ -215,6 +215,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         # BY once.
         from kernel_lore_mcp import _core
         from kernel_lore_mcp.config import get_settings
+        from kernel_lore_mcp.routes.status import capabilities
         from kernel_lore_mcp.tools.corpus_stats import _cached_corpus_stats
 
         settings = get_settings()
@@ -223,7 +224,12 @@ def build_server(settings: Settings | None = None) -> FastMCP:
             generation = reader.generation()
         except Exception:
             generation = 0
-        snap = _cached_corpus_stats(reader, str(settings.data_dir), generation)
+        snap = dict(_cached_corpus_stats(reader, str(settings.data_dir), generation))
+        # Capabilities are a deployment-state question, not a corpus
+        # query — compute them at resource-assembly time so the
+        # markdown surfaces them even on fresh data_dirs where the
+        # Rust corpus_stats returns an empty envelope.
+        snap["capabilities"] = capabilities(settings.data_dir)
         return render_coverage_stats(snap)
 
     # Phase 10 — RFC-6570 templated resources. `lore://message/{mid}`,

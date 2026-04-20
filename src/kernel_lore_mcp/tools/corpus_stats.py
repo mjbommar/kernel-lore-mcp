@@ -86,6 +86,16 @@ class CorpusStatsResponse(BaseModel):
     )
     tiers: list[TierGeneration]
     lists: list[PerListStats]
+    capabilities: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Per-tier readiness booleans — `over_db_ready`, "
+            "`bm25_ready`, `trigram_ready`, `tid_ready`, "
+            "`path_vocab_ready`, `embedding_ready`, `maintainers_ready`, "
+            "`git_sidecar_ready`, `metadata_ready`. Lets callers "
+            "distinguish 'no results' from 'feature not provisioned'."
+        ),
+    )
     freshness: Freshness
     blind_spots_ref: str = "blind-spots://coverage"
 
@@ -199,6 +209,8 @@ async def lore_corpus_stats(
         for r in per_list_raw
     ]
 
+    from kernel_lore_mcp.routes.status import capabilities as _capabilities
+
     return CorpusStatsResponse(
         total_rows=int(stats.get("total_rows", 0)),
         lists_covered=len(lists),
@@ -207,5 +219,6 @@ async def lore_corpus_stats(
         schema_version=int(stats.get("schema_version", 0)),
         tiers=tiers,
         lists=lists,
+        capabilities=_capabilities(settings.data_dir),
         freshness=build_freshness(reader),
     )

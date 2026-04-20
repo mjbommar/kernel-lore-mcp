@@ -76,6 +76,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="ONLY rebuild BM25 from the existing store, then exit.",
     )
+    p.add_argument(
+        "--allow-empty",
+        action="store_true",
+        default=False,
+        help=(
+            "Treat a missing-or-empty mirror path as a successful no-op "
+            "(exit 0) instead of a hard error. Use this for idempotent "
+            "cron-style pipelines where an empty mirror is expected on "
+            "fresh data_dirs. Default: fail loudly so first-run "
+            "misconfiguration surfaces before ingest 'succeeds' silently."
+        ),
+    )
     return p
 
 
@@ -151,13 +163,37 @@ def main(argv: list[str] | None = None) -> int:
 
     run_id = args.run_id or f"run-{int(time.time())}"
 
-    shards = _discover_shards(lore_mirror, args.only_list)
-    if not shards:
-        log.warning(
-            "no shards under %s (expected <list>/git/<N>.git layout); nothing to ingest",
+    if not lore_mirror.is_dir():
+        if args.allow_empty:
+            log.warning(
+                "mirror path %s does not exist — skipping (--allow-empty)",
+                lore_mirror,
+            )
+            return 0
+        log.error(
+            "mirror path %s does not exist. Set KLMCP_LORE_MIRROR_DIR "
+            "(or --lore-mirror) to your public-inbox-mirror root, or "
+            "pass --allow-empty for a cron-style no-op.",
             lore_mirror,
         )
-        return 0
+        return 2
+
+    shards = _discover_shards(lore_mirror, args.only_list)
+    if not shards:
+        if args.allow_empty:
+            log.warning(
+                "no shards under %s — skipping (--allow-empty)",
+                lore_mirror,
+            )
+            return 0
+        log.error(
+            "no shards under %s. Expected a public-inbox v2 layout "
+            "like <list>/git/0.git; looks like the mirror is empty or "
+            "misconfigured. Pass --allow-empty to treat this as a "
+            "successful no-op for cron-style pipelines.",
+            lore_mirror,
+        )
+        return 2
 
     log.info(
         "ingest starting: data_dir=%s mirror=%s shards=%d run_id=%s",

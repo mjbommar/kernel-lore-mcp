@@ -152,6 +152,77 @@ pub fn paths_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("paths")
 }
 
+/// Build (or rebuild) `<data_dir>/paths/vocab.txt` from whatever
+/// source has the distinct-paths signal.
+///
+/// Primary source: `over.db::over_touched_file` — one indexed
+/// `SELECT DISTINCT` over a (path, ...) primary key. Fast; this is
+/// the production path once `backfill_touched_files` has run.
+///
+/// Fallback: stream every Parquet row in `<data_dir>/metadata/` and
+/// union their `touched_files` lists. Slower but works on fresh
+/// deployments and on the Python single-shard ingest path that
+/// doesn't write to over.db by default. Returns `Ok(0)` only when
+/// the corpus genuinely carries no touched_files (e.g. an all-prose
+/// list).
+pub fn rebuild_vocab_from_over(data_dir: &Path) -> Result<u64> {
+    let mut paths: Vec<String> = Vec::new();
+    if let Some(from_over) = collect_paths_from_over(data_dir)? {
+        paths = from_over;
+    }
+    if paths.is_empty() {
+        // Fallback: walk the metadata Parquet. The Reader already
+        // implements this shape via `scan_streaming`; calling it
+        // here keeps one dedup strategy.
+        let reader = crate::reader::Reader::new(data_dir);
+        let mut seen = std::collections::BTreeSet::<String>::new();
+        reader.scan_streaming(None, |row| {
+            for p in &row.touched_files {
+                if !p.is_empty() {
+                    seen.insert(p.clone());
+                }
+            }
+            true
+        })?;
+        paths = seen.into_iter().collect();
+    }
+    let count = paths.len() as u64;
+    if count == 0 {
+        return Ok(0);
+    }
+    let vocab = PathVocab::from_paths(paths)?;
+    save_vocab(data_dir, &vocab)?;
+    Ok(count)
+}
+
+fn collect_paths_from_over(data_dir: &Path) -> Result<Option<Vec<String>>> {
+    use rusqlite::Connection;
+
+    let over_path = data_dir.join("over.db");
+    if !over_path.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(
+        &over_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    // `SELECT DISTINCT path` on the composite PRIMARY KEY streams
+    // in sorted order without a temp sort.
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT path FROM over_touched_file ORDER BY path ASC",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut paths: Vec<String> = Vec::new();
+    while let Some(r) = rows.next()? {
+        let p: String = r.get(0)?;
+        if !p.is_empty() {
+            paths.push(p);
+        }
+    }
+    Ok(Some(paths))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

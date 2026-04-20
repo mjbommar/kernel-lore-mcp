@@ -23,6 +23,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from kernel_lore_mcp.config import get_settings
+from kernel_lore_mcp.errors import setup_required
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import RowsResponse
@@ -72,6 +73,20 @@ async def lore_path_mentions(
     from kernel_lore_mcp import _core
 
     settings = get_settings()
+    # Setup check: without paths/vocab.txt the Rust reader returns an
+    # empty list instead of an error, which looks identical to "no
+    # matches" from the caller's point of view. Fail loudly with an
+    # actionable `setup_required` so the operator sees the one-shot
+    # command that provisions the tier.
+    if not _core.path_vocab_ready(settings.data_dir):
+        raise setup_required(
+            feature="lore_path_mentions",
+            missing=f"{settings.data_dir}/paths/vocab.txt",
+            build_cmd=(
+                "python -c 'from kernel_lore_mcp import _core; "
+                f"print(_core.rebuild_path_vocab(\"{settings.data_dir}\"))'"
+            ),
+        )
     reader = _core.Reader(settings.data_dir)
     rows = await run_with_timeout(reader.path_mentions, path, match, list, since_unix_ns, limit)
     hits = [row_to_search_hit(r, tier_provenance=["path"]) for r in rows]
