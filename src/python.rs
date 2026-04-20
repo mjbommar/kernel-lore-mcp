@@ -119,6 +119,49 @@ pub fn py_rebuild_bm25(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
     Ok(count)
 }
 
+/// HMAC-sign a pagination cursor.
+///
+/// `secret` is the raw bytes of the server's cursor-signing key
+/// (typically loaded from `$KLMCP_CURSOR_KEY` in the Python layer).
+/// Returns a URL-safe base64 string the tool response can include as
+/// `next_cursor`. The signing happens Rust-side to keep one source
+/// of truth for the wire format — see src/router.rs.
+#[pyfunction]
+#[pyo3(name = "sign_cursor")]
+pub fn py_sign_cursor(
+    secret: &[u8],
+    query_hash: u64,
+    last_seen_score: f32,
+    last_seen_mid: String,
+) -> PyResult<String> {
+    let payload = crate::router::CursorPayload {
+        query_hash,
+        last_seen_score,
+        last_seen_mid,
+    };
+    Ok(crate::router::sign_cursor(secret, &payload)?)
+}
+
+/// Verify and unpack a pagination cursor produced by `sign_cursor`.
+///
+/// Raises `ValueError` (mapped from `Error::InvalidCursor`) on any
+/// tampering, malformed base64, or secret mismatch. Returns a
+/// `(query_hash, last_seen_score, last_seen_mid)` tuple so Python
+/// callers don't need a PyClass binding for CursorPayload.
+#[pyfunction]
+#[pyo3(name = "verify_cursor")]
+pub fn py_verify_cursor(
+    secret: &[u8],
+    token: &str,
+) -> PyResult<(u64, f32, String)> {
+    let payload = crate::router::verify_cursor(secret, token)?;
+    Ok((
+        payload.query_hash,
+        payload.last_seen_score,
+        payload.last_seen_mid,
+    ))
+}
+
 /// Incremental, streaming builder for the embedding index.
 ///
 /// Python opens one `EmbeddingBuilder`, pushes batches via

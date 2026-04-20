@@ -54,13 +54,15 @@ async def test_thread_on_missing_mid_short_circuits() -> None:
 
 @pytest.mark.asyncio
 async def test_forged_cursor_is_rejected() -> None:
-    """Before the fix, the lore_search tool silently discarded any
-    caller-supplied cursor (`_ = cursor  # TODO`). The MCP spec +
-    CLAUDE.md require HMAC-signed cursors; acceptance of arbitrary
-    garbage violated that contract.
+    """Before the original fix, the lore_search tool silently
+    discarded any caller-supplied cursor (`_ = cursor  # TODO`). The
+    MCP spec + CLAUDE.md require HMAC-signed cursors.
 
-    Current behavior until phase-5d pagination ships: any cursor
-    supplied is rejected as `invalid_cursor`.
+    Post-wire-through (#67): an arbitrary base64 blob is a forgery
+    attempt and gets `invalid_argument` on the `cursor` field —
+    consistent with every other tamper-detectable parameter (and
+    different from `invalid_cursor` the pre-pagination stub raised,
+    because the error class is now domain-scoped).
     """
     async with Client(build_server()) as c:
         with pytest.raises(ToolError) as exc_info:
@@ -73,7 +75,8 @@ async def test_forged_cursor_is_rejected() -> None:
                 },
             )
     msg = str(exc_info.value)
-    assert "invalid_cursor" in msg
+    assert "invalid_argument" in msg
+    assert "cursor" in msg
 
 
 # --- Finding 4 — query length cap ---------------------------------
