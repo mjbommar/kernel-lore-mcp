@@ -187,6 +187,13 @@ pub struct Reader {
     /// was a hot-path bug. Inner reader holds the shared IndexReader
     /// and a `last_reloaded_generation` atomic — see `bm25::BmReader`.
     bm25: RwLock<Option<Arc<crate::bm25::BmReader>>>,
+    /// Per-segment trigram reader cache. `SegmentReader::open` reads
+    /// three files (fst, postings, docs) fully into memory — on lore
+    /// scale a cross-list `patch_search` opens ~530 segments,
+    /// dominating latency even when reads hit page cache. Cache keys
+    /// are the segment directory path. Each value is an Arc so
+    /// rayon workers share one mmap'd read-view per segment.
+    trigram_segments: RwLock<HashMap<PathBuf, Arc<crate::trigram::SegmentReader>>>,
     /// Parsed MAINTAINERS index. Populated at Reader::new from
     /// `$KLMCP_MAINTAINERS_FILE` or `<data_dir>/MAINTAINERS`. Missing
     /// is fine — tools that need it surface "MAINTAINERS unavailable".
@@ -232,6 +239,7 @@ impl Reader {
             over,
             stores: RwLock::new(HashMap::new()),
             bm25: RwLock::new(None),
+            trigram_segments: RwLock::new(HashMap::new()),
             maintainers,
         }
     }
@@ -249,6 +257,7 @@ impl Reader {
             over: None,
             stores: RwLock::new(HashMap::new()),
             bm25: RwLock::new(None),
+            trigram_segments: RwLock::new(HashMap::new()),
             maintainers,
         }
     }
@@ -290,6 +299,33 @@ impl Reader {
         }
         *guard = Some(Arc::clone(&fresh));
         Ok(fresh)
+    }
+
+    /// Return an `Arc<SegmentReader>` for the given trigram segment
+    /// directory, opening it on first access and caching the handle.
+    /// Same check-then-insert discipline as `store_for`: the inner
+    /// data is immutable once built, so sharing one Arc across
+    /// rayon workers is safe. Eliminates the
+    /// ~16ms-per-segment open cost on warm cross-list queries.
+    fn trigram_segment_for(
+        &self,
+        dir: &Path,
+    ) -> Result<Arc<crate::trigram::SegmentReader>> {
+        if let Ok(guard) = self.trigram_segments.read()
+            && let Some(s) = guard.get(dir)
+        {
+            return Ok(Arc::clone(s));
+        }
+        let mut guard = self
+            .trigram_segments
+            .write()
+            .map_err(|_| Error::State("trigram segment cache poisoned".to_owned()))?;
+        if let Some(s) = guard.get(dir) {
+            return Ok(Arc::clone(s));
+        }
+        let seg = Arc::new(crate::trigram::SegmentReader::open(dir)?);
+        guard.insert(dir.to_owned(), Arc::clone(&seg));
+        Ok(seg)
     }
 
     /// Return an `Arc<Store>` for `list`, opening it on first access
@@ -1812,44 +1848,31 @@ impl Reader {
             None => list_trigram_lists(&self.data_dir)?,
         };
 
-        let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
-        'outer: for lst in &lists {
-            for seg_dir in crate::trigram::list_segments(&self.data_dir, lst)? {
-                let seg = crate::trigram::SegmentReader::open(&seg_dir)?;
-                for mid in seg.candidates_for_substring(needle.as_bytes()) {
-                    candidates.insert(mid.to_owned());
-                    if candidates.len() >= MAX_PATCH_CANDIDATES {
-                        break 'outer;
-                    }
-                }
-            }
-        }
-        if candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-        if candidates.len() >= MAX_PATCH_CANDIDATES {
-            return Err(Error::QueryParse(format!(
-                "patch_search: needle {needle:?} matches too many candidates \
-                 (>{MAX_PATCH_CANDIDATES}); narrow with list: or a longer substring"
-            )));
-        }
+        // Exact path shares the fuzzy path's parallel candidate
+        // enumerator with fuzzy_edits=0 — internally it routes to
+        // `candidates_for_substring`, so the behavior is identical
+        // to the old serial loop, just across a rayon pool.
+        let candidates = collect_trigram_candidates(
+            self,
+            &lists,
+            needle.as_bytes(),
+            0,
+        )?;
 
         let list_filter = list.map(str::to_owned);
         let needle_bytes = needle.as_bytes().to_owned();
-        let hits = self.hydrate_candidates(&candidates, list_filter.as_deref())?;
+        let mut hits = self.hydrate_candidates(&candidates, list_filter.as_deref())?;
 
-        // Confirm: decompress + byte-scan. Dropping ambiguous hits.
-        let mut confirmed = Vec::new();
-        for row in hits {
-            let store = self.store_for(&row.list)?;
-            let body = store.read_at(row.body_segment_id, row.body_offset)?;
-            if memchr::memmem::find(&body, &needle_bytes).is_some() {
-                confirmed.push(row);
-            }
-        }
+        // Date-DESC pre-sort lets the parallel confirm helper walk
+        // newest-first and early-exit as soon as `limit` hits are
+        // confirmed. Trigram emits candidates in segment order (not
+        // date order); most queries have a handful of genuine hits
+        // among many false positives, and the newest real matches
+        // almost always cluster near the top of the date-sorted
+        // list.
+        hits.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
 
-        confirmed.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
-        confirmed.truncate(limit);
+        let confirmed = parallel_confirm_substring(self, &needle_bytes, hits, limit)?;
         Ok(confirmed)
     }
 
@@ -1932,18 +1955,12 @@ impl Reader {
             None => list_trigram_lists(&self.data_dir)?,
         };
 
-        let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
-        'outer: for lst in &lists {
-            for seg_dir in crate::trigram::list_segments(&self.data_dir, lst)? {
-                let seg = crate::trigram::SegmentReader::open(&seg_dir)?;
-                for mid in seg.candidates_for_substring_fuzzy(needle.as_bytes(), fuzzy_edits) {
-                    candidates.insert(mid.to_owned());
-                    if candidates.len() >= MAX_PATCH_CANDIDATES {
-                        break 'outer;
-                    }
-                }
-            }
-        }
+        let candidates = collect_trigram_candidates(
+            self,
+            &lists,
+            needle.as_bytes(),
+            fuzzy_edits,
+        )?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -1956,34 +1973,9 @@ impl Reader {
 
         let list_filter = list.map(str::to_owned);
         let needle_bytes = needle.as_bytes().to_owned();
-        let hits = self.hydrate_candidates(&candidates, list_filter.as_deref())?;
-
-        let mut confirmed = Vec::new();
-        for row in hits {
-            let store = self.store_for(&row.list)?;
-            let body = store.read_at(row.body_segment_id, row.body_offset)?;
-            let is_match = if fuzzy_edits == 0 {
-                memchr::memmem::find(&body, &needle_bytes).is_some()
-            } else {
-                triple_accel::levenshtein::levenshtein_search_simd_with_opts(
-                    &needle_bytes,
-                    &body,
-                    fuzzy_edits,
-                    triple_accel::SearchType::Best,
-                    triple_accel::levenshtein::LEVENSHTEIN_COSTS,
-                    false,
-                )
-                .next()
-                .is_some()
-            };
-            if is_match {
-                confirmed.push(row);
-            }
-        }
-
-        confirmed.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
-        confirmed.truncate(limit);
-        Ok(confirmed)
+        let mut hits = self.hydrate_candidates(&candidates, list_filter.as_deref())?;
+        hits.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        parallel_confirm_fuzzy(self, &needle_bytes, hits, limit, fuzzy_edits)
     }
 
     /// Fetch the raw uncompressed body bytes for a given message-id.
@@ -2346,6 +2338,202 @@ pub struct DiffResult {
 /// Mirrors the match arms inside `OverDb::scan_eq`. Kept here so the
 /// Reader can short-circuit through over.db without the dispatch
 /// touching the slower sequential scan path inside the OverDb module.
+/// Confirm a substring over a date-DESC-sorted list of candidate
+/// rows, fanned out via rayon and chunked so we can early-exit as
+/// soon as `limit` hits have been confirmed.
+///
+/// Why chunked instead of one big par_iter:
+///   * Trigram candidate sets can be 10k–100k rows; on a rare-
+///     identifier query most of them are false positives but the
+///     newest N are overwhelmingly concentrated near the head of
+///     the date-sorted list. Walking in chunks lets us stop after
+///     a few thousand instead of decompressing the whole tail.
+///   * A single par_iter over 100k rows would spawn work for all
+///     of them before we see the first match.
+///
+/// Errors propagate from the first failing row in chunk-order so
+/// the caller still sees store / decompression corruption rather
+/// than silently returning an under-filled result.
+fn parallel_confirm_substring(
+    reader: &Reader,
+    needle: &[u8],
+    date_sorted_hits: Vec<MessageRow>,
+    limit: usize,
+) -> Result<Vec<MessageRow>> {
+    use rayon::prelude::*;
+
+    const CHUNK: usize = 256;
+    let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
+    for chunk in date_sorted_hits.chunks(CHUNK) {
+        if confirmed.len() >= limit {
+            break;
+        }
+        // par_iter over the chunk, each worker decompresses its row
+        // and runs memmem. Collecting into `Vec<Result<Option<...>>>`
+        // keeps error propagation strict and deterministic.
+        let results: Vec<Result<Option<MessageRow>>> = chunk
+            .par_iter()
+            .map(|row| -> Result<Option<MessageRow>> {
+                let store = reader.store_for(&row.list)?;
+                let body = store.read_at(row.body_segment_id, row.body_offset)?;
+                if memchr::memmem::find(&body, needle).is_some() {
+                    Ok(Some(row.clone()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect();
+        for r in results {
+            if let Some(row) = r? {
+                confirmed.push(row);
+                if confirmed.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(confirmed)
+}
+
+/// Walk every trigram segment across every in-scope list in
+/// parallel, union the resulting candidate message-ids, and cap the
+/// total at `MAX_PATCH_CANDIDATES`. Returns `Error::QueryParse` when
+/// the cap is hit — forces callers to narrow their needle.
+///
+/// This replaces a serial loop that opened 500+ segments per query
+/// on the full lore corpus (measured at 8.4 s wall-clock for
+/// `smb_check_perm_dacl`). Fan-out across segments, not lists, so a
+/// list with many shards gets the same treatment as a list with one.
+fn collect_trigram_candidates(
+    reader: &Reader,
+    lists: &[String],
+    needle: &[u8],
+    fuzzy_edits: u32,
+) -> Result<std::collections::HashSet<String>> {
+    use rayon::prelude::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut all_segs: Vec<PathBuf> = Vec::new();
+    for lst in lists {
+        for seg_dir in crate::trigram::list_segments(&reader.data_dir, lst)? {
+            all_segs.push(seg_dir);
+        }
+    }
+    if all_segs.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    // Fan out per-segment with an atomic cap guard. Each worker:
+    //   1. Acquires its SegmentReader from the Reader's cache.
+    //   2. Enumerates candidates into a local Vec.
+    //   3. Locks the shared HashSet briefly to merge.
+    //   4. If the cap is hit, sets the `overflowed` flag and returns;
+    //      every other worker sees the flag and short-circuits.
+    //
+    // This preserves the old serial loop's "fail fast on common
+    // needles" semantic while still parallelizing the segment opens.
+    // Without this guard, a common needle like `refcount_inc` spent
+    // 40+ s collecting ~1M candidates across all segments before we
+    // ever checked the cap.
+    let out: Mutex<std::collections::HashSet<String>> =
+        Mutex::new(std::collections::HashSet::new());
+    let overflowed = AtomicBool::new(false);
+
+    all_segs.par_iter().try_for_each(
+        |seg_dir| -> Result<()> {
+            if overflowed.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let seg = reader.trigram_segment_for(seg_dir)?;
+            let mids: Vec<&str> = if fuzzy_edits == 0 {
+                seg.candidates_for_substring(needle)
+            } else {
+                seg.candidates_for_substring_fuzzy(needle, fuzzy_edits)
+            };
+            if mids.is_empty() {
+                return Ok(());
+            }
+            // Batched insert — one lock round per segment rather
+            // than per message-id.
+            let mut guard = out.lock().unwrap();
+            for mid in mids {
+                guard.insert(mid.to_owned());
+                if guard.len() >= MAX_PATCH_CANDIDATES {
+                    overflowed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+            Ok(())
+        },
+    )?;
+
+    if overflowed.load(Ordering::Relaxed) {
+        return Err(Error::QueryParse(format!(
+            "patch_search: needle matches too many candidates \
+             (>{MAX_PATCH_CANDIDATES}); narrow with list: or \
+             a longer substring"
+        )));
+    }
+    Ok(out.into_inner().unwrap())
+}
+
+/// Parallel confirm path for the fuzzy variant. Fuzzy-edits-0 falls
+/// back to the cheaper `memmem` literal match; fuzzy-edits > 0 runs
+/// SIMD Levenshtein search via `triple_accel`.
+fn parallel_confirm_fuzzy(
+    reader: &Reader,
+    needle: &[u8],
+    date_sorted_hits: Vec<MessageRow>,
+    limit: usize,
+    fuzzy_edits: u32,
+) -> Result<Vec<MessageRow>> {
+    use rayon::prelude::*;
+
+    const CHUNK: usize = 256;
+    let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
+    for chunk in date_sorted_hits.chunks(CHUNK) {
+        if confirmed.len() >= limit {
+            break;
+        }
+        let results: Vec<Result<Option<MessageRow>>> = chunk
+            .par_iter()
+            .map(|row| -> Result<Option<MessageRow>> {
+                let store = reader.store_for(&row.list)?;
+                let body = store.read_at(row.body_segment_id, row.body_offset)?;
+                let is_match = if fuzzy_edits == 0 {
+                    memchr::memmem::find(&body, needle).is_some()
+                } else {
+                    triple_accel::levenshtein::levenshtein_search_simd_with_opts(
+                        needle,
+                        &body,
+                        fuzzy_edits,
+                        triple_accel::SearchType::Best,
+                        triple_accel::levenshtein::LEVENSHTEIN_COSTS,
+                        false,
+                    )
+                    .next()
+                    .is_some()
+                };
+                if is_match {
+                    Ok(Some(row.clone()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect();
+        for r in results {
+            if let Some(row) = r? {
+                confirmed.push(row);
+                if confirmed.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(confirmed)
+}
+
 fn eq_field_is_over_indexed(field: EqField) -> bool {
     matches!(
         field,
