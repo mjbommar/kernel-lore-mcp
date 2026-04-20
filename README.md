@@ -1,5 +1,9 @@
 # kernel-lore-mcp
 
+[![PyPI version](https://img.shields.io/pypi/v/kernel-lore-mcp.svg)](https://pypi.org/project/kernel-lore-mcp/)
+[![Release](https://img.shields.io/github/v/release/mjbommar/kernel-lore-mcp.svg)](https://github.com/mjbommar/kernel-lore-mcp/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
 Free (MIT) MCP server exposing structured search over the Linux
 kernel mailing list archives at
 [lore.kernel.org](https://lore.kernel.org) to LLM-backed developer
@@ -52,7 +56,9 @@ kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # 5. verify the MCP surface — zero API cost
 git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp && ./scripts/agentic_smoke.sh local
-# PASS: 6/6 tools, 5/5 resource templates, 5/5 prompts.
+# PASS: 7/7 tools, 5/5 resource templates, 5/5 prompts (the
+# `REQUIRED_*` subset from src/kernel_lore_mcp/_surface_manifest.py;
+# the live server registers 24 tools in total).
 ```
 
 Then pick your agent and copy its snippet from
@@ -102,34 +108,47 @@ Want production-grade systemd deployment (single `klmcp-sync.timer`
 replacing the pre-v0.2.0 grokmirror + ingest pair)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
-## Status — April 2026
+## Status — v0.2.0 (2026-04-20)
 
 Shipped:
 
-- Ingest pipeline — gix + mail-parser + metadata/trigram/BM25/
-  embedding tiers. Incremental; dangling-OID safe; single-writer
-  flock.
-- **v0.2.0 `kernel-lore-sync`** — one Rust binary that internalized
-  the legacy `grokmirror` + separate-ingest two-process chain.
-  HTTPS manifest fetch, gix smart-HTTP clone-or-fetch (rayon-
-  fanned across shards), ingest, tid rebuild, generation bump —
-  all under one writer lock so there's no trigger/debounce race.
-- Full MCP surface: 19 tools (search, primitives, sampling-backed
-  summarize/classify/explain), 5 RFC-6570 resource templates, 5
-  slash-command prompts, populated KWIC snippets, freshness
-  marker on every response. (HMAC-signed pagination cursors are
-  designed but not yet wired through tool responses — v0.2.0.)
+- Ingest pipeline — gix + mail-parser + metadata / over.db /
+  trigram / BM25 / embedding tiers. Incremental; dangling-OID
+  safe; single-writer flock.
+- **`kernel-lore-sync`** — one Rust binary that internalized the
+  legacy `grokmirror` + separate-ingest two-process chain. HTTPS
+  manifest fetch, gix smart-HTTP clone-or-fetch (rayon-fanned
+  across shards), ingest, tid rebuild, generation bump — all
+  under one writer lock so there's no trigger/debounce race.
+- Full MCP surface: **24 tools** (search, primitives, sampling-
+  backed summarize/classify/explain, authoritative `merged` /
+  `picked_up` verdicts via git-sidecar, `lore_corpus_stats` for
+  coverage transparency, `lore_author_footprint` for address-
+  mention search), **5 RFC-6570 resource templates**, 2 static
+  resources (`blind-spots://coverage`, `stats://coverage`), **5
+  slash-command prompts**, populated KWIC snippets, freshness
+  marker + capability booleans on every response.
+- **HMAC-signed pagination cursors** live on `lore_search`,
+  `lore_patch_search`, `lore_regex`, `lore_activity`,
+  `lore_author_footprint`. Query-scoped, tamper-detected.
 - stdio + Streamable HTTP transports; no SSE.
-- `/status` + `/metrics` (Prometheus) with freshness_ok signal.
+- `/status` + `/metrics` (Prometheus) with `freshness_ok` +
+  per-tier `capabilities` flags so clients distinguish "no
+  results" from "feature not provisioned."
 - systemd units for hosted deploy; 5-min `klmcp-sync.timer`
   cadence (docs/ops/update-frequency.md).
 - Live-tested against real `claude --print` and `codex exec`
   every commit via `scripts/agentic_smoke.sh`.
 
-Deferred past v1: trained kernel-specific retrieval model
+Next: see [`docs/plans/2026-04-20-v0.3.0-plan.md`](./docs/plans/2026-04-20-v0.3.0-plan.md)
+— tag close-out, `kernel-lore-sync --bootstrap`, auto-built path
+vocab, CI perf gate, `lore_maintainer_graph`, thread-state
+classifier upgrade.
+
+Deferred past v0.3: trained kernel-specific retrieval model
 ([`docs/research/training-retriever.md`](./docs/research/training-retriever.md)),
-cross-list maintainers graph, CVE-chain tool, Patchwork state
-integration (all planned; see
+snapshot-bundle reciprocity, Patchwork state integration, CVE-chain
+tool (all planned; see
 [`docs/plans/2026-04-14-best-in-class-kernel-mcp.md`](./docs/plans/2026-04-14-best-in-class-kernel-mcp.md)).
 
 ## Why
@@ -176,17 +195,24 @@ retriever on that self-supervised signal. Recipe:
 
 - [`CLAUDE.md`](./CLAUDE.md) — authoritative project state +
   non-negotiable product constraints
+- [`CHANGELOG.md`](./CHANGELOG.md) — release history
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — dev loop, PR discipline
+- [`SECURITY.md`](./SECURITY.md) — disclosure posture
 - [`docs/ops/runbook.md`](./docs/ops/runbook.md) — local dev (§0A)
   + hosted deploy (§1+)
 - [`docs/ops/update-frequency.md`](./docs/ops/update-frequency.md) —
   5-min cadence policy + fanout-to-one cost analysis
+- [`docs/ops/production-hardening.md`](./docs/ops/production-hardening.md) —
+  threat model, cost-class caps, capability flags, systemd layout
 - [`docs/mcp/client-config.md`](./docs/mcp/client-config.md) —
   copy-paste snippets for Claude Code, Codex, Cursor, Zed
 - [`docs/mcp/transport-auth.md`](./docs/mcp/transport-auth.md) —
   transport + why no auth
 - [`docs/architecture/`](./docs/architecture/) — design rationale
+- [`docs/plans/2026-04-20-v0.3.0-plan.md`](./docs/plans/2026-04-20-v0.3.0-plan.md) —
+  active release plan
 - [`docs/plans/2026-04-14-best-in-class-kernel-mcp.md`](./docs/plans/2026-04-14-best-in-class-kernel-mcp.md) —
-  6-month roadmap
+  6-month roadmap (north star)
 - [`docs/research/`](./docs/research/) — dated investigations that
   fed the plan
 
