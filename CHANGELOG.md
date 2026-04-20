@@ -10,6 +10,8 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-04-20
+
 ### Added
 
 **Onboarding-review cleanup.** Silent-failure modes caught by the
