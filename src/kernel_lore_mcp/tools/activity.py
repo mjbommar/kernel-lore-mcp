@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from kernel_lore_mcp.config import get_settings
+from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_activity_row
 from kernel_lore_mcp.models import ActivityResponse
@@ -37,6 +38,18 @@ async def lore_activity(
         Field(description="Restrict to one mailing list (e.g. `linux-cifs`)."),
     ] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
+    cursor: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Opaque HMAC-signed pagination token. Pass a "
+                "`next_cursor` from a prior response to resume "
+                "newest-first after the last returned row. Bound "
+                "to the (file, function, since, list) combination "
+                "— changing any invalidates the cursor."
+            ),
+        ),
+    ] = None,
     response_format: Annotated[
         Literal["concise", "detailed"],
         Field(
@@ -65,23 +78,64 @@ async def lore_activity(
 
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
+
+    # Cursor scope: (file, function, since, list) define the sorted
+    # result set. `limit` / `response_format` can change between
+    # pages without invalidating the cursor.
+    q_hash = query_hash(
+        "lore_activity",
+        file or "",
+        function or "",
+        since_unix_ns or 0,
+        list or "",
+    )
+    resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
+
+    # Oversample 2× for the cursor-skip headroom + one-row
+    # look-ahead to detect "more pages exist."
+    fetch_budget = max(limit * 2 + 1, 32)
     rows = await run_with_timeout(
         reader.activity,
         file,
         function,
         since_unix_ns,
         list,
-        limit,
+        fetch_budget,
     )
-    activity_rows = [row_to_activity_row(r) for r in rows]
-    total = len(activity_rows)
+
+    # Skip past the resume point (newest-first by date_unix_ns).
+    if resume is not None:
+        last_date, last_mid = resume
+        kept: list[dict] = []
+        for r in rows:
+            date = float(r.get("date_unix_ns") or 0)
+            mid = str(r.get("message_id") or "")
+            if date < last_date or (date == last_date and mid > last_mid):
+                kept.append(r)
+        rows = kept
+
+    total_available = len(rows)
+    effective_limit = _CONCISE_ROWS if response_format == "concise" else limit
+    page = rows[:effective_limit]
+
+    activity_rows = [row_to_activity_row(r) for r in page]
     default_applied: list[str] = []
-    if response_format == "concise" and total > _CONCISE_ROWS:
-        activity_rows = activity_rows[:_CONCISE_ROWS]
+    if response_format == "concise" and total_available > _CONCISE_ROWS:
         default_applied.append(f"response_format=concise (showing top {_CONCISE_ROWS})")
+
+    next_cursor: str | None = None
+    if page and total_available > effective_limit:
+        last = page[-1]
+        next_cursor = mint_cursor(
+            q_hash=q_hash,
+            last_score=float(last.get("date_unix_ns") or 0),
+            last_mid=str(last.get("message_id") or ""),
+        )
+
     return ActivityResponse(
         rows=activity_rows,
-        total=total,
+        total=total_available,
         default_applied=default_applied,
+        next_cursor=next_cursor,
         freshness=build_freshness(reader),
     )

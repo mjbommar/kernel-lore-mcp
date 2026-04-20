@@ -12,6 +12,79 @@ release tags move them into a dated section. Release process in
 
 ### Added
 
+**Onboarding-review cleanup.** Silent-failure modes caught by the
+review replaced with structured errors + CI-enforced drift checks:
+- `lore_path_mentions` now raises `setup_required` with the exact
+  build command when `paths/vocab.txt` is missing — replaces the
+  silent-empty behavior that looked identical to "no matches."
+  `_core.rebuild_path_vocab(data_dir)` builds it from
+  `over_touched_file` (fast) with a metadata-Parquet fallback for
+  fresh deploys. Verified on lore: 704k paths in seconds.
+- `_surface_manifest.py` is the single source of truth for the
+  required tool / resource / prompt surface; doctor imports it;
+  `test_surface_manifest.py` asserts live-server subset containment
+  in CI. Fixed the `lore://thread/{tid}` vs `{mid}` drift the
+  review caught.
+- `kernel-lore-ingest` now exits 2 on missing / empty mirror paths
+  with an actionable error; `--allow-empty` opts into the cron-
+  style no-op previously baked into the default behavior.
+- New `status.capabilities()` helper exposed on `/status`, the
+  `stats://coverage` resource, and the `lore_corpus_stats` tool.
+  Boolean readiness per tier (`metadata_ready`, `over_db_ready`,
+  `bm25_ready`, `trigram_ready`, `tid_ready`, `path_vocab_ready`,
+  `embedding_ready`, `maintainers_ready`, `git_sidecar_ready`) so
+  callers distinguish "feature not provisioned" from "no matches."
+- Shared `LoreError.setup_required(feature, missing, build_cmd)`
+  for every optional-tier tool — consistent caller-facing shape.
+
+**Two new perf wins on the trailer / touched-file fast paths (#64).**
+- `eq('signed_off_by', <email>)` on lore scale with 28k+ SOB rows
+  for prolific maintainers (kuba, davem, gregkh, akpm): **53-64 ms
+  → 0.34-0.43 ms p50** (~150×). Same shape for reviewed_by,
+  acked_by, tested_by, co_developed_by, reported_by.
+- `eq('touched_files', <path>)` on popular kernel paths: **warm
+  3.8 s → 0.4-0.7 ms p50** (>5000×).
+- Mechanism: denormalized `date_unix_ns` into `over_trailer_email`
+  and `over_touched_file`, added partial covering indexes on
+  `(kind, email, date_unix_ns DESC)` and `(path, date_unix_ns DESC)`,
+  rewrote `scan_eq_via_*` as a `WITH picked AS (...)` CTE that
+  streams top-N off the covering index and bounded-JOINs back to
+  `over` for full rows. Eliminates the TEMP B-TREE sort over
+  tens-of-thousands of candidate rows the old plan paid for every
+  prolific-maintainer / popular-path query.
+- `OverDb::backfill_side_table_dates` + `_core.backfill_side_table_
+  dates(data_dir)` copy `date_unix_ns` from `over` into the side
+  tables on pre-#64 deployments without a full rebuild. Chunked
+  rowid-cursor walk with per-chunk HashMap lookups (naive correlated
+  UPDATE generated a 10+ GB WAL). Landed 27.0 M rows in 29 min on
+  klmcp-local.
+
+**Trigram segment cache warmup at boot (#70).** Adds a
+`reader.patch_search("__function__", None, 1)` probe to
+`_warmup_tiers` so the OS page cache holds the ~530 trigram segment
+files before the first real request. Complements the per-process
+`SegmentReader` cache shipped in #66; first cross-list
+`patch_search` no longer pays the 9 s cold-mmap tail.
+
+**Pagination cursors fanned out to every paginated tool (#71).**
+The primitives + pattern shipped in #67 now cover the full surface:
+- `lore_search` (#67; RRF-score + mid tiebreak)
+- `lore_patch_search` — date_unix_ns + mid tiebreak
+- `lore_regex` — date + mid (query_hash includes field / pattern /
+  anchor_required / list / since)
+- `lore_activity` — date + mid (query_hash includes
+  file / function / since / list)
+- `lore_author_footprint` — date + mid (query_hash includes
+  addr / list_filter)
+- `lore_author_profile` — unchanged; returns aggregates, not a row
+  list, so pagination doesn't apply.
+
+`CursorPayload.last_seen_score` widened from `f32` → `f64` so
+nanosecond dates round-trip exactly. `RowsResponse` and
+`ActivityResponse` and `AuthorFootprintResponse` all carry an
+optional `next_cursor` so every paginated shape uses the same
+envelope.
+
 **v0.2.0 sync pipeline.** The legacy `grok-pull` (Python grokmirror)
 + separate `kernel-lore-ingest` two-process chain is replaced by a
 single `kernel-lore-sync` Rust binary that holds the writer lock

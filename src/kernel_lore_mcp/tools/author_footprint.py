@@ -37,6 +37,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 from kernel_lore_mcp.config import get_settings
+from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.errors import invalid_argument
 from kernel_lore_mcp.freshness import Freshness, build_freshness
 from kernel_lore_mcp.timeout import run_with_timeout
@@ -72,6 +73,14 @@ class AuthorFootprintResponse(BaseModel):
     trailer_mention_count: int
     body_mention_count: int
     hits: list[FootprintHit]
+    next_cursor: str | None = Field(
+        default=None,
+        description=(
+            "Opaque HMAC-signed pagination token. Present when more "
+            "hits remain after this page; pass back on the next call "
+            "to resume newest-first after the last returned hit."
+        ),
+    )
     caveat: str = Field(
         description=(
             "Honest note about what the BM25 body match will and "
@@ -121,6 +130,19 @@ async def lore_author_footprint(
             ),
         ),
     ] = 200,
+    cursor: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Opaque HMAC-signed pagination token. Pass a "
+                "`next_cursor` from a prior response to resume "
+                "newest-first after the last returned hit. Bound to "
+                "the (addr, list_filter) combination — the per-source "
+                "counts reflect the page + everything before it so "
+                "the cursor only moves the forward scan window."
+            ),
+        ),
+    ] = None,
 ) -> AuthorFootprintResponse:
     """Every lore message that mentions this address.
 
@@ -226,12 +248,27 @@ async def lore_author_footprint(
         }
         roles = {mid: roles[mid] for mid in per_mid}
 
-    # Sort newest-first, truncate to `limit`.
-    merged = sorted(
+    # Sort newest-first; cursor-skip before truncating.
+    q_hash = query_hash("lore_author_footprint", addr, list_filter or "")
+    resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
+
+    sorted_rows = sorted(
         per_mid.values(),
-        key=lambda r: r.get("date_unix_ns") or 0,
+        key=lambda r: (r.get("date_unix_ns") or 0, r.get("message_id") or ""),
         reverse=True,
-    )[:limit]
+    )
+    if resume is not None:
+        last_date, last_mid = resume
+        filtered: list[dict] = []
+        for r in sorted_rows:
+            date = float(r.get("date_unix_ns") or 0)
+            mid = str(r.get("message_id") or "")
+            if date < last_date or (date == last_date and mid > last_mid):
+                filtered.append(r)
+        sorted_rows = filtered
+
+    total_available = len(sorted_rows)
+    page = sorted_rows[:limit]
 
     hits = [
         FootprintHit(
@@ -243,7 +280,7 @@ async def lore_author_footprint(
             date_utc=_utc(row.get("date_unix_ns")),
             roles=sorted(roles.get(row["message_id"], set())),
         )
-        for row in merged
+        for row in page
     ]
 
     authored_count = sum(
@@ -256,6 +293,15 @@ async def lore_author_footprint(
         1 for h in hits if "body_mention" in h.roles
     )
 
+    next_cursor: str | None = None
+    if hits and total_available > limit:
+        last = page[-1]
+        next_cursor = mint_cursor(
+            q_hash=q_hash,
+            last_score=float(last.get("date_unix_ns") or 0),
+            last_mid=str(last.get("message_id") or ""),
+        )
+
     return AuthorFootprintResponse(
         addr_queried=addr,
         total_distinct=len(hits),
@@ -263,6 +309,7 @@ async def lore_author_footprint(
         trailer_mention_count=trailer_count,
         body_mention_count=body_count,
         hits=hits,
+        next_cursor=next_cursor,
         caveat=(
             "BM25 body-mention matches tokenize email addresses "
             "into user/domain/tld and rank documents containing "

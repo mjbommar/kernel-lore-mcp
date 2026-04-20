@@ -158,6 +158,14 @@ class ActivityResponse(BaseModel):
     rows: list[ActivityRow]
     total: int = Field(description="Row count after filtering (not capped by limit).")
     default_applied: list[str] = Field(default_factory=list)
+    next_cursor: str | None = Field(
+        default=None,
+        description=(
+            "Opaque HMAC-signed pagination token. Present when more "
+            "rows exist after this page; pass back on the next call "
+            "to resume newest-first after the last returned row."
+        ),
+    )
     freshness: Freshness
     blind_spots_ref: str = "blind-spots://coverage"
 
