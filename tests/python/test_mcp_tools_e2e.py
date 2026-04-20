@@ -208,8 +208,29 @@ async def test_lore_stable_backport_status_unknown_sha_no_evidence(client: Clien
     data = result.data
     assert data.sha_queried == "deadbeef01234567"
     assert data.status in {"no_evidence", "pending", "picked_up"}
-    # The caveat must mention linux-stable.git limitation explicitly.
-    assert "linux-stable" in data.caveat or "lore-only" in data.caveat
+    # The caveat must mention the git-sidecar path so callers know
+    # what's missing on deployments without it.
+    assert "sidecar" in data.caveat or "stable-commits" in data.caveat
+    # With no sidecar on the test fixture, backend falls to heuristic.
+    assert data.backend == "lore_heuristic"
+    assert data.sidecar_hits == []
+
+
+@pytest.mark.asyncio
+async def test_lore_thread_state_exposes_backend_and_merged_in(
+    client: Client,
+) -> None:
+    """Without a git sidecar the verdict must be lore-heuristic and
+    merged_in must be empty. The caveat should point at how to build
+    the sidecar so the caller knows the upgrade path."""
+    result = await client.call_tool(
+        "lore_thread_state",
+        {"message_id": "m1@x"},
+    )
+    data = result.data
+    assert data.backend == "lore_heuristic"
+    assert data.merged_in == []
+    assert "sidecar" in data.caveat.lower()
 
 
 @pytest.mark.asyncio

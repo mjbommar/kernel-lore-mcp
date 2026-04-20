@@ -1,14 +1,15 @@
-"""lore_thread_state — is this thread alive? nacked? superseded?
+"""lore_thread_state — is this thread alive? nacked? superseded? merged?
 
-Pure-lore classifier. Returns one of:
-  {rfc, superseded_by, nacked, under_review, abandoned, unknown}
+Returns one of:
+  {merged, rfc, superseded, nacked, under_review, abandoned, unknown}
 
-`merged` is NOT in the set: determining that requires access to
-torvalds/linux.git (or a patchwork state machine). Per the research
-brief, pure-lore signals for "applied, thanks" have a high false-
-positive rate. When the git sidecar (#40 in the backlog) ships, a
-`merged(sha, tree)` verdict at the top of the ladder becomes the
-authoritative answer.
+`merged` is the *authoritative* answer and only fires when the git
+sidecar (`kernel-lore-build-git-sidecar`) has been built against at
+least one upstream tree and the seed's normalized subject + author
+emailmatch a commit within a date window. When the sidecar is
+absent, `merged` is never emitted — the rest of the ladder returns
+a lore-only verdict and the caveat documents the limitation. This
+replaces the "we don't return `merged`" stub that shipped with v0.1.x.
 
 Confidence tier on every verdict (`high` / `medium` / `low`) —
 overconfidence on a noisy classifier misleads agents into acting
@@ -55,19 +56,49 @@ class ThreadStateEvidence(BaseModel):
     detail: str
 
 
+class MergedEvidence(BaseModel):
+    repo: str
+    sha: str
+    subject: str
+    author_date_unix_ns: int
+
+
 class ThreadStateResponse(BaseModel):
     message_id: str
-    state: Literal["rfc", "superseded", "nacked", "under_review", "abandoned", "unknown"]
+    state: Literal[
+        "merged",
+        "rfc",
+        "superseded",
+        "nacked",
+        "under_review",
+        "abandoned",
+        "unknown",
+    ]
     confidence: Literal["high", "medium", "low"]
     evidence: list[ThreadStateEvidence]
+    merged_in: list[MergedEvidence] = Field(
+        default_factory=list,
+        description=(
+            "Authoritative git-sidecar matches for this thread's "
+            "seed. When non-empty, the verdict is `merged` regardless "
+            "of lore-side signals. Empty otherwise (and always empty "
+            "on deployments without the git sidecar)."
+        ),
+    )
     superseded_by_message_id: str | None = None
     latest_activity_unix_ns: int | None = None
     latest_activity_utc: datetime | None = None
+    backend: Literal["sidecar_authoritative", "lore_heuristic"] = Field(
+        description=(
+            "`sidecar_authoritative` when the git sidecar contributed "
+            "the `merged` verdict; `lore_heuristic` otherwise."
+        ),
+    )
     caveat: str = Field(
         description=(
-            "Honest note about what this pure-lore classifier CAN'T "
-            "detect. `merged` in particular requires git-tree access "
-            "and is never returned here."
+            "Honest note about what this classifier CAN and CAN'T "
+            "detect. `merged` requires the git sidecar — when absent, "
+            "the caveat documents that."
         )
     )
     freshness: Freshness
@@ -119,11 +150,105 @@ async def lore_thread_state(
         raise not_found(what="thread seed", message_id=message_id)
 
     evidence: list[ThreadStateEvidence] = []
-    caveat = (
-        "lore-only: `merged` is NOT in the returned set; determining "
-        "whether this thread landed in torvalds/linux.git requires "
-        "git-tree access (see backlog #40)."
+
+    # ---- git-sidecar `merged` check (authoritative) --------------
+    # Runs before any lore-side heuristic: a patch that landed
+    # upstream can't meaningfully be "abandoned" or "nacked" in
+    # retrospect; the terminal state is `merged`. Only the exact
+    # seed is looked up — if the seed is v1 and v2 was merged, the
+    # superseded-by check downstream catches that case.
+    merged_hits: list[MergedEvidence] = []
+    sidecar_repos: list[str] = []
+    try:
+        repos = await run_with_timeout(
+            _core.git_sidecar_repos, settings.data_dir
+        )
+        sidecar_repos = [r["repo"] for r in repos]
+    except Exception:  # noqa: BLE001
+        sidecar_repos = []
+
+    if sidecar_repos:
+        subject = (
+            seed.get("subject_normalized") or seed.get("subject_raw") or ""
+        )
+        from_addr = (seed.get("from_addr") or "").lower()
+        seed_date_ns = int(seed.get("date_unix_ns") or 0)
+        if subject and from_addr and seed_date_ns > 0:
+            # ±90 days around the seed's send date — wide enough to
+            # absorb multi-version respins, tight enough to avoid
+            # matching unrelated commits with the same author that
+            # happen to share a short subject prefix.
+            window_ns = 90 * 24 * 3600 * 10**9
+            try:
+                hits = await run_with_timeout(
+                    _core.git_sidecar_find_by_subject_author,
+                    settings.data_dir,
+                    subject,
+                    from_addr,
+                    window_ns,
+                    seed_date_ns,
+                )
+                merged_hits = [
+                    MergedEvidence(
+                        repo=h["repo"],
+                        sha=h["sha"],
+                        subject=h["subject"],
+                        author_date_unix_ns=h["author_date_ns"],
+                    )
+                    for h in hits
+                ]
+            except Exception:  # noqa: BLE001
+                merged_hits = []
+
+    def _caveat(state: str) -> str:
+        if merged_hits:
+            return (
+                f"authoritative via git sidecar — matched in "
+                f"{', '.join(sorted({h.repo for h in merged_hits}))}"
+            )
+        if sidecar_repos:
+            return (
+                "sidecar searched but no merge match for seed "
+                "(subject + author within ±90 days); falling back to "
+                "lore-side signals"
+            )
+        return (
+            "git sidecar not built on this server — `merged` cannot be "
+            "detected; set KLMCP_GIT_MIRRORS and run "
+            "`kernel-lore-build-git-sidecar` for authoritative answers"
+        )
+
+    backend: Literal["sidecar_authoritative", "lore_heuristic"] = (
+        "sidecar_authoritative" if merged_hits else "lore_heuristic"
     )
+
+    if merged_hits:
+        evidence.append(
+            ThreadStateEvidence(
+                message_id=seed.get("message_id"),
+                subject=seed.get("subject_raw"),
+                from_addr=seed.get("from_addr"),
+                detail=(
+                    f"git sidecar: seed subject + author matched "
+                    f"{len(merged_hits)} commit(s) "
+                    f"in {', '.join(sorted({h.repo for h in merged_hits}))}"
+                ),
+            )
+        )
+        return ThreadStateResponse(
+            message_id=seed["message_id"],
+            state="merged",
+            confidence="high",
+            evidence=evidence,
+            merged_in=merged_hits,
+            latest_activity_unix_ns=merged_hits[0].author_date_unix_ns,
+            latest_activity_utc=_utc(merged_hits[0].author_date_unix_ns),
+            backend=backend,
+            caveat=_caveat("merged"),
+            freshness=build_freshness(reader),
+        )
+
+    caveat = _caveat("lore")
 
     # 1. RFC — metadata-only, deterministic.
     tags = {t.lower() for t in (seed.get("subject_tags") or [])}
@@ -142,6 +267,7 @@ async def lore_thread_state(
             evidence=evidence,
             latest_activity_unix_ns=seed.get("date_unix_ns"),
             latest_activity_utc=_utc(seed.get("date_unix_ns")),
+            backend=backend,
             caveat=caveat,
             freshness=build_freshness(reader),
         )
@@ -176,6 +302,7 @@ async def lore_thread_state(
             evidence=evidence,
             latest_activity_unix_ns=newer_sibling.get("date_unix_ns"),
             latest_activity_utc=_utc(newer_sibling.get("date_unix_ns")),
+            backend=backend,
             caveat=caveat,
             freshness=build_freshness(reader),
         )
@@ -247,6 +374,7 @@ async def lore_thread_state(
             evidence=evidence,
             latest_activity_unix_ns=latest_activity_ns or None,
             latest_activity_utc=_utc(latest_activity_ns or None),
+            backend=backend,
             caveat=caveat,
             freshness=build_freshness(reader),
         )
@@ -271,6 +399,7 @@ async def lore_thread_state(
             evidence=evidence,
             latest_activity_unix_ns=latest_activity_ns or None,
             latest_activity_utc=_utc(latest_activity_ns or None),
+            backend=backend,
             caveat=caveat,
             freshness=build_freshness(reader),
         )

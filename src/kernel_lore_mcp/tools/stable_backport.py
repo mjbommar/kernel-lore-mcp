@@ -66,10 +66,27 @@ class BackportEvidence(BaseModel):
     date_unix_ns: int | None = None
 
 
+class SidecarHit(BaseModel):
+    """Authoritative git-sidecar match: we've seen this SHA in the
+    named repo during sidecar ingest (`kernel-lore-build-git-sidecar`).
+    When `repo == "linux-stable"`, this is a hard-yes on "picked up
+    by -stable" with zero lore-side inference."""
+
+    repo: str
+    sha: str
+    subject: str
+    author_date_unix_ns: int
+
+
 class StableBackportResponse(BaseModel):
     sha_queried: str
     status: Literal[
-        "picked_up", "pending", "rejected", "autosel_skipped", "not_marked", "no_evidence"
+        "picked_up",
+        "pending",
+        "rejected",
+        "autosel_skipped",
+        "not_marked",
+        "no_evidence",
     ]
     stable_releases: list[str] = Field(
         default_factory=list,
@@ -77,6 +94,23 @@ class StableBackportResponse(BaseModel):
     )
     autosel_nominated: bool = False
     evidence: list[BackportEvidence]
+    sidecar_hits: list[SidecarHit] = Field(
+        default_factory=list,
+        description=(
+            "Authoritative git-sidecar matches (when the operator has "
+            "ingested mainline + stable trees). A hit in a "
+            "`linux-stable*` repo upgrades the status to `picked_up` "
+            "with zero lore-side heuristic inference."
+        ),
+    )
+    backend: Literal["sidecar_authoritative", "lore_heuristic"] = Field(
+        description=(
+            "`sidecar_authoritative` when git-sidecar answered the "
+            "question via the stable-tree history; `lore_heuristic` "
+            "when we fell back to lore mail patterns because the "
+            "operator hasn't built the sidecar yet."
+        ),
+    )
     caveat: str = Field(
         description=(
             "One-line honesty about what we could and could not see. "
@@ -136,6 +170,42 @@ async def lore_stable_backport_status(
     evidence: list[BackportEvidence] = []
     releases: set[str] = set()
     autosel = False
+    sidecar_hits: list[SidecarHit] = []
+
+    # Sidecar fast path (only fires when the operator has built it
+    # AND indexed linux-stable). A 40-char SHA in `linux-stable*`
+    # repos is authoritative "picked up by -stable" without any
+    # lore-side inference. Short SHAs skip this path — the lookup
+    # requires an exact primary-key match.
+    sidecar_repos: list[str] = []
+    if len(needle) == 40:
+        try:
+            repos = await run_with_timeout(
+                _core.git_sidecar_repos, settings.data_dir
+            )
+            sidecar_repos = [r["repo"] for r in repos]
+            for repo in sidecar_repos:
+                if not (repo == "linux-stable" or repo.startswith("linux-stable")):
+                    continue
+                hit = await run_with_timeout(
+                    _core.git_sidecar_find_sha, settings.data_dir, repo, needle
+                )
+                if hit is not None:
+                    sidecar_hits.append(
+                        SidecarHit(
+                            repo=hit["repo"],
+                            sha=hit["sha"],
+                            subject=hit["subject"],
+                            author_date_unix_ns=hit["author_date_ns"],
+                        )
+                    )
+        except Exception:  # noqa: BLE001
+            # Sidecar absent / schema mismatch / concurrent writer —
+            # fall through to the lore-only heuristic path. Tools
+            # never fail a caller because an optional tier is
+            # missing.
+            sidecar_hits = []
+            sidecar_repos = []
 
     async def _search_list(list_name: str, role: str) -> list[dict]:
         # BM25 handles the SHA as a term (our KernelIdentSplitter keeps
@@ -205,30 +275,67 @@ async def lore_stable_backport_status(
     except Exception:  # noqa: BLE001
         pass
 
-    # 4. Decide status from evidence.
-    if confirms:
+    # 4. Decide status. The git sidecar wins over any lore-side
+    # inference when it's present: a hit in linux-stable* is the
+    # authoritative answer, full stop. Fall through to the heuristic
+    # chain only when the sidecar has nothing to say.
+    backend: Literal["sidecar_authoritative", "lore_heuristic"]
+    if sidecar_hits:
         status: str = "picked_up"
+        backend = "sidecar_authoritative"
+        # Sidecar subjects often carry the stable version tag; mine
+        # them the same way the lore-confirmation path does, so the
+        # `stable_releases` field stays populated.
+        for hit in sidecar_hits:
+            m = _VERSION_FROM_SUBJECT.search(hit.subject)
+            if m:
+                releases.add(m.group("ver"))
+    elif confirms:
+        status = "picked_up"
+        backend = "lore_heuristic"
     elif noautosel_seen:
         status = "autosel_skipped"
+        backend = "lore_heuristic"
     elif noms:
         status = "pending"
-    elif evidence:
-        status = "no_evidence"
+        backend = "lore_heuristic"
     else:
         status = "no_evidence"
+        backend = "lore_heuristic"
 
-    # 5. Build caveat.
+    # 5. Build caveat. Different text by backend.
     caveats = []
-    if not confirms:
+    if sidecar_hits:
         caveats.append(
-            "no confirmation evidence in stable-commits (the list may "
-            "not be ingested on this server, or the commit hasn't been "
-            "merged to -stable yet)"
+            f"authoritative via git sidecar — matched in "
+            f"{', '.join(sorted({h.repo for h in sidecar_hits}))}"
         )
-    caveats.append(
-        "lore-only — authoritative 'which releases contain X' "
-        "requires a linux-stable.git log check"
-    )
+    else:
+        if "linux-stable" in sidecar_repos or any(
+            r.startswith("linux-stable") for r in sidecar_repos
+        ):
+            caveats.append(
+                "git sidecar present but SHA not found in any "
+                "linux-stable* repo — either not picked up, or the "
+                "sidecar is behind the stable tip"
+            )
+        elif sidecar_repos:
+            caveats.append(
+                "git sidecar present but linux-stable not ingested; "
+                "falling back to lore-side evidence"
+            )
+        else:
+            caveats.append(
+                "git sidecar not built on this server — set "
+                "KLMCP_GIT_MIRRORS and run `kernel-lore-build-git-"
+                "sidecar` for authoritative backport answers"
+            )
+        if not confirms:
+            caveats.append(
+                "no confirmation evidence in stable-commits (list may "
+                "not be ingested, or the commit hasn't been merged to "
+                "-stable yet)"
+            )
     caveat = "; ".join(caveats)
 
     return StableBackportResponse(
@@ -237,6 +344,8 @@ async def lore_stable_backport_status(
         stable_releases=sorted(releases),
         autosel_nominated=autosel,
         evidence=evidence,
+        sidecar_hits=sidecar_hits,
+        backend=backend,
         caveat=caveat,
         freshness=build_freshness(reader),
     )

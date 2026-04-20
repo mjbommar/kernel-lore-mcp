@@ -248,6 +248,31 @@ impl GitSidecar {
         Ok(out)
     }
 
+    /// Every repo present in the sidecar, its commit count, and the
+    /// last-recorded tip SHA (when known). Powers the
+    /// `lore_stable_backport_status` / `lore_thread_state` trust
+    /// decision: if `linux-stable` is present, the tools can answer
+    /// authoritatively; if absent, they fall back to lore-only
+    /// heuristics and annotate the caveat accordingly.
+    pub fn repos_and_counts(&self) -> Result<Vec<(String, u64, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.repo, COUNT(*) AS n, t.tip_sha \
+             FROM commits c \
+             LEFT JOIN tips t ON t.repo = c.repo \
+             GROUP BY c.repo \
+             ORDER BY c.repo ASC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            let repo: String = r.get(0)?;
+            let count: i64 = r.get(1)?;
+            let tip: Option<String> = r.get(2)?;
+            out.push((repo, count as u64, tip));
+        }
+        Ok(out)
+    }
+
     /// Look up one commit by repo + sha — the trivial "is this
     /// sha in the sidecar?" predicate.
     pub fn find_by_sha(&self, repo: &str, sha: &str) -> Result<Option<CommitRecord>> {
@@ -361,6 +386,28 @@ mod tests {
         assert_eq!(db.tip("linux").unwrap().as_deref(), Some("deadbeef"));
         db.set_tip("linux", "cafebabe").unwrap();
         assert_eq!(db.tip("linux").unwrap().as_deref(), Some("cafebabe"));
+    }
+
+    #[test]
+    fn repos_and_counts_summarizes_every_repo() {
+        let mut db = GitSidecar::open_in_memory().unwrap();
+        db.insert_batch(&[
+            row("linux", "a1", "s1", "alice@x", 1, None),
+            row("linux", "a2", "s2", "bob@x", 2, None),
+            row("linux-stable", "b1", "s1", "alice@x", 3, None),
+        ])
+        .unwrap();
+        db.set_tip("linux", "a2").unwrap();
+        // No tip recorded for linux-stable yet — should come back as None.
+
+        let stats = db.repos_and_counts().unwrap();
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].0, "linux");
+        assert_eq!(stats[0].1, 2);
+        assert_eq!(stats[0].2.as_deref(), Some("a2"));
+        assert_eq!(stats[1].0, "linux-stable");
+        assert_eq!(stats[1].1, 1);
+        assert_eq!(stats[1].2, None);
     }
 
     #[test]

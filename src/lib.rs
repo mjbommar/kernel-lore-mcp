@@ -86,6 +86,18 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(crate::python::py_sign_cursor, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_verify_cursor, m)?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_git_sidecar_find_sha,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::python::py_git_sidecar_repos,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::python::py_git_sidecar_find_by_subject_author,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_build_embedding_index,
         m
     )?)?;

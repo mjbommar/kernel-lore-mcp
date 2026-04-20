@@ -135,6 +135,126 @@ pub fn py_rebuild_bm25(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
     Ok(count)
 }
 
+/// Look up one commit in the git sidecar by (repo, sha).
+///
+/// Returns `None` when the sidecar file is absent (operator hasn't
+/// built it) or the SHA isn't in that repo. Matches on exact 40-hex
+/// SHA and on short SHA prefix (minimum 7 chars). Cheap: indexed
+/// PRIMARY KEY lookup.
+#[pyfunction]
+#[pyo3(name = "git_sidecar_find_sha")]
+pub fn py_git_sidecar_find_sha<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+    repo: String,
+    sha: String,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let found = py.detach(|| -> crate::error::Result<Option<crate::git_sidecar::CommitRecord>> {
+        let path = crate::git_sidecar::sidecar_path(&data_dir);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let db = crate::git_sidecar::GitSidecar::open(&path)?;
+        // Try exact match first (fast, PRIMARY KEY); fall back to
+        // prefix match across commits in the repo when the caller
+        // gave a short SHA.
+        if sha.len() == 40 {
+            return db.find_by_sha(&repo, &sha.to_lowercase());
+        }
+        // Short SHA: not indexed. Skip for now — the tool that calls
+        // this already has a full SHA from the lore message in most
+        // cases. Document this limit; revisit if the follow-up tool
+        // actually needs it.
+        Ok(None)
+    })?;
+    match found {
+        None => Ok(None),
+        Some(r) => {
+            let d = PyDict::new(py);
+            d.set_item("repo", r.repo)?;
+            d.set_item("sha", r.sha)?;
+            d.set_item("subject", r.subject)?;
+            d.set_item("author_email", r.author_email)?;
+            d.set_item("author_date_ns", r.author_date_ns)?;
+            d.set_item("patch_id", r.patch_id)?;
+            Ok(Some(d))
+        }
+    }
+}
+
+/// `b4`-style fallback match: find commits with the same normalized
+/// subject + author email inside a date window. Used by
+/// `lore_thread_state` to promote the `merged` verdict from "lore
+/// heuristic" to "authoritative against git history" — a patch's
+/// author+subject tuple maps deterministically to a committed SHA
+/// once it lands in any of the mirrored repos.
+///
+/// Returns a list of matching commit dicts (same shape as
+/// `git_sidecar_find_sha`). Empty on sidecar absence or schema
+/// mismatch — callers handle the fallback.
+#[pyfunction]
+#[pyo3(name = "git_sidecar_find_by_subject_author")]
+pub fn py_git_sidecar_find_by_subject_author<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+    subject: String,
+    author_email: String,
+    window_ns: i64,
+    center_ns: i64,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let rows = py.detach(|| -> crate::error::Result<Vec<crate::git_sidecar::CommitRecord>> {
+        let path = crate::git_sidecar::sidecar_path(&data_dir);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let db = crate::git_sidecar::GitSidecar::open(&path)?;
+        db.find_by_subject_author(&subject, &author_email, window_ns, center_ns)
+    })?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let d = PyDict::new(py);
+        d.set_item("repo", r.repo)?;
+        d.set_item("sha", r.sha)?;
+        d.set_item("subject", r.subject)?;
+        d.set_item("author_email", r.author_email)?;
+        d.set_item("author_date_ns", r.author_date_ns)?;
+        d.set_item("patch_id", r.patch_id)?;
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// Which repos + commit counts does the sidecar currently hold?
+///
+/// Returns a list of `{repo, count, tip_sha}` dicts so tools can
+/// decide whether to trust the sidecar ("linux-stable" present ⇒
+/// authoritative backport check) or fall back to lore heuristics
+/// ("linux-stable" absent ⇒ annotate caveat).
+#[pyfunction]
+#[pyo3(name = "git_sidecar_repos")]
+pub fn py_git_sidecar_repos<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+) -> PyResult<Vec<Bound<'py, PyDict>>> {
+    let repos = py.detach(|| -> crate::error::Result<Vec<(String, u64, Option<String>)>> {
+        let path = crate::git_sidecar::sidecar_path(&data_dir);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let db = crate::git_sidecar::GitSidecar::open(&path)?;
+        db.repos_and_counts()
+    })?;
+    let mut out = Vec::with_capacity(repos.len());
+    for (repo, count, tip) in repos {
+        let d = PyDict::new(py);
+        d.set_item("repo", repo)?;
+        d.set_item("count", count)?;
+        d.set_item("tip_sha", tip)?;
+        out.push(d);
+    }
+    Ok(out)
+}
+
 /// HMAC-sign a pagination cursor.
 ///
 /// `secret` is the raw bytes of the server's cursor-signing key

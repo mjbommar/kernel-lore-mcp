@@ -42,6 +42,33 @@ def sign_cursor(
 ) -> str: ...
 def verify_cursor(secret: bytes, token: str) -> tuple[int, float, str]: ...
 
+class SidecarCommit(TypedDict):
+    repo: str
+    sha: str
+    subject: str
+    author_email: str
+    author_date_ns: int
+    patch_id: str | None
+
+class SidecarRepoStats(TypedDict):
+    repo: str
+    count: int
+    tip_sha: str | None
+
+def git_sidecar_find_sha(
+    data_dir: str | PathLike[str], repo: str, sha: str
+) -> SidecarCommit | None: ...
+def git_sidecar_repos(
+    data_dir: str | PathLike[str],
+) -> list[SidecarRepoStats]: ...
+def git_sidecar_find_by_subject_author(
+    data_dir: str | PathLike[str],
+    subject: str,
+    author_email: str,
+    window_ns: int,
+    center_ns: int,
+) -> list[SidecarCommit]: ...
+
 class EmbeddingMeta(TypedDict):
     model: str
     dim: int
