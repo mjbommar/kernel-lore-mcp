@@ -53,6 +53,10 @@ kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # maintainers / git_sidecar boolean tells you which tools will actually
 # return data on this deployment.
 
+# 4b. inspect shard/index health; add --heal to repair unborn shard HEADs
+#     and remove unrecoverable shard repos so the next sync reclones them
+kernel-lore-doctor --data-dir "$KLMCP_DATA_DIR"
+
 # 5. verify the MCP surface — zero API cost
 git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp && ./scripts/agentic_smoke.sh local
@@ -95,8 +99,9 @@ git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
-cargo build --release --bin kernel-lore-sync --bin kernel-lore-ingest
+cargo build --release --bin kernel-lore-sync --bin kernel-lore-ingest --bin kernel-lore-doctor
 ./target/release/kernel-lore-sync --data-dir $KLMCP_DATA_DIR --with-over
+./target/release/kernel-lore-doctor --data-dir $KLMCP_DATA_DIR
 ```
 
 ### Going bigger

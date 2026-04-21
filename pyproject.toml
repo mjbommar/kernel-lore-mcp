@@ -59,6 +59,8 @@ kernel-lore-ingest = "kernel_lore_mcp.cli.ingest:main"
 # generation bump). This thin Python entry point exec's the Rust
 # binary so `uv tool install`d users get it without hunting PATH.
 kernel-lore-sync = "kernel_lore_mcp.cli.sync:main"
+# Health / repair probe for local shard mirrors and tier files.
+kernel-lore-doctor = "kernel_lore_mcp.cli.doctor:main"
 
 [project.urls]
 Homepage = "https://github.com/mjbommar/kernel-lore-mcp"

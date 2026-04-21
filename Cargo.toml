@@ -179,3 +179,7 @@ path = "src/bin/bench_ingest_stages.rs"
 [[bin]]
 name = "kernel-lore-sync"
 path = "src/bin/sync.rs"
+
+[[bin]]
+name = "kernel-lore-doctor"
+path = "src/bin/doctor.rs"

@@ -64,6 +64,14 @@ mkdir -p "$KLMCP_DATA_DIR"
 ./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # Expect: {"generation": >= 1, "freshness_ok": true, ...}
 
+# 0A.6b — inspect shard/index health. If a prior run left poisoned shard
+# repos behind, --heal repairs unborn HEADs in place and removes
+# unrecoverable shard repos so the next sync reclones them cleanly.
+cargo build --release --bin kernel-lore-doctor
+./target/release/kernel-lore-doctor --data-dir "$KLMCP_DATA_DIR"
+# Or repair + clean automatically:
+./target/release/kernel-lore-doctor --data-dir "$KLMCP_DATA_DIR" --heal
+
 # 0A.7 — sanity-check the MCP surface without burning API tokens
 ./scripts/agentic_smoke.sh local
 # Expect: PASS: local probe — 6/6 tools, 5/5 resource templates,
