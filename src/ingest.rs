@@ -391,14 +391,49 @@ fn resolve_walk_head_id(repo: &gix::Repository, shard_path: &Path) -> Result<Obj
     }
 }
 
+struct HeadCandidate {
+    rank: usize,
+    source_ref: String,
+    repair_ref: String,
+    git2_oid: git2::Oid,
+    gix_oid: ObjectId,
+}
+
 fn fallback_head_id_from_refs(shard_path: &Path) -> Result<Option<(ObjectId, String)>> {
     let repo = Git2Repository::open_bare(shard_path)
         .or_else(|_| Git2Repository::open(shard_path))
         .map_err(|e| Error::Gix(format!("open {}: {e}", shard_path.display())))?;
 
-    let mut candidates: Vec<(usize, String, ObjectId)> = Vec::new();
-    push_ref_candidate(&repo, "refs/heads/master", 0, &mut candidates)?;
-    push_ref_candidate(&repo, "refs/heads/main", 1, &mut candidates)?;
+    let mut candidates: Vec<HeadCandidate> = Vec::new();
+    push_ref_candidate(
+        &repo,
+        "refs/heads/master",
+        "refs/heads/master",
+        0,
+        &mut candidates,
+    )?;
+    push_ref_candidate(
+        &repo,
+        "refs/heads/main",
+        "refs/heads/main",
+        1,
+        &mut candidates,
+    )?;
+    push_symbolic_candidate(&repo, "refs/remotes/origin/HEAD", 2, &mut candidates)?;
+    push_ref_candidate(
+        &repo,
+        "refs/remotes/origin/master",
+        "refs/heads/master",
+        3,
+        &mut candidates,
+    )?;
+    push_ref_candidate(
+        &repo,
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+        4,
+        &mut candidates,
+    )?;
 
     let refs = repo
         .references()
@@ -409,48 +444,121 @@ fn fallback_head_id_from_refs(shard_path: &Path) -> Result<Option<(ObjectId, Str
         let Some(name) = reference.name() else {
             continue;
         };
-        if !name.starts_with("refs/heads/") {
-            continue;
-        }
-        if matches!(name, "refs/heads/master" | "refs/heads/main") {
-            continue;
-        }
-        let Some(target) = reference.target() else {
+        let Some(rank) = rank_for_head_fallback(name) else {
             continue;
         };
-        candidates.push((2, name.to_owned(), git2_oid_to_gix(target)?));
+        let Some(repair_ref) = local_head_ref_for(name) else {
+            continue;
+        };
+        if let Some(target) = reference.target() {
+            candidates.push(HeadCandidate {
+                rank,
+                source_ref: name.to_owned(),
+                repair_ref,
+                git2_oid: target,
+                gix_oid: git2_oid_to_gix(target)?,
+            });
+        }
     }
 
-    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    let Some((_, refname, head_id)) = candidates.into_iter().next() else {
+    candidates.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| a.source_ref.cmp(&b.source_ref))
+    });
+    let Some(candidate) = candidates.into_iter().next() else {
         return Ok(None);
     };
 
-    if let Err(e) = repo.set_head(&refname) {
+    if let Err(e) = repair_head(&repo, &candidate.repair_ref, candidate.git2_oid) {
         tracing::warn!(
             shard = %shard_path.display(),
-            repaired_head_ref = refname,
+            source_ref = candidate.source_ref,
+            repaired_head_ref = candidate.repair_ref,
             error = %e,
             "failed to repoint unborn repo HEAD; continuing with recovered ref tip"
         );
     }
 
-    Ok(Some((head_id, refname)))
+    Ok(Some((candidate.gix_oid, candidate.repair_ref)))
 }
 
 fn push_ref_candidate(
     repo: &Git2Repository,
-    refname: &str,
+    source_ref: &str,
+    repair_ref: &str,
     rank: usize,
-    out: &mut Vec<(usize, String, ObjectId)>,
+    out: &mut Vec<HeadCandidate>,
 ) -> Result<()> {
-    let Ok(reference) = repo.find_reference(refname) else {
+    let Ok(reference) = repo.find_reference(source_ref) else {
         return Ok(());
     };
     let Some(target) = reference.target() else {
         return Ok(());
     };
-    out.push((rank, refname.to_owned(), git2_oid_to_gix(target)?));
+    out.push(HeadCandidate {
+        rank,
+        source_ref: source_ref.to_owned(),
+        repair_ref: repair_ref.to_owned(),
+        git2_oid: target,
+        gix_oid: git2_oid_to_gix(target)?,
+    });
+    Ok(())
+}
+
+fn push_symbolic_candidate(
+    repo: &Git2Repository,
+    symbolic_ref: &str,
+    rank: usize,
+    out: &mut Vec<HeadCandidate>,
+) -> Result<()> {
+    let Ok(reference) = repo.find_reference(symbolic_ref) else {
+        return Ok(());
+    };
+    let Some(target_name) = reference.symbolic_target() else {
+        return Ok(());
+    };
+    let Some(repair_ref) = local_head_ref_for(target_name) else {
+        return Ok(());
+    };
+    push_ref_candidate(repo, target_name, &repair_ref, rank, out)
+}
+
+fn local_head_ref_for(refname: &str) -> Option<String> {
+    if refname.starts_with("refs/heads/") {
+        return Some(refname.to_owned());
+    }
+    let remainder = refname.strip_prefix("refs/remotes/")?;
+    let (_, branch_name) = remainder.split_once('/')?;
+    if branch_name == "HEAD" {
+        return None;
+    }
+    Some(format!("refs/heads/{branch_name}"))
+}
+
+fn rank_for_head_fallback(refname: &str) -> Option<usize> {
+    match refname {
+        "refs/heads/master" => Some(0),
+        "refs/heads/main" => Some(1),
+        "refs/remotes/origin/HEAD" => Some(2),
+        "refs/remotes/origin/master" => Some(3),
+        "refs/remotes/origin/main" => Some(4),
+        other if other.starts_with("refs/heads/") => Some(5),
+        other if other.starts_with("refs/remotes/") && !other.ends_with("/HEAD") => Some(6),
+        _ => None,
+    }
+}
+
+fn repair_head(repo: &Git2Repository, repair_ref: &str, oid: git2::Oid) -> Result<()> {
+    repo.reference(
+        repair_ref,
+        oid,
+        true,
+        "kernel-lore-mcp: repair unborn HEAD from fetched refs",
+    )
+    .map_err(|e| Error::Gix(format!("reference {repair_ref}: {e}")))?;
+    repo.set_head(repair_ref)
+        .map_err(|e| Error::Gix(format!("set_head {repair_ref}: {e}")))?;
     Ok(())
 }
 
@@ -773,6 +881,61 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let data = tempdir().unwrap();
         let stats = ingest_shard(data.path(), &shard_dir, "linux-wireless", "0", "run-0001")
             .expect("ingest should recover from unborn HEAD");
+        assert_eq!(stats.ingested, 2);
+
+        let out = Command::new("git")
+            .args(["symbolic-ref", "HEAD"])
+            .current_dir(&shard_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "refs/heads/master"
+        );
+    }
+
+    #[test]
+    fn unborn_head_recovers_from_remote_tracking_ref() {
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let msgs = sample_messages();
+        let msg_refs: Vec<&[u8]> = msgs.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &msg_refs);
+
+        let out = Command::new("git")
+            .args(["rev-parse", "refs/heads/master"])
+            .current_dir(&shard_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let head_oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+
+        // Simulate a stale gix clone from an older run:
+        // only remote-tracking refs have commits, while local HEAD
+        // still points at unborn refs/heads/main.
+        run_git(
+            &[
+                "update-ref",
+                "refs/remotes/origin/master",
+                head_oid.as_str(),
+            ],
+            &shard_dir,
+        );
+        run_git(
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/master",
+            ],
+            &shard_dir,
+        );
+        run_git(&["update-ref", "-d", "refs/heads/master"], &shard_dir);
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &shard_dir);
+
+        let data = tempdir().unwrap();
+        let stats = ingest_shard(data.path(), &shard_dir, "linux-wireless", "0", "run-0002")
+            .expect("ingest should recover from remote-tracking refs");
         assert_eq!(stats.ingested, 2);
 
         let out = Command::new("git")
