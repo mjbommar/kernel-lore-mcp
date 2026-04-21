@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use git2::Repository as Git2Repository;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -83,6 +84,9 @@ pub struct SyncSummary {
 pub enum FetchOutcome {
     /// New clone — the shard was absent locally; we created it.
     Cloned,
+    /// Existing local repo was unusable (missing/open-broken/no refs),
+    /// so we discarded it and recloned from upstream.
+    Recloned,
     /// Existing bare repo fetched incrementally; the new head may
     /// match the old one if the upstream fingerprint changed in a
     /// ref we don't track (manifest fingerprints cover all refs).
@@ -276,7 +280,15 @@ pub fn fetch_shard(data_dir: &Path, shard_path: &str, manifest_url: &str) -> Res
         clone_shard(&url, &local)?;
         return Ok(FetchOutcome::Cloned);
     }
+    if !repo_has_usable_refs(&local) {
+        reclone_shard(&url, &local)?;
+        return Ok(FetchOutcome::Recloned);
+    }
     fetch_existing_shard(&url, &local)?;
+    if !repo_has_usable_refs(&local) {
+        reclone_shard(&url, &local)?;
+        return Ok(FetchOutcome::Recloned);
+    }
     Ok(FetchOutcome::Fetched)
 }
 
@@ -295,6 +307,25 @@ fn clone_shard(url: &str, local: &Path) -> Result<()> {
         })?
         .fetch_only(gix::progress::Discard, should_interrupt)
         .map_err(|e| Error::Sync(format!("clone {url} -> {}: {e}", local.display())))?;
+    Ok(())
+}
+
+fn reclone_shard(url: &str, local: &Path) -> Result<()> {
+    remove_path(local)?;
+    clone_shard(url, local)
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| Error::Sync(format!("remove {}: {e}", path.display())))?;
+    } else {
+        std::fs::remove_file(path)
+            .map_err(|e| Error::Sync(format!("remove {}: {e}", path.display())))?;
+    }
     Ok(())
 }
 
@@ -319,9 +350,67 @@ fn fetch_existing_shard(url: &str, local: &Path) -> Result<()> {
     Ok(())
 }
 
+fn repo_has_usable_refs(local: &Path) -> bool {
+    let repo = match Git2Repository::open_bare(local).or_else(|_| Git2Repository::open(local)) {
+        Ok(repo) => repo,
+        Err(_) => return false,
+    };
+    let refs = match repo.references() {
+        Ok(refs) => refs,
+        Err(_) => return false,
+    };
+    for reference in refs.flatten() {
+        if reference.target().is_some() {
+            return true;
+        }
+        if let Some(symbolic_target) = reference.symbolic_target()
+            && let Ok(target_ref) = repo.find_reference(symbolic_target)
+            && target_ref.target().is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &Path) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(args: &[&str], cwd: &Path) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
 
     fn meta(fp: &str) -> ShardMeta {
         ShardMeta {
@@ -431,5 +520,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_local_manifest(dir.path()).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn fetch_shard_reclones_repo_with_no_usable_refs() {
+        let upstream_root = tempfile::tempdir().unwrap();
+        let remote = upstream_root.path().join("list.git");
+        git(&["init", "-q", "--bare", "list.git"], upstream_root.path());
+
+        let work = tempfile::tempdir().unwrap();
+        git(&["init", "-q", "-b", "master", "."], work.path());
+        fs::write(work.path().join("m"), "hello\n").unwrap();
+        git(&["add", "m"], work.path());
+        git(&["commit", "-q", "-m", "c1"], work.path());
+        git(
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+            work.path(),
+        );
+        git(&["push", "-q", "origin", "master"], work.path());
+
+        let data = tempfile::tempdir().unwrap();
+        let local = shard_local_path(data.path(), "/list.git");
+        fs::create_dir_all(&local).unwrap();
+        git(&["init", "-q", "--bare", "."], &local);
+        assert!(!repo_has_usable_refs(&local));
+
+        let manifest_url = format!("{}/manifest.js.gz", upstream_root.path().display());
+        let outcome = fetch_shard(data.path(), "/list.git", &manifest_url).unwrap();
+        assert!(matches!(outcome, FetchOutcome::Recloned));
+        assert!(repo_has_usable_refs(&local));
+
+        let remote_head = git_stdout(&["rev-parse", "refs/heads/master"], &remote);
+        let local_head = git_stdout(&["rev-parse", "refs/heads/master"], &local);
+        assert_eq!(local_head.trim(), remote_head.trim());
     }
 }

@@ -10,6 +10,53 @@ Status markers:
 - `[DEFER]` — decided to defer past v1; must have a `--> docs/...`
   pointer explaining why
 
+## Current release track (2026-04-21)
+
+We are working straight to `v0.3.0` now. There is **no standalone
+`0.2.3` release tag** planned, but the would-be `0.2.3` hardening
+line is still tracked separately here because it is the first block
+of work that must land before a public hosted launch.
+
+### 0.2.3 carry-forward — land these in `v0.3.0` first
+
+- [ ] `kernel-lore-sync` self-heals poisoned shard repos: detect
+  zero-ref / unopenable local shard repos, delete them, and
+  reclone automatically. `kernel-lore-doctor --heal` stays as the
+  explicit maintenance tool, not the primary recovery path.
+- [ ] `lore_regex` public-hosted posture: disable/gate it in hosted
+  mode or add enough admission control that the full-corpus default
+  path never just burns 5 s and returns `query_timeout`.
+- [ ] `_cached_corpus_stats` generation cache + warm path so warm
+  calls stay well under the wall-clock cap on the full corpus.
+- [ ] `/metrics` must record `rate_limited` and every other
+  non-`ok` status consistently, including overload that rejects
+  before the tool body runs.
+- [ ] Add end-to-end request latency + queue-wait histograms so the
+  client-side p95 inflation seen under concurrency is visible in
+  Prometheus.
+- [ ] Auto-build `paths/vocab.txt` during sync so
+  `lore_path_mentions` works on a fresh healthy hosted box without
+  a manual follow-up command.
+- [ ] Hosted default logging drops `tantivy::*` INFO churn unless
+  explicitly enabled; operator logs should show our own progress /
+  warning / error lines first.
+
+### 0.3.0 target — ship after the carry-forward hardening line above
+
+- [ ] Hosted deployment profile (`local` vs `hosted`, or equivalent)
+  that flips the exact runtime defaults we intend to expose on the
+  public internet.
+- [ ] Repeatable adversarial HTTP/MCP load harness in CI: cheap
+  flood, moderate over-cap concurrency, expensive-tool saturation,
+  and concurrent `/status` responsiveness checks.
+- [ ] Public-safe `lore_regex` redesign or permanently narrower
+  admission control. Current full-corpus behavior is not launchable.
+- [ ] Reconcile client-observed latency vs server-side tool latency
+  before retuning concurrency caps or over.db pool sizes.
+- [ ] Public-launch checklist against a full-corpus host: generation
+  health, shard health, tool surface, metrics, abuse posture, and
+  operator-log readability.
+
 ## Phase 0 — scaffold correctness (blocks everything else)
 
 - [x] Use `uv init --build-backend maturin` for canonical layout
@@ -323,7 +370,8 @@ wired to real data. Those are Phase 2.
 ## Public Instance Track
 
 Independent of Phase 1–6. Gates the hosted instance, not the
-code. Runs in parallel.
+code. Runs in parallel. Release-gated by the current release-track
+section above.
 
 - [ ] Pin `KLMCP_MODE` in `kernel_lore_mcp.config`
   (`local` default, `hosted` opt-in). Same binary, runtime

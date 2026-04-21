@@ -10,6 +10,32 @@ inconsistencies — discovered during the build or validation.
 
 Items are ordered by **user-visible impact**, not by ease of fix.
 
+## Hosted-readiness addendum (2026-04-21)
+
+The live full-corpus hosted run on `server6` closed one loop and
+opened another:
+
+- The shard-corruption incident was real, and the new
+  `kernel-lore-doctor --heal` path fixed it cleanly (16 broken
+  shard repos removed; full refetch + ingest completed with
+  `failed_shards=0`). The remaining gap is **automatic sync-side
+  self-heal**, not further manual-repair tooling.
+- The expensive-path posture is now the bigger blocker:
+  `lore_regex` on the full corpus timed out even for simple,
+  list-scoped patterns, and overload produced the correct
+  `query_timeout` + `rate_limited` mix but still proved the tool is
+  not public-ready in its current shape.
+- Client-side stress also showed a metrics gap: `rate_limited`
+  surfaced to callers but did not show up cleanly in `/metrics`,
+  and end-to-end request latency inflated under concurrency without
+  a matching request-scope histogram on the server side.
+- `_cached_corpus_stats` improved from timeout to ~2.2 s once
+  warmed, but still needs a generation-bound cache/warm path before
+  it is safe on a public box.
+
+These items now roll into `docs/plans/2026-04-20-v0.3.0-plan.md`
+Phase 2 (hosted-readiness hardening).
+
 ## Performance
 
 ### F1. patch_search latency = 68 seconds (SHIPPED 2026-04-19, 6.8x win)

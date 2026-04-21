@@ -338,6 +338,13 @@ fn main() -> Result<()> {
     for (sh, res) in changed.iter().zip(fetch_results.iter()) {
         match res {
             Ok(outcome) => {
+                if matches!(outcome, FetchOutcome::Recloned) {
+                    tracing::warn!(
+                        manifest_path = sh.manifest_path,
+                        local = %sh.local_path.display(),
+                        "local shard repo was unusable; sync removed it and recloned from upstream"
+                    );
+                }
                 tracing::info!(
                     manifest_path = sh.manifest_path,
                     local = %sh.local_path.display(),
