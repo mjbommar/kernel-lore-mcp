@@ -1,15 +1,24 @@
 """`/metrics` Prometheus exposition.
 
-Minimal v1 surface:
-  * `kernel_lore_mcp_tool_calls_total{tool, status}` — counter
-  * `kernel_lore_mcp_tool_latency_seconds{tool}` — histogram
-  * `kernel_lore_mcp_index_generation` — gauge mirroring
-    `/status.generation`
+Current surface:
+  * `kernel_lore_mcp_requests_total{method,status}` — MCP request counter
+  * `kernel_lore_mcp_request_latency_seconds{method,status}` — end-to-end MCP request latency
+  * `kernel_lore_mcp_tool_calls_total{tool,status}` — tool-call counter
+  * `kernel_lore_mcp_tool_latency_seconds{tool,status}` — end-to-end tool latency
+  * `kernel_lore_mcp_tool_runtime_seconds{tool,status}` — inner reader/runtime latency
+  * `kernel_lore_mcp_tool_queue_wait_seconds{tool,cost_class,status}` — time from request entry
+    to tool admission (captures pre-tool overhead and fast-reject saturation)
+  * `kernel_lore_mcp_tool_inflight{cost_class}` — current in-flight calls per cost class
+  * `kernel_lore_mcp_index_generation` — gauge mirroring `/status.generation`
 
 Bind localhost-only by default. Exposed via `@mcp.custom_route`.
 """
 
 from __future__ import annotations
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -47,6 +56,36 @@ except ImportError:  # pragma: no cover — prometheus_client is a hard dep
 
 REGISTRY = CollectorRegistry()
 
+_LATENCY_BUCKETS = (
+    0.001,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.5,
+    5.0,
+    10.0,
+)
+
+REQUESTS = Counter(
+    "kernel_lore_mcp_requests_total",
+    "Total MCP requests handled by the server.",
+    labelnames=("method", "status"),
+    registry=REGISTRY,
+)
+
+REQUEST_LATENCY = Histogram(
+    "kernel_lore_mcp_request_latency_seconds",
+    "End-to-end MCP request latency.",
+    labelnames=("method", "status"),
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+
 TOOL_CALLS = Counter(
     "kernel_lore_mcp_tool_calls_total",
     "Total MCP tool invocations.",
@@ -56,20 +95,94 @@ TOOL_CALLS = Counter(
 
 TOOL_LATENCY = Histogram(
     "kernel_lore_mcp_tool_latency_seconds",
-    "Wall-clock latency of MCP tool invocations.",
-    labelnames=("tool",),
+    "End-to-end wall-clock latency of MCP tool invocations.",
+    labelnames=("tool", "status"),
+    buckets=_LATENCY_BUCKETS,
     registry=REGISTRY,
 )
 
+TOOL_RUNTIME = Histogram(
+    "kernel_lore_mcp_tool_runtime_seconds",
+    "Inner runtime spent in reader / tool execution helpers.",
+    labelnames=("tool", "status"),
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+
+TOOL_QUEUE_WAIT = Histogram(
+    "kernel_lore_mcp_tool_queue_wait_seconds",
+    "Time from request entry to tool admission / rejection.",
+    labelnames=("tool", "cost_class", "status"),
+    buckets=_LATENCY_BUCKETS,
+    registry=REGISTRY,
+)
+
+TOOL_INFLIGHT = Gauge(
+    "kernel_lore_mcp_tool_inflight",
+    "Current in-flight tool calls per cost class.",
+    labelnames=("cost_class",),
+    registry=REGISTRY,
+)
+
+_CURRENT_TOOL_REQUEST_STARTED: ContextVar[float | None] = ContextVar(
+    "kernel_lore_mcp_tool_request_started",
+    default=None,
+)
+
+def record_request(method: str, elapsed_seconds: float, status: str = "ok") -> None:
+    """Record one end-to-end MCP request."""
+    REQUESTS.labels(method=method, status=status).inc()
+    REQUEST_LATENCY.labels(method=method, status=status).observe(elapsed_seconds)
+
 
 def record_tool_call(tool_name: str, elapsed_seconds: float, status: str = "ok") -> None:
-    """Record one tool invocation in the Prometheus metrics.
+    """Record one end-to-end tool invocation.
 
-    Called from the timeout wrapper after every tool call so metrics
-    are wired automatically without per-tool boilerplate.
+    Called from the FastMCP middleware around `tools/call`, so
+    statuses are visible even when the request is rejected before the
+    tool body runs.
     """
     TOOL_CALLS.labels(tool=tool_name, status=status).inc()
-    TOOL_LATENCY.labels(tool=tool_name).observe(elapsed_seconds)
+    TOOL_LATENCY.labels(tool=tool_name, status=status).observe(elapsed_seconds)
+
+
+def record_tool_runtime(tool_name: str, elapsed_seconds: float, status: str = "ok") -> None:
+    """Record inner runtime spent inside timeout-wrapped helpers."""
+    TOOL_RUNTIME.labels(tool=tool_name, status=status).observe(elapsed_seconds)
+
+
+def record_tool_queue_wait(
+    tool_name: str,
+    cost_class: str,
+    elapsed_seconds: float,
+    status: str = "ok",
+) -> None:
+    """Record the delay from request entry to tool admission."""
+    TOOL_QUEUE_WAIT.labels(
+        tool=tool_name,
+        cost_class=cost_class,
+        status=status,
+    ).observe(elapsed_seconds)
+
+
+def set_tool_inflight(cost_class: str, count: int) -> None:
+    """Update the live in-flight gauge for one cost class."""
+    TOOL_INFLIGHT.labels(cost_class=cost_class).set(count)
+
+
+def current_tool_request_started() -> float | None:
+    """Current per-tool request start time, if any."""
+    return _CURRENT_TOOL_REQUEST_STARTED.get()
+
+
+@contextmanager
+def tool_request_scope(started: float) -> Iterator[None]:
+    """Expose the current tool request's start time to deeper layers."""
+    token = _CURRENT_TOOL_REQUEST_STARTED.set(started)
+    try:
+        yield
+    finally:
+        _CURRENT_TOOL_REQUEST_STARTED.reset(token)
 
 
 INDEX_GENERATION = Gauge(
@@ -98,6 +211,10 @@ FRESHNESS_OK = Gauge(
 
 
 async def metrics_endpoint(request: Request) -> Response:
+    from kernel_lore_mcp.cost_class import current_inflight
+
+    for cost_class in ("cheap", "moderate", "expensive"):
+        set_tool_inflight(cost_class, current_inflight(cost_class))
     status = get_status()
     INDEX_GENERATION.set(status.get("generation", 0))
     age = status.get("last_ingest_age_seconds")

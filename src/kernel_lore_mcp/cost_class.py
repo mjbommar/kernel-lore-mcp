@@ -33,6 +33,7 @@ import asyncio
 import functools
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from typing import Literal, ParamSpec, TypeVar
 
@@ -121,17 +122,38 @@ def cost_limited(
 
     @functools.wraps(fn)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        from kernel_lore_mcp.routes.metrics import (
+            current_tool_request_started,
+            record_tool_queue_wait,
+            set_tool_inflight,
+        )
+
         # sem.locked() returns True only when capacity is zero.
         # Pair with a zero-timeout acquire for the "reject fast"
         # shape — acquire() would block if locked.
+        base_started = current_tool_request_started() or time.monotonic()
         try:
             await asyncio.wait_for(sem.acquire(), timeout=0.001)
         except TimeoutError as err:
+            record_tool_queue_wait(
+                tool_name,
+                cost,
+                max(0.0, time.monotonic() - base_started),
+                "rate_limited",
+            )
             raise _rate_limited(cost, tool_name) from err
+        record_tool_queue_wait(
+            tool_name,
+            cost,
+            max(0.0, time.monotonic() - base_started),
+            "ok",
+        )
+        set_tool_inflight(cost, current_inflight(cost))
         try:
             return await fn(*args, **kwargs)
         finally:
             sem.release()
+            set_tool_inflight(cost, current_inflight(cost))
 
     return wrapper
 

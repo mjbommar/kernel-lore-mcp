@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.observability import MetricsMiddleware
 from kernel_lore_mcp.prompts import register_prompts
 from kernel_lore_mcp.resources.blind_spots import BLIND_SPOTS_URI, blind_spots_text
 from kernel_lore_mcp.resources.coverage_stats import (
@@ -59,6 +60,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     settings = settings or Settings()
     set_settings(settings)
     mcp: FastMCP = FastMCP(name="kernel-lore", instructions=INSTRUCTIONS)
+    mcp.add_middleware(MetricsMiddleware())
 
     # Explicit tool registration.
     from kernel_lore_mcp.tools.activity import lore_activity

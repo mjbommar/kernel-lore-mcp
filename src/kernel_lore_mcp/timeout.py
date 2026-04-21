@@ -6,8 +6,9 @@ Every MCP tool that calls into the Rust reader should wrap its
 enforced uniformly. Without this, a hung Rust call blocks the
 async event loop indefinitely.
 
-Every call is also recorded in Prometheus via `record_tool_call`
-so /metrics reflects real tool usage without per-tool boilerplate.
+Inner runtime is also recorded in Prometheus via
+`record_tool_runtime` so `/metrics` can separate tool-body work
+from request/dispatch overhead.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ async def run_with_timeout[T](
     On timeout, raises `LoreError("query_timeout", ...)` with the
     echoed input so the agent can retry with a narrower query.
     """
-    from kernel_lore_mcp.routes.metrics import record_tool_call
+    from kernel_lore_mcp.routes.metrics import record_tool_runtime
 
     settings = get_settings()
     ms = timeout_ms or settings.query_wall_clock_ms
@@ -43,16 +44,22 @@ async def run_with_timeout[T](
             asyncio.to_thread(fn, *args),
             timeout=ms / 1000.0,
         )
-        record_tool_call(tool_name, time.monotonic() - started, "ok")
+        record_tool_runtime(tool_name, time.monotonic() - started, "ok")
         return result
     except TimeoutError:
-        record_tool_call(tool_name, time.monotonic() - started, "timeout")
+        record_tool_runtime(tool_name, time.monotonic() - started, "timeout")
         raise LoreError(
             "query_timeout",
             f"query exceeded the {ms} ms wall-clock cap",
             echoed_input=echoed_input or {},
             retry_after_seconds=5,
         ) from None
+    except LoreError as exc:
+        record_tool_runtime(tool_name, time.monotonic() - started, exc.code)
+        raise
+    except Exception:
+        record_tool_runtime(tool_name, time.monotonic() - started, "error")
+        raise
 
 
 __all__ = ["run_with_timeout"]
