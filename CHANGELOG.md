@@ -10,6 +10,26 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-04-21
+
+### Fixed
+
+**`kernel-lore-sync` is now memory-aware under full-corpus load.**
+- Sync no longer defaults to "one worker per core" on cold starts. It
+  now computes a worker plan from both CPU count and current
+  `MemAvailable`, with a conservative default cap of 4 workers and a
+  RAM budget per worker.
+- New startup logs report the chosen worker count, CPU cap, memory cap,
+  configured worker-memory budget, memory reserve, and the current
+  total / available system RAM. That makes OOM-risk visible before the
+  expensive ingest phase starts.
+- Fetch and ingest progress heartbeats now include process RSS and live
+  available memory, and emit an explicit warning when the machine drops
+  below the configured reserve.
+- Operators can tune the default planner with
+  `KLMCP_SYNC_WORKER_MEMORY_MB` and `KLMCP_SYNC_MEMORY_RESERVE_MB`
+  without rebuilding.
+
 ## [0.2.1] — 2026-04-20
 
 ### Fixed

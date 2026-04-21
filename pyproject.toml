@@ -1,6 +1,6 @@
 [project]
 name = "kernel-lore-mcp"
-version = "0.2.1"
+version = "0.2.2"
 description = "MCP server exposing fast, structured search over lore.kernel.org to LLM developer tools."
 readme = "README.md"
 license = { text = "MIT" }

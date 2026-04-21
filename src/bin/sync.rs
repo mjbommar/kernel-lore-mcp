@@ -34,9 +34,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
+use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 use _core::sync::{
@@ -56,6 +58,131 @@ struct ChangedShard {
     shard: String,
     /// On-disk bare-repo path under `<data_dir>/shards/...`.
     local_path: PathBuf,
+}
+
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const DEFAULT_SYNC_WORKERS_CAP: usize = 4;
+const MIB: u64 = 1024 * 1024;
+const DEFAULT_SYNC_WORKER_MEMORY_MB: u64 = 8 * 1024;
+const DEFAULT_SYNC_MEMORY_RESERVE_MB: u64 = 4 * 1024;
+
+#[derive(Clone, Copy)]
+struct MemoryPolicy {
+    worker_budget_bytes: u64,
+    reserve_bytes: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct MemorySnapshot {
+    total_bytes: Option<u64>,
+    available_bytes: Option<u64>,
+    process_rss_bytes: Option<u64>,
+}
+
+struct WorkerPlan {
+    workers: usize,
+    requested_workers: Option<usize>,
+    cpu_cap: usize,
+    memory_cap: Option<usize>,
+    memory_policy: MemoryPolicy,
+    memory_snapshot: MemorySnapshot,
+}
+
+#[derive(Clone)]
+struct PhaseTracker {
+    stage: &'static str,
+    total: usize,
+    memory_policy: MemoryPolicy,
+    started: std::sync::Arc<AtomicUsize>,
+    completed: std::sync::Arc<AtomicUsize>,
+    succeeded: std::sync::Arc<AtomicUsize>,
+    failed: std::sync::Arc<AtomicUsize>,
+}
+
+struct PhaseSnapshot {
+    total: usize,
+    started: usize,
+    completed: usize,
+    succeeded: usize,
+    failed: usize,
+}
+
+struct PhaseHeartbeat {
+    stop: std::sync::Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PhaseTracker {
+    fn new(stage: &'static str, total: usize, memory_policy: MemoryPolicy) -> Self {
+        Self {
+            stage,
+            total,
+            memory_policy,
+            started: std::sync::Arc::new(AtomicUsize::new(0)),
+            completed: std::sync::Arc::new(AtomicUsize::new(0)),
+            succeeded: std::sync::Arc::new(AtomicUsize::new(0)),
+            failed: std::sync::Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn heartbeat(&self) -> PhaseHeartbeat {
+        let tracker = self.clone();
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stop_for_thread = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let start = Instant::now();
+            loop {
+                std::thread::park_timeout(PROGRESS_LOG_INTERVAL);
+                if stop_for_thread.load(Ordering::Relaxed) {
+                    break;
+                }
+                let snap = tracker.snapshot();
+                if snap.completed >= snap.total {
+                    break;
+                }
+                let elapsed_secs = start.elapsed().as_secs_f64();
+                log_phase_progress(&tracker, &snap, elapsed_secs);
+            }
+        });
+        PhaseHeartbeat {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn record_start(&self) {
+        self.started.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_success(&self) {
+        self.succeeded.fetch_add(1, Ordering::Relaxed);
+        self.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_failure(&self) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+        self.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> PhaseSnapshot {
+        PhaseSnapshot {
+            total: self.total,
+            started: self.started.load(Ordering::Relaxed),
+            completed: self.completed.load(Ordering::Relaxed),
+            succeeded: self.succeeded.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl Drop for PhaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -80,6 +207,13 @@ fn main() -> Result<()> {
         .clone()
         .or_else(|| std::env::var("KLMCP_MANIFEST_URL").ok())
         .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_string());
+    let worker_plan = configured_workers(args.workers)?;
+    let workers = worker_plan.workers;
+    let worker_pool = ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .thread_name(|i| format!("klmcp-sync-{i}"))
+        .build()
+        .context("build sync worker pool")?;
 
     let start = Instant::now();
     tracing::info!(
@@ -88,8 +222,27 @@ fn main() -> Result<()> {
         include = ?args.include,
         exclude = ?args.exclude,
         dry_run = args.dry_run,
+        workers = workers,
+        requested_workers = ?worker_plan.requested_workers,
+        cpu_cap = worker_plan.cpu_cap,
+        memory_cap = ?worker_plan.memory_cap,
+        memory_worker_budget_mb = bytes_to_mib(worker_plan.memory_policy.worker_budget_bytes),
+        memory_reserve_mb = bytes_to_mib(worker_plan.memory_policy.reserve_bytes),
+        memory_total_mb = ?worker_plan.memory_snapshot.total_bytes.map(bytes_to_mib),
+        memory_available_mb = ?worker_plan.memory_snapshot.available_bytes.map(bytes_to_mib),
         "sync starting"
     );
+    if worker_plan.memory_cap.is_some() && workers < worker_plan.cpu_cap {
+        tracing::warn!(
+            workers = workers,
+            cpu_cap = worker_plan.cpu_cap,
+            memory_cap = ?worker_plan.memory_cap,
+            memory_available_mb = ?worker_plan.memory_snapshot.available_bytes.map(bytes_to_mib),
+            memory_worker_budget_mb = bytes_to_mib(worker_plan.memory_policy.worker_budget_bytes),
+            memory_reserve_mb = bytes_to_mib(worker_plan.memory_policy.reserve_bytes),
+            "worker count capped by memory budget"
+        );
+    }
 
     // Step 1: manifest fetch. Bail with exit=3 if unreachable —
     // distinguishes network failure from partial fetch/ingest failure
@@ -135,6 +288,7 @@ fn main() -> Result<()> {
     let _writer_lock = state
         .acquire_writer_lock()
         .context("another writer is running (writer.lock held)")?;
+    tracing::info!("writer lock acquired");
 
     // Resolve manifest paths to ChangedShard descriptors.
     let changed: Vec<ChangedShard> = changed_paths
@@ -147,18 +301,36 @@ fn main() -> Result<()> {
             "some manifest paths were unparseable; skipping those shards"
         );
     }
+    tracing::info!(
+        shards = changed.len(),
+        workers = workers,
+        "fetch phase starting"
+    );
 
     // Step 3: parallel gix fetch. rayon's default pool (one thread per
     // core) is the right fan-out for a network-bound workload too —
     // the per-shard fetches are independent and the bandwidth budget
     // is lore's not ours.
-    let fetch_results: Vec<Result<FetchOutcome, String>> = changed
-        .par_iter()
-        .map(|sh| {
-            fetch_shard(&data_dir, &sh.manifest_path, &manifest_url)
-                .map_err(|e| format!("{}: {e}", sh.manifest_path))
-        })
-        .collect();
+    let fetch_phase_start = Instant::now();
+    let fetch_tracker = PhaseTracker::new("fetch", changed.len(), worker_plan.memory_policy);
+    let fetch_heartbeat = fetch_tracker.heartbeat();
+    let fetch_results: Vec<Result<FetchOutcome, String>> = worker_pool.install(|| {
+        changed
+            .par_iter()
+            .map(|sh| {
+                fetch_tracker.record_start();
+                let result = fetch_shard(&data_dir, &sh.manifest_path, &manifest_url)
+                    .map_err(|e| format!("{}: {e}", sh.manifest_path));
+                if result.is_ok() {
+                    fetch_tracker.record_success();
+                } else {
+                    fetch_tracker.record_failure();
+                }
+                result
+            })
+            .collect()
+    });
+    drop(fetch_heartbeat);
     let mut fetch_failed: Vec<&ChangedShard> = Vec::new();
     let mut fetched_ok: Vec<&ChangedShard> = Vec::new();
     for (sh, res) in changed.iter().zip(fetch_results.iter()) {
@@ -186,6 +358,7 @@ fn main() -> Result<()> {
     tracing::info!(
         fetched = fetched_ok.len(),
         failed = fetch_failed.len(),
+        elapsed_secs = fetch_phase_start.elapsed().as_secs_f64(),
         "fetch phase done"
     );
 
@@ -254,63 +427,73 @@ fn main() -> Result<()> {
         lists = stores.len(),
         with_over,
         with_bm25 = !skip_bm25,
+        workers = workers,
         "ingest phase starting"
     );
     let ingest_phase_start = Instant::now();
-    let ingest_results: Vec<(&ChangedShard, Result<_core::IngestStats>, f64)> = fetched_ok
-        .par_iter()
-        .map(|sh| {
-            let shard_start = Instant::now();
-            let per_run_id = format!("{run_id}-{}-{}", sh.list, sh.shard);
-            let shared_store = stores.get(&sh.list).expect("store for list must exist");
-            let shared_bm25 = bm25.as_ref();
-            let mut last_err: Option<anyhow::Error> = None;
-            for attempt in 0..=max_retries {
-                if attempt > 0 {
-                    let backoff = std::time::Duration::from_secs(1 << attempt.min(5));
-                    tracing::warn!(
-                        list = sh.list,
-                        shard = sh.shard,
-                        attempt,
-                        backoff_secs = backoff.as_secs(),
-                        "retrying failed shard"
-                    );
-                    std::thread::sleep(backoff);
-                }
-                match _core::ingest_shard_with_bm25(
-                    &data_dir,
-                    &sh.local_path,
-                    &sh.list,
-                    &sh.shard,
-                    &per_run_id,
-                    shared_bm25,
-                    Some(shared_store),
-                    over.as_ref(),
-                    skip_bm25,
-                ) {
-                    Ok(stats) => {
-                        let elapsed = shard_start.elapsed().as_secs_f64();
-                        return (*sh, Ok(stats), elapsed);
+    let ingest_tracker = PhaseTracker::new("ingest", fetched_ok.len(), worker_plan.memory_policy);
+    let ingest_heartbeat = ingest_tracker.heartbeat();
+    let ingest_results: Vec<(&ChangedShard, Result<_core::IngestStats>, f64)> = worker_pool
+        .install(|| {
+            fetched_ok
+                .par_iter()
+                .map(|sh| {
+                    ingest_tracker.record_start();
+                    let shard_start = Instant::now();
+                    let per_run_id = format!("{run_id}-{}-{}", sh.list, sh.shard);
+                    let shared_store = stores.get(&sh.list).expect("store for list must exist");
+                    let shared_bm25 = bm25.as_ref();
+                    let mut last_err: Option<anyhow::Error> = None;
+                    for attempt in 0..=max_retries {
+                        if attempt > 0 {
+                            let backoff = std::time::Duration::from_secs(1 << attempt.min(5));
+                            tracing::warn!(
+                                list = sh.list,
+                                shard = sh.shard,
+                                attempt,
+                                backoff_secs = backoff.as_secs(),
+                                "retrying failed shard"
+                            );
+                            std::thread::sleep(backoff);
+                        }
+                        match _core::ingest_shard_with_bm25(
+                            &data_dir,
+                            &sh.local_path,
+                            &sh.list,
+                            &sh.shard,
+                            &per_run_id,
+                            shared_bm25,
+                            Some(shared_store),
+                            over.as_ref(),
+                            skip_bm25,
+                        ) {
+                            Ok(stats) => {
+                                let elapsed = shard_start.elapsed().as_secs_f64();
+                                ingest_tracker.record_success();
+                                return (*sh, Ok(stats), elapsed);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    list = sh.list,
+                                    shard = sh.shard,
+                                    attempt,
+                                    error = %e,
+                                    "shard ingest attempt failed"
+                                );
+                                last_err = Some(anyhow::Error::from(e));
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            list = sh.list,
-                            shard = sh.shard,
-                            attempt,
-                            error = %e,
-                            "shard ingest attempt failed"
-                        );
-                        last_err = Some(anyhow::Error::from(e));
-                    }
-                }
-            }
-            (
-                *sh,
-                Err(last_err.unwrap_or_else(|| anyhow!("unknown ingest failure"))),
-                shard_start.elapsed().as_secs_f64(),
-            )
-        })
-        .collect();
+                    ingest_tracker.record_failure();
+                    (
+                        *sh,
+                        Err(last_err.unwrap_or_else(|| anyhow!("unknown ingest failure"))),
+                        shard_start.elapsed().as_secs_f64(),
+                    )
+                })
+                .collect()
+        });
+    drop(ingest_heartbeat);
     tracing::info!(
         elapsed_secs = ingest_phase_start.elapsed().as_secs_f64(),
         "ingest phase done"
@@ -467,6 +650,7 @@ impl ChangedShard {
 struct Args {
     data_dir: Option<PathBuf>,
     manifest_url: Option<String>,
+    workers: Option<usize>,
     include: Vec<String>,
     exclude: Vec<String>,
     run_id: Option<String>,
@@ -487,6 +671,13 @@ fn parse_args() -> Result<Args> {
         match a.as_str() {
             "--data-dir" => args.data_dir = it.next().map(PathBuf::from),
             "--manifest-url" => args.manifest_url = it.next(),
+            "--workers" => {
+                let raw = it.next().context("--workers expects a positive integer")?;
+                args.workers = Some(
+                    raw.parse::<usize>()
+                        .context("--workers expects a positive integer")?,
+                );
+            }
             "--include" => args
                 .include
                 .push(it.next().context("--include expects a pattern")?),
@@ -508,6 +699,10 @@ fn parse_args() -> Result<Args> {
                      --data-dir PATH       (or $KLMCP_DATA_DIR)\n\
                      --manifest-url URL    (or $KLMCP_MANIFEST_URL;\n\
                                             default: {DEFAULT_MANIFEST_URL})\n\
+                     --workers N           shard fanout for fetch + ingest\n\
+                                           (or $KLMCP_SYNC_WORKERS;\n\
+                                            memory-aware default,\n\
+                                            capped by available RAM)\n\
                      --include PATTERN     fnmatch; repeatable (default: all)\n\
                      --exclude PATTERN     fnmatch; repeatable\n\
                      --run-id STRING       stable id for this run\n\
@@ -516,7 +711,13 @@ fn parse_args() -> Result<Args> {
                      --no-over             force off over.db writes\n\
                                            (default: on iff <data_dir>/over.db exists)\n\
                      --max-retries N       per-shard ingest retry count (default: 3)\n\
-                     --dry-run             fetch manifest + diff, don't touch shards\n"
+                     --dry-run             fetch manifest + diff, don't touch shards\n\
+                     \n\
+                     Env tuning:\n\
+                     KLMCP_SYNC_WORKER_MEMORY_MB  assumed RAM budget per worker\n\
+                                                  (default: 8192)\n\
+                     KLMCP_SYNC_MEMORY_RESERVE_MB keep this much RAM free\n\
+                                                  (default: 4096)\n"
                 );
                 std::process::exit(0);
             }
@@ -526,4 +727,204 @@ fn parse_args() -> Result<Args> {
         }
     }
     Ok(args)
+}
+
+fn configured_workers(cli: Option<usize>) -> Result<WorkerPlan> {
+    if let Some(0) = cli {
+        anyhow::bail!("--workers must be >= 1");
+    }
+    let env_workers = std::env::var("KLMCP_SYNC_WORKERS")
+        .ok()
+        .map(|raw| {
+            raw.parse::<usize>()
+                .with_context(|| format!("KLMCP_SYNC_WORKERS={raw} is not a positive integer"))
+        })
+        .transpose()?;
+    let requested = cli.or(env_workers);
+    if let Some(0) = requested {
+        anyhow::bail!("KLMCP_SYNC_WORKERS must be >= 1");
+    }
+    let cpu_available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(DEFAULT_SYNC_WORKERS_CAP);
+    let memory_policy = configured_memory_policy()?;
+    let memory_snapshot = current_memory_snapshot();
+    let cpu_cap = requested
+        .unwrap_or(cpu_available.min(DEFAULT_SYNC_WORKERS_CAP))
+        .min(cpu_available)
+        .max(1);
+    let memory_cap = memory_worker_cap(memory_snapshot, memory_policy);
+    let workers = memory_cap
+        .map(|cap| cpu_cap.min(cap))
+        .unwrap_or(cpu_cap)
+        .max(1);
+    Ok(WorkerPlan {
+        workers,
+        requested_workers: requested,
+        cpu_cap,
+        memory_cap,
+        memory_policy,
+        memory_snapshot,
+    })
+}
+
+fn configured_memory_policy() -> Result<MemoryPolicy> {
+    let worker_budget_mb =
+        read_u64_env("KLMCP_SYNC_WORKER_MEMORY_MB", DEFAULT_SYNC_WORKER_MEMORY_MB)?;
+    let reserve_mb = read_u64_env(
+        "KLMCP_SYNC_MEMORY_RESERVE_MB",
+        DEFAULT_SYNC_MEMORY_RESERVE_MB,
+    )?;
+    if worker_budget_mb == 0 {
+        anyhow::bail!("KLMCP_SYNC_WORKER_MEMORY_MB must be >= 1");
+    }
+    Ok(MemoryPolicy {
+        worker_budget_bytes: worker_budget_mb.saturating_mul(MIB),
+        reserve_bytes: reserve_mb.saturating_mul(MIB),
+    })
+}
+
+fn read_u64_env(name: &str, default: u64) -> Result<u64> {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            raw.parse::<u64>()
+                .with_context(|| format!("{name}={raw} is not a non-negative integer"))
+        })
+        .transpose()
+        .map(|v| v.unwrap_or(default))
+}
+
+fn memory_worker_cap(snapshot: MemorySnapshot, policy: MemoryPolicy) -> Option<usize> {
+    let available = snapshot.available_bytes?;
+    if policy.worker_budget_bytes == 0 {
+        return None;
+    }
+    let headroom = available.saturating_sub(policy.reserve_bytes);
+    Some(((headroom / policy.worker_budget_bytes) as usize).max(1))
+}
+
+fn current_memory_snapshot() -> MemorySnapshot {
+    MemorySnapshot {
+        total_bytes: proc_kib_value("/proc/meminfo", "MemTotal:").map(|kib| kib * 1024),
+        available_bytes: proc_kib_value("/proc/meminfo", "MemAvailable:").map(|kib| kib * 1024),
+        process_rss_bytes: proc_kib_value("/proc/self/status", "VmRSS:").map(|kib| kib * 1024),
+    }
+}
+
+fn proc_kib_value(path: &str, key: &str) -> Option<u64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(key) {
+            return None;
+        }
+        trimmed
+            .split_ascii_whitespace()
+            .nth(1)
+            .and_then(|v| v.parse::<u64>().ok())
+    })
+}
+
+fn bytes_to_mib(bytes: u64) -> u64 {
+    bytes / MIB
+}
+
+fn log_phase_progress(tracker: &PhaseTracker, snap: &PhaseSnapshot, elapsed_secs: f64) {
+    let memory = current_memory_snapshot();
+    tracing::info!(
+        stage = tracker.stage,
+        total = snap.total,
+        started = snap.started,
+        completed = snap.completed,
+        succeeded = snap.succeeded,
+        failed = snap.failed,
+        in_flight = snap.started.saturating_sub(snap.completed),
+        elapsed_secs = elapsed_secs,
+        process_rss_mb = ?memory.process_rss_bytes.map(bytes_to_mib),
+        memory_available_mb = ?memory.available_bytes.map(bytes_to_mib),
+        memory_total_mb = ?memory.total_bytes.map(bytes_to_mib),
+        "progress"
+    );
+    if let Some(available_bytes) = memory.available_bytes {
+        if available_bytes < tracker.memory_policy.reserve_bytes {
+            tracing::warn!(
+                stage = tracker.stage,
+                memory_available_mb = bytes_to_mib(available_bytes),
+                memory_reserve_mb = bytes_to_mib(tracker.memory_policy.reserve_bytes),
+                process_rss_mb = ?memory.process_rss_bytes.map(bytes_to_mib),
+                "memory pressure detected"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_worker_cap_uses_available_headroom() {
+        let snapshot = MemorySnapshot {
+            total_bytes: Some(64 * MIB),
+            available_bytes: Some(20 * MIB),
+            process_rss_bytes: Some(2 * MIB),
+        };
+        let policy = MemoryPolicy {
+            worker_budget_bytes: 4 * MIB,
+            reserve_bytes: 4 * MIB,
+        };
+
+        assert_eq!(memory_worker_cap(snapshot, policy), Some(4));
+    }
+
+    #[test]
+    fn memory_worker_cap_floors_to_one_worker_under_pressure() {
+        let snapshot = MemorySnapshot {
+            total_bytes: Some(64 * MIB),
+            available_bytes: Some(3 * MIB),
+            process_rss_bytes: Some(2 * MIB),
+        };
+        let policy = MemoryPolicy {
+            worker_budget_bytes: 8 * MIB,
+            reserve_bytes: 4 * MIB,
+        };
+
+        assert_eq!(memory_worker_cap(snapshot, policy), Some(1));
+    }
+
+    #[test]
+    fn memory_worker_cap_is_none_without_available_memory() {
+        let snapshot = MemorySnapshot {
+            total_bytes: Some(64 * MIB),
+            available_bytes: None,
+            process_rss_bytes: Some(2 * MIB),
+        };
+        let policy = MemoryPolicy {
+            worker_budget_bytes: 8 * MIB,
+            reserve_bytes: 4 * MIB,
+        };
+
+        assert_eq!(memory_worker_cap(snapshot, policy), None);
+    }
+
+    #[test]
+    fn changed_shard_parses_manifest_paths() {
+        let data_dir = Path::new("/tmp/klmcp");
+
+        let v2 = ChangedShard::from_manifest_path(data_dir, "/netdev/git/7.git")
+            .expect("v2 manifest path should parse");
+        assert_eq!(v2.list, "netdev");
+        assert_eq!(v2.shard, "7");
+        assert_eq!(
+            v2.local_path,
+            shard_local_path(data_dir, "/netdev/git/7.git")
+        );
+
+        let v1 = ChangedShard::from_manifest_path(data_dir, "/linux-cifs.git")
+            .expect("v1 manifest path should parse");
+        assert_eq!(v1.list, "linux-cifs");
+        assert_eq!(v1.shard, "0");
+        assert_eq!(v1.local_path, shard_local_path(data_dir, "/linux-cifs.git"));
+    }
 }
