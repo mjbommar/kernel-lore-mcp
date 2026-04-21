@@ -20,6 +20,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use git2::Repository as Git2Repository;
 use gix::ObjectId;
 
 use crate::bm25::BmWriter;
@@ -29,7 +30,7 @@ use crate::over::{DddPayload, OverDb, OverRow};
 use crate::parse::{self, ParsedMessage};
 use crate::state::State;
 use crate::store::{Store, StoreOffset};
-use crate::trigram::{SegmentBuilder as TrigramBuilder, segment_dir as trigram_segment_dir};
+use crate::trigram::{segment_dir as trigram_segment_dir, SegmentBuilder as TrigramBuilder};
 
 /// Ingest one public-inbox shard end-to-end.
 ///
@@ -134,10 +135,7 @@ pub fn ingest_shard_with_bm25(
     // mmaps warm for the lifetime of the process.
     repo.object_cache_size(256 * 1024 * 1024);
 
-    let head_id: ObjectId = repo
-        .head_id()
-        .map_err(|e| Error::Gix(format!("head_id: {e}")))?
-        .detach();
+    let head_id = resolve_walk_head_id(&repo, shard_path)?;
     let head_hex = head_id.to_string();
 
     // Build the walk; use incremental when we have a last-indexed oid
@@ -374,6 +372,94 @@ pub fn ingest_shard_with_bm25(
     Ok(stats)
 }
 
+fn resolve_walk_head_id(repo: &gix::Repository, shard_path: &Path) -> Result<ObjectId> {
+    match repo.head_id() {
+        Ok(head) => Ok(head.detach()),
+        Err(head_err) => {
+            if let Some((head_id, repaired_ref)) = fallback_head_id_from_refs(shard_path)? {
+                tracing::warn!(
+                    shard = %shard_path.display(),
+                    repaired_head_ref = repaired_ref,
+                    head_oid = %head_id,
+                    "repo HEAD was unborn; recovered ingest tip from branch refs"
+                );
+                Ok(head_id)
+            } else {
+                Err(Error::Gix(format!("head_id: {head_err}")))
+            }
+        }
+    }
+}
+
+fn fallback_head_id_from_refs(shard_path: &Path) -> Result<Option<(ObjectId, String)>> {
+    let repo = Git2Repository::open_bare(shard_path)
+        .or_else(|_| Git2Repository::open(shard_path))
+        .map_err(|e| Error::Gix(format!("open {}: {e}", shard_path.display())))?;
+
+    let mut candidates: Vec<(usize, String, ObjectId)> = Vec::new();
+    push_ref_candidate(&repo, "refs/heads/master", 0, &mut candidates)?;
+    push_ref_candidate(&repo, "refs/heads/main", 1, &mut candidates)?;
+
+    let refs = repo
+        .references()
+        .map_err(|e| Error::Gix(format!("references {}: {e}", shard_path.display())))?;
+    for reference in refs {
+        let reference = reference
+            .map_err(|e| Error::Gix(format!("reference {}: {e}", shard_path.display())))?;
+        let Some(name) = reference.name() else {
+            continue;
+        };
+        if !name.starts_with("refs/heads/") {
+            continue;
+        }
+        if matches!(name, "refs/heads/master" | "refs/heads/main") {
+            continue;
+        }
+        let Some(target) = reference.target() else {
+            continue;
+        };
+        candidates.push((2, name.to_owned(), git2_oid_to_gix(target)?));
+    }
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    let Some((_, refname, head_id)) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+
+    if let Err(e) = repo.set_head(&refname) {
+        tracing::warn!(
+            shard = %shard_path.display(),
+            repaired_head_ref = refname,
+            error = %e,
+            "failed to repoint unborn repo HEAD; continuing with recovered ref tip"
+        );
+    }
+
+    Ok(Some((head_id, refname)))
+}
+
+fn push_ref_candidate(
+    repo: &Git2Repository,
+    refname: &str,
+    rank: usize,
+    out: &mut Vec<(usize, String, ObjectId)>,
+) -> Result<()> {
+    let Ok(reference) = repo.find_reference(refname) else {
+        return Ok(());
+    };
+    let Some(target) = reference.target() else {
+        return Ok(());
+    };
+    out.push((rank, refname.to_owned(), git2_oid_to_gix(target)?));
+    Ok(())
+}
+
+fn git2_oid_to_gix(oid: git2::Oid) -> Result<ObjectId> {
+    oid.to_string()
+        .parse::<ObjectId>()
+        .map_err(|e| Error::Gix(format!("parse oid {oid}: {e}")))
+}
+
 /// Aggregate counters from a single `ingest_shard` invocation.
 #[derive(Debug, Default, Clone)]
 pub struct IngestStats {
@@ -559,41 +645,41 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    fn run_git(args: &[&str], cwd: &Path) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "tester")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "tester")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     /// Build a minimal "public-inbox-like" shard: a bare repo with one
     /// commit per message, each commit's tree containing a single blob
     /// named `m` holding the raw RFC822 message.
     fn make_synthetic_shard(shard_dir: &Path, messages: &[&[u8]]) {
-        let run = |args: &[&str], cwd: &Path| {
-            let out = Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .env("GIT_AUTHOR_NAME", "tester")
-                .env("GIT_AUTHOR_EMAIL", "t@e")
-                .env("GIT_COMMITTER_NAME", "tester")
-                .env("GIT_COMMITTER_EMAIL", "t@e")
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {:?} failed: {}",
-                args,
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-
         // Build in a working tree, then clone --bare into shard_dir.
         let work = tempdir().unwrap();
-        run(&["init", "-q", "-b", "master", "."], work.path());
+        run_git(&["init", "-q", "-b", "master", "."], work.path());
         for (i, msg) in messages.iter().enumerate() {
             std::fs::write(work.path().join("m"), msg).unwrap();
-            run(&["add", "m"], work.path());
-            run(&["commit", "-q", "-m", &format!("msg {i}")], work.path());
+            run_git(&["add", "m"], work.path());
+            run_git(&["commit", "-q", "-m", &format!("msg {i}")], work.path());
         }
         // Clone --bare into final location.
         if shard_dir.exists() {
             std::fs::remove_dir_all(shard_dir).unwrap();
         }
-        run(
+        run_git(
             &[
                 "clone",
                 "--bare",
@@ -670,6 +756,35 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let seg = data.path().join("store/linux-cifs/segment-000000.zst");
         assert!(seg.exists());
         assert!(seg.metadata().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn unborn_head_recovers_from_master_ref() {
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let msgs = sample_messages();
+        let msg_refs: Vec<&[u8]> = msgs.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &msg_refs);
+
+        // Reproduce the bad local-clone state from sync: HEAD points
+        // at an unborn `main`, but the real commits live on `master`.
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &shard_dir);
+
+        let data = tempdir().unwrap();
+        let stats = ingest_shard(data.path(), &shard_dir, "linux-wireless", "0", "run-0001")
+            .expect("ingest should recover from unborn HEAD");
+        assert_eq!(stats.ingested, 2);
+
+        let out = Command::new("git")
+            .args(["symbolic-ref", "HEAD"])
+            .current_dir(&shard_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "refs/heads/master"
+        );
     }
 
     #[test]
