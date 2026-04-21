@@ -517,6 +517,7 @@ impl PyReader {
         py: Python<'py>,
         message_id: String,
     ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let row = py.detach(|| self.inner.fetch_message(&message_id))?;
         row.map(|r| row_to_pydict(py, &r)).transpose()
     }
@@ -549,6 +550,7 @@ impl PyReader {
         py: Python<'py>,
         message_id: String,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| self.inner.series_timeline(&message_id))?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
@@ -560,6 +562,7 @@ impl PyReader {
         token: String,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| self.inner.expand_citation(&token, limit))?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
@@ -608,6 +611,7 @@ impl PyReader {
         message_id: String,
         max_messages: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
         let rows = py.detach(|| self.inner.thread(&message_id, max_messages))?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
@@ -1277,6 +1281,7 @@ impl PyReader {
         py: Python<'py>,
         message_id: String,
     ) -> PyResult<Option<Bound<'py, pyo3::types::PyBytes>>> {
+        let _guard = read_query_guard();
         let data = py.detach(|| self.inner.fetch_body(&message_id))?;
         Ok(data.map(|d| pyo3::types::PyBytes::new(py, &d)))
     }

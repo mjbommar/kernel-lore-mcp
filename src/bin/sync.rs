@@ -65,6 +65,7 @@ const DEFAULT_SYNC_WORKERS_CAP: usize = 4;
 const MIB: u64 = 1024 * 1024;
 const DEFAULT_SYNC_WORKER_MEMORY_MB: u64 = 8 * 1024;
 const DEFAULT_SYNC_MEMORY_RESERVE_MB: u64 = 4 * 1024;
+const SYNC_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy)]
 struct MemoryPolicy {
@@ -217,6 +218,7 @@ fn main() -> Result<()> {
 
     let start = Instant::now();
     tracing::info!(
+        version = SYNC_VERSION,
         data_dir = %data_dir.display(),
         manifest_url = manifest_url,
         include = ?args.include,
@@ -695,6 +697,8 @@ fn parse_args() -> Result<Args> {
             "--help" | "-h" => {
                 println!(
                     "kernel-lore-sync\n\
+                     version: {SYNC_VERSION}\n\
+                     \n\
                      \n\
                      --data-dir PATH       (or $KLMCP_DATA_DIR)\n\
                      --manifest-url URL    (or $KLMCP_MANIFEST_URL;\n\
@@ -719,6 +723,10 @@ fn parse_args() -> Result<Args> {
                      KLMCP_SYNC_MEMORY_RESERVE_MB keep this much RAM free\n\
                                                   (default: 4096)\n"
                 );
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("{SYNC_VERSION}");
                 std::process::exit(0);
             }
             other => {

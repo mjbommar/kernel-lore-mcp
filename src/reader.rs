@@ -777,6 +777,7 @@ impl Reader {
     /// Point lookup by Message-ID (across all lists).
     pub fn fetch_message(&self, message_id: &str) -> Result<Option<MessageRow>> {
         let needle = strip_angles(message_id).to_owned();
+        let mut over_miss = false;
         // over.db: indexed point lookup by message_id (sub-ms typical).
         // Cross-posts collapse to the freshest by date_unix_ns inside
         // OverDb::get, matching the mtime-DESC + dedup behavior the
@@ -792,11 +793,21 @@ impl Reader {
             match res? {
                 Some(row) => return Ok(Some(row)),
                 None => {
+                    over_miss = true;
                     // Miss — fall through. The Reader-open check guards
                     // against long-lived staleness; this guards against
                     // a per-row inconsistency within a single generation.
                 }
             }
+        }
+        // Online query paths install a request deadline. On an indexed
+        // over.db miss, scanning every Parquet row for an exact
+        // Message-ID almost always burns the whole budget and strands
+        // the native worker. Prefer the indexed answer under a live
+        // deadline; offline/debug callers still get the legacy Parquet
+        // fallback when no deadline guard is active.
+        if over_miss && crate::timeout::current_deadline().is_some() {
+            return Ok(None);
         }
         let mut found: Option<MessageRow> = None;
         self.scan(
@@ -3364,6 +3375,22 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
             elapsed < std::time::Duration::from_secs(1),
             "thread() on missing mid took {elapsed:?} — expected short-circuit"
         );
+    }
+
+    #[test]
+    fn fetch_message_on_over_miss_short_circuits_under_deadline() {
+        use crate::over::OverDb;
+
+        let dir = tempdir().unwrap();
+        ingest_sample(dir.path());
+        let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
+        let reader = Reader::new(dir.path());
+
+        let _guard = install_expired_deadline();
+        let got = reader
+            .fetch_message("<definitely-not-real@nowhere.invalid>")
+            .unwrap();
+        assert!(got.is_none(), "expected indexed miss to short-circuit");
     }
 
     #[test]

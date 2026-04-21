@@ -26,6 +26,14 @@ import sys
 from pathlib import Path
 
 _BIN_NAME = "kernel-lore-sync"
+_DEV_TREE_SENTINELS = ("Cargo.toml", "pyproject.toml", "src/bin/sync.rs")
+_DEV_TREE_WATCH_GLOBS = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "pyproject.toml",
+    "build.rs",
+    "src/**/*.rs",
+)
 
 
 def _is_executable_file(path: str | Path) -> bool:
@@ -77,6 +85,40 @@ def _dev_binary_candidates() -> list[str]:
     return out
 
 
+def _source_checkout_root(start: Path | None = None) -> Path | None:
+    cur = (start or Path.cwd()).resolve()
+    while True:
+        if all((cur / rel).exists() for rel in _DEV_TREE_SENTINELS):
+            return cur
+        parent = cur.parent
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def _latest_source_mtime_ns(root: Path) -> int:
+    latest = 0
+    for rel in _DEV_TREE_WATCH_GLOBS:
+        for path in root.glob(rel):
+            try:
+                latest = max(latest, path.stat().st_mtime_ns)
+            except OSError:
+                continue
+    return latest
+
+
+def _dev_binary_is_stale(binary_path: str | Path) -> bool:
+    root = _source_checkout_root()
+    if root is None:
+        return False
+    try:
+        binary_mtime = Path(binary_path).stat().st_mtime_ns
+    except OSError:
+        return False
+    latest_source = _latest_source_mtime_ns(root)
+    return latest_source > binary_mtime
+
+
 def _path_binary_candidates() -> list[str]:
     out: list[str] = []
     for entry in os.get_exec_path():
@@ -115,6 +157,12 @@ def _find_rust_binary() -> str:
 
     for cand in _dev_binary_candidates():
         if _is_executable_file(cand) and not _same_path(cand, current_wrapper):
+            if _dev_binary_is_stale(cand):
+                raise SystemExit(
+                    f"{cand} is older than the source checkout. "
+                    "Rebuild it with `cargo build --release --bin kernel-lore-sync` "
+                    "or point KLMCP_SYNC_BINARY at a freshly built binary."
+                )
             return cand
 
     for cand in _path_binary_candidates():
