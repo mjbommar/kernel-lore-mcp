@@ -524,6 +524,13 @@ fn main() -> Result<()> {
         path = %tid_result.0.display(),
         "tid rebuild done"
     );
+    if let Some(path_count) = rebuild_path_vocab_after_sync(&data_dir)? {
+        tracing::info!(
+            paths = path_count,
+            path = %data_dir.join("paths").join("vocab.txt").display(),
+            "path vocab rebuild done"
+        );
+    }
 
     // Tally.
     let mut total_ingested: u64 = 0;
@@ -655,6 +662,19 @@ impl ChangedShard {
     }
 }
 
+fn rebuild_path_vocab_after_sync(data_dir: &Path) -> Result<Option<u64>> {
+    let skip = std::env::var("KLMCP_SKIP_PATH_VOCAB")
+        .map(|raw| raw == "1")
+        .unwrap_or(false);
+    if skip {
+        tracing::info!("path vocab rebuild skipped by KLMCP_SKIP_PATH_VOCAB=1");
+        return Ok(None);
+    }
+    let count = _core::path_tier::rebuild_vocab_from_over(data_dir)
+        .context("rebuild path vocab from over/parquet")?;
+    Ok(Some(count))
+}
+
 #[derive(Default)]
 struct Args {
     data_dir: Option<PathBuf>,
@@ -728,7 +748,8 @@ fn parse_args() -> Result<Args> {
                      KLMCP_SYNC_WORKER_MEMORY_MB  assumed RAM budget per worker\n\
                                                   (default: 8192)\n\
                      KLMCP_SYNC_MEMORY_RESERVE_MB keep this much RAM free\n\
-                                                  (default: 4096)\n"
+                                                  (default: 4096)\n\
+                     KLMCP_SKIP_PATH_VOCAB=1     skip automatic paths/vocab.txt rebuild\n"
                 );
                 std::process::exit(0);
             }
@@ -877,6 +898,83 @@ fn log_phase_progress(tracker: &PhaseTracker, snap: &PhaseSnapshot, elapsed_secs
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    fn git(args: &[&str], cwd: &Path) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@e")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@e")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn make_synthetic_shard(shard_dir: &Path) {
+        let work = shard_dir.parent().unwrap().join("work");
+        fs::create_dir_all(&work).unwrap();
+        git(&["init", "-q", "-b", "master", "."], &work);
+        let messages = [
+            concat!(
+                "From: Alice <alice@example.com>\r\n",
+                "Subject: [PATCH 1/2] ksmbd: tighten ACL bounds\r\n",
+                "Date: Mon, 14 Apr 2026 12:00:00 +0000\r\n",
+                "Message-ID: <m1@x>\r\n",
+                "\r\n",
+                "Prose here explaining the change.\r\n",
+                "---\r\n",
+                "diff --git a/fs/smb/server/smbacl.c b/fs/smb/server/smbacl.c\r\n",
+                "--- a/fs/smb/server/smbacl.c\r\n",
+                "+++ b/fs/smb/server/smbacl.c\r\n",
+                "@@ -1,1 +1,2 @@\r\n",
+                " a\r\n",
+                "+b\r\n",
+            ),
+            concat!(
+                "From: Alice <alice@example.com>\r\n",
+                "Subject: [PATCH 2/2] ksmbd: follow-up\r\n",
+                "Date: Mon, 14 Apr 2026 12:05:00 +0000\r\n",
+                "Message-ID: <m2@x>\r\n",
+                "In-Reply-To: <m1@x>\r\n",
+                "References: <m1@x>\r\n",
+                "\r\n",
+                "More prose.\r\n",
+                "---\r\n",
+                "diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n",
+                "--- a/fs/smb/server/smb2pdu.c\r\n",
+                "+++ b/fs/smb/server/smb2pdu.c\r\n",
+                "@@ -1,1 +1,2 @@\r\n",
+                " a\r\n",
+                "+b\r\n",
+            ),
+        ];
+        for (i, msg) in messages.iter().enumerate() {
+            fs::write(work.join("m"), msg.as_bytes()).unwrap();
+            git(&["add", "m"], &work);
+            git(&["commit", "-q", "-m", &format!("m{i}")], &work);
+        }
+        if shard_dir.exists() {
+            fs::remove_dir_all(shard_dir).unwrap();
+        }
+        let out = Command::new("git")
+            .args(["clone", "--bare", "-q", work.to_str().unwrap(), shard_dir.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git clone --bare: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     #[test]
     fn memory_worker_cap_uses_available_headroom() {
@@ -941,5 +1039,29 @@ mod tests {
         assert_eq!(v1.list, "linux-cifs");
         assert_eq!(v1.shard, "0");
         assert_eq!(v1.local_path, shard_local_path(data_dir, "/linux-cifs.git"));
+    }
+
+    #[test]
+    fn rebuild_path_vocab_after_sync_creates_vocab_from_ingested_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shard_dir = tmp.path().join("shards").join("0.git");
+        fs::create_dir_all(shard_dir.parent().unwrap()).unwrap();
+        make_synthetic_shard(&shard_dir);
+
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        _core::ingest_shard(&data_dir, &shard_dir, "linux-cifs", "0", "sync-path-test").unwrap();
+
+        let vocab_path = data_dir.join("paths").join("vocab.txt");
+        assert!(!vocab_path.exists());
+
+        let count = rebuild_path_vocab_after_sync(&data_dir).unwrap();
+        assert!(count.is_some());
+        assert!(count.unwrap() >= 2);
+        assert!(vocab_path.exists());
+
+        let vocab = fs::read_to_string(vocab_path).unwrap();
+        assert!(vocab.contains("fs/smb/server/smbacl.c"));
+        assert!(vocab.contains("fs/smb/server/smb2pdu.c"));
     }
 }
