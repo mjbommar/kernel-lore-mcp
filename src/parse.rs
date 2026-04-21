@@ -291,8 +291,7 @@ fn split_prose_and_patch(body: &str, out: &mut ParsedMessage) {
     let patch_byte_start = if body.starts_with(needle) {
         Some(0)
     } else {
-        body.find(&format!("\n{needle}"))
-            .map(|pos| pos + 1) // skip the \n, point at 'd'
+        body.find(&format!("\n{needle}")).map(|pos| pos + 1) // skip the \n, point at 'd'
     };
 
     let (prose_end, patch_text) = match patch_byte_start {

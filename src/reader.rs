@@ -202,8 +202,8 @@ pub struct Reader {
 
 impl Reader {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
-        let disabled = std::env::var_os("KLMCP_DISABLE_OVER")
-            .is_some_and(|v| !v.is_empty() && v != "0");
+        let disabled =
+            std::env::var_os("KLMCP_DISABLE_OVER").is_some_and(|v| !v.is_empty() && v != "0");
         if disabled {
             tracing::debug!("Reader: over.db disabled via KLMCP_DISABLE_OVER");
             return Self::new_no_over(data_dir);
@@ -307,10 +307,7 @@ impl Reader {
     /// data is immutable once built, so sharing one Arc across
     /// rayon workers is safe. Eliminates the
     /// ~16ms-per-segment open cost on warm cross-list queries.
-    fn trigram_segment_for(
-        &self,
-        dir: &Path,
-    ) -> Result<Arc<crate::trigram::SegmentReader>> {
+    fn trigram_segment_for(&self, dir: &Path) -> Result<Arc<crate::trigram::SegmentReader>> {
         if let Ok(guard) = self.trigram_segments.read()
             && let Some(s) = guard.get(dir)
         {
@@ -827,27 +824,46 @@ impl Reader {
         let f_func = function.map(str::to_owned);
         let list_filter = list.map(str::to_owned);
 
-        // Cross-list fast path: `activity(file=X, list=None)` used to
-        // fall through to a full Parquet scan. With the
-        // `over_touched_file` side table populated (F2b / #68), we
-        // can serve this as an indexed JOIN. Still apply `function`
-        // as a post-filter on the returned rows because
-        // touched_functions lives in the ddd blob.
-        if let (Some(path), true) = (&f_path, list_filter.is_none())
-            && let Some(res) = self.with_over(|db| {
+        // Indexed side-table path: when either touched_files or
+        // touched_functions is present we can route through the
+        // corresponding over.db side index and post-filter any
+        // secondary predicate in memory.
+        let indexed_seed = match (&f_path, &f_func) {
+            (Some(path), _) => self.with_over(|db| {
+                let scan_limit = if f_func.is_some() {
+                    limit.saturating_mul(8).max(256)
+                } else {
+                    limit
+                };
                 db.scan_eq(
                     EqField::TouchedFile,
                     path,
                     since_unix_ns,
-                    None,
-                    limit.saturating_mul(4).max(256),
+                    list_filter.as_deref(),
+                    scan_limit,
                 )
-            })
-        {
+            }),
+            (None, Some(func)) => self.with_over(|db| {
+                db.scan_eq(
+                    EqField::TouchedFunction,
+                    func,
+                    since_unix_ns,
+                    list_filter.as_deref(),
+                    limit,
+                )
+            }),
+            (None, None) => None,
+        };
+        if let Some(res) = indexed_seed {
             let rows = res?;
             let mut out: Vec<MessageRow> = rows
                 .into_iter()
                 .filter(|r| {
+                    if let Some(ref p) = f_path
+                        && !r.touched_files.iter().any(|x| x == p)
+                    {
+                        return false;
+                    }
                     if let Some(ref fn_) = f_func
                         && !r.touched_functions.iter().any(|x| x == fn_)
                     {
@@ -956,9 +972,8 @@ impl Reader {
         // the entire 17.6M-entry tid.parquet into a HashMap (~1.8 GB)
         // on every query.
         if let Some(seed_tid) = seed.tid.clone().filter(|t| !t.is_empty())
-            && let Some(res) = self.with_over(|db| {
-                db.scan_eq(EqField::Tid, &seed_tid, None, None, 10_000)
-            })
+            && let Some(res) =
+                self.with_over(|db| db.scan_eq(EqField::Tid, &seed_tid, None, None, 10_000))
         {
             let siblings = res?;
             let mut out: Vec<MessageRow> = siblings
@@ -1017,9 +1032,8 @@ impl Reader {
         // (over.db's sequential scan would also work, but the plan
         // explicitly defers it to keep this change small + bisectable).
         if eq_field_is_over_indexed(field)
-            && let Some(res) = self.with_over(|db| {
-                db.scan_eq(field, value, since_unix_ns, list_filter, limit)
-            })
+            && let Some(res) =
+                self.with_over(|db| db.scan_eq(field, value, since_unix_ns, list_filter, limit))
         {
             return res;
         }
@@ -1203,12 +1217,8 @@ impl Reader {
         let mut mention_limit_hit = false;
 
         if include_mentions && mention_limit > 0 {
-            let mention_rows = self.trailer_mentions(
-                addr,
-                list_filter,
-                since_unix_ns,
-                mention_limit,
-            )?;
+            let mention_rows =
+                self.trailer_mentions(addr, list_filter, since_unix_ns, mention_limit)?;
             mention_limit_hit = mention_rows.len() >= mention_limit;
             for r in mention_rows {
                 if seen.insert(r.message_id.clone()) {
@@ -1406,8 +1416,7 @@ impl Reader {
                 TrailerKind::SignedOffBy => entry.signed_off_by += 1,
             }
             if let Some(d) = date_ns {
-                entry.last_seen_unix_ns =
-                    Some(entry.last_seen_unix_ns.map_or(d, |e| e.max(d)));
+                entry.last_seen_unix_ns = Some(entry.last_seen_unix_ns.map_or(d, |e| e.max(d)));
             }
         };
         for row in &rows {
@@ -1460,9 +1469,7 @@ impl Reader {
 
         // All observed (top by activity) for the full picture.
         let mut all_observed: Vec<ObservedAddr> = observed.into_values().collect();
-        all_observed.sort_by_key(|o| {
-            std::cmp::Reverse(o.reviewed_by + o.acked_by + o.tested_by)
-        });
+        all_observed.sort_by_key(|o| std::cmp::Reverse(o.reviewed_by + o.acked_by + o.tested_by));
         all_observed.truncate(50);
         out.observed = all_observed;
 
@@ -1704,9 +1711,8 @@ impl Reader {
         // after a rebuild, "all messages in the thread" is a single
         // B-tree lookup on `over_tid`. Mirrors the series_timeline fix.
         if let Some(seed_tid) = seed.tid.as_deref().filter(|t| !t.is_empty())
-            && let Some(res) = self.with_over(|db| {
-                db.scan_eq(EqField::Tid, seed_tid, None, None, max_messages)
-            })
+            && let Some(res) =
+                self.with_over(|db| db.scan_eq(EqField::Tid, seed_tid, None, None, max_messages))
         {
             let mut rows = res?;
             rows.sort_by_key(|r| r.date_unix_ns.unwrap_or(i64::MIN));
@@ -1884,12 +1890,7 @@ impl Reader {
         // enumerator with fuzzy_edits=0 — internally it routes to
         // `candidates_for_substring`, so the behavior is identical
         // to the old serial loop, just across a rayon pool.
-        let candidates = collect_trigram_candidates(
-            self,
-            &lists,
-            needle.as_bytes(),
-            0,
-        )?;
+        let candidates = collect_trigram_candidates(self, &lists, needle.as_bytes(), 0)?;
 
         let list_filter = list.map(str::to_owned);
         let needle_bytes = needle.as_bytes().to_owned();
@@ -1921,8 +1922,7 @@ impl Reader {
     ) -> Result<Vec<MessageRow>> {
         let want_list = list_filter.map(str::to_owned);
         let mut hits: Vec<MessageRow> = Vec::new();
-        let mut missing: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut missing: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         if let Some(res) = self.with_over(|db| {
             let ids: Vec<String> = candidates.iter().cloned().collect();
@@ -1987,12 +1987,7 @@ impl Reader {
             None => list_trigram_lists(&self.data_dir)?,
         };
 
-        let candidates = collect_trigram_candidates(
-            self,
-            &lists,
-            needle.as_bytes(),
-            fuzzy_edits,
-        )?;
+        let candidates = collect_trigram_candidates(self, &lists, needle.as_bytes(), fuzzy_edits)?;
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
@@ -2047,7 +2042,9 @@ impl Reader {
         // (a ddd-blob field) and for CVE queries we need a substring
         // match on `subject_raw`. Neither has an over.db fast path yet
         // (filed as F2 in the over.db follow-ups doc).
-        if !sha_like && !cve_like && self.over_db().is_some()
+        if !sha_like
+            && !cve_like
+            && self.over_db().is_some()
             && let Some(res) = self.with_over(|db| db.get(&needle))
             && let Some(row) = res?
         {
@@ -2343,7 +2340,10 @@ pub(crate) fn extract_email(s: &str) -> String {
             return s
                 .split_whitespace()
                 .find(|tok| tok.contains('@'))
-                .map(|tok| tok.trim_matches(|c: char| !c.is_ascii_graphic()).to_ascii_lowercase())
+                .map(|tok| {
+                    tok.trim_matches(|c: char| !c.is_ascii_graphic())
+                        .to_ascii_lowercase()
+                })
                 .unwrap_or_default();
         }
     };
@@ -2395,8 +2395,10 @@ fn parallel_confirm_substring(
     use rayon::prelude::*;
 
     const CHUNK: usize = 256;
+    let deadline = crate::timeout::current_deadline();
     let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
     for chunk in date_sorted_hits.chunks(CHUNK) {
+        crate::timeout::check_request_deadline()?;
         if confirmed.len() >= limit {
             break;
         }
@@ -2406,8 +2408,11 @@ fn parallel_confirm_substring(
         let results: Vec<Result<Option<MessageRow>>> = chunk
             .par_iter()
             .map(|row| -> Result<Option<MessageRow>> {
+                let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+                crate::timeout::check_request_deadline()?;
                 let store = reader.store_for(&row.list)?;
                 let body = store.read_at(row.body_segment_id, row.body_offset)?;
+                crate::timeout::check_request_deadline()?;
                 if memchr::memmem::find(&body, needle).is_some() {
                     Ok(Some(row.clone()))
                 } else {
@@ -2446,6 +2451,7 @@ fn collect_trigram_candidates(
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    crate::timeout::check_request_deadline()?;
     let mut all_segs: Vec<PathBuf> = Vec::new();
     for lst in lists {
         for seg_dir in crate::trigram::list_segments(&reader.data_dir, lst)? {
@@ -2471,34 +2477,39 @@ fn collect_trigram_candidates(
     let out: Mutex<std::collections::HashSet<String>> =
         Mutex::new(std::collections::HashSet::new());
     let overflowed = AtomicBool::new(false);
+    let deadline = crate::timeout::current_deadline();
 
-    all_segs.par_iter().try_for_each(
-        |seg_dir| -> Result<()> {
-            if overflowed.load(Ordering::Relaxed) {
-                return Ok(());
+    all_segs.par_iter().try_for_each(|seg_dir| -> Result<()> {
+        let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+        crate::timeout::check_request_deadline()?;
+        if overflowed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let seg = reader.trigram_segment_for(seg_dir)?;
+        let mids: Vec<&str> = if fuzzy_edits == 0 {
+            seg.candidates_for_substring(needle)?
+        } else {
+            seg.candidates_for_substring_fuzzy(needle, fuzzy_edits)?
+        };
+        crate::timeout::check_request_deadline()?;
+        if mids.is_empty() {
+            return Ok(());
+        }
+        // Batched insert — one lock round per segment rather
+        // than per message-id.
+        let mut guard = out.lock().unwrap();
+        for (idx, mid) in mids.into_iter().enumerate() {
+            if idx % 256 == 0 {
+                crate::timeout::check_request_deadline()?;
             }
-            let seg = reader.trigram_segment_for(seg_dir)?;
-            let mids: Vec<&str> = if fuzzy_edits == 0 {
-                seg.candidates_for_substring(needle)
-            } else {
-                seg.candidates_for_substring_fuzzy(needle, fuzzy_edits)
-            };
-            if mids.is_empty() {
-                return Ok(());
+            guard.insert(mid.to_owned());
+            if guard.len() >= MAX_PATCH_CANDIDATES {
+                overflowed.store(true, Ordering::Relaxed);
+                break;
             }
-            // Batched insert — one lock round per segment rather
-            // than per message-id.
-            let mut guard = out.lock().unwrap();
-            for mid in mids {
-                guard.insert(mid.to_owned());
-                if guard.len() >= MAX_PATCH_CANDIDATES {
-                    overflowed.store(true, Ordering::Relaxed);
-                    break;
-                }
-            }
-            Ok(())
-        },
-    )?;
+        }
+        Ok(())
+    })?;
 
     if overflowed.load(Ordering::Relaxed) {
         return Err(Error::QueryParse(format!(
@@ -2523,16 +2534,21 @@ fn parallel_confirm_fuzzy(
     use rayon::prelude::*;
 
     const CHUNK: usize = 256;
+    let deadline = crate::timeout::current_deadline();
     let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
     for chunk in date_sorted_hits.chunks(CHUNK) {
+        crate::timeout::check_request_deadline()?;
         if confirmed.len() >= limit {
             break;
         }
         let results: Vec<Result<Option<MessageRow>>> = chunk
             .par_iter()
             .map(|row| -> Result<Option<MessageRow>> {
+                let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+                crate::timeout::check_request_deadline()?;
                 let store = reader.store_for(&row.list)?;
                 let body = store.read_at(row.body_segment_id, row.body_offset)?;
+                crate::timeout::check_request_deadline()?;
                 let is_match = if fuzzy_edits == 0 {
                     memchr::memmem::find(&body, needle).is_some()
                 } else {
@@ -2998,6 +3014,8 @@ fn _map_unused(_: HashMap<String, String>) {}
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::ingest::ingest_shard;
     use std::path::Path;
@@ -3177,11 +3195,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         // Three messages in the same thread (shared tid = "root@x").
         // Plus one unrelated message on a different tid that must
         // NOT appear in the result.
-        let mk = |mid: &str,
-                  tid: &str,
-                  date: i64,
-                  in_reply_to: Option<&str>|
-         -> OverRow {
+        let mk = |mid: &str, tid: &str, date: i64, in_reply_to: Option<&str>| -> OverRow {
             OverRow {
                 message_id: mid.to_owned(),
                 list: "linux-cifs".to_owned(),
@@ -3251,7 +3265,6 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
     /// while asyncio abandons the future on the Python side.
     #[test]
     fn scan_honors_expired_request_deadline() {
-        use crate::timeout::{Deadline, DeadlineGuard};
         let d = tempdir().unwrap();
         ingest_sample(d.path());
         let r = Reader::new(d.path());
@@ -3260,17 +3273,67 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         // first batch check inside scan() must short-circuit with
         // Error::QueryTimeout. Without the deadline wiring, substr_subject
         // completes; with it, it Errs.
-        let _guard = DeadlineGuard::install({
-            // Manually synthesize an expired Deadline via a 0-ms
-            // budget — by the time scan() runs even the first check
-            // Instant::now() - start exceeds 0.
-            Deadline::new(0)
-        });
+        let _guard = install_expired_deadline();
         let err = r.substr_subject("ksmbd", None, None, 100).unwrap_err();
         match err {
             crate::error::Error::QueryTimeout { .. } => {}
             other => panic!("expected QueryTimeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collect_trigram_candidates_honors_expired_request_deadline() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+
+        let lists = vec!["linux-cifs".to_owned()];
+        let _guard = install_expired_deadline();
+        let err = collect_trigram_candidates(&r, &lists, b"smb_check_perm_dacl", 0).unwrap_err();
+        match err {
+            crate::error::Error::QueryTimeout { .. } => {}
+            other => panic!("expected QueryTimeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parallel_confirm_substring_honors_expired_request_deadline() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+
+        let hits = vec![
+            r.fetch_message("m1@x").unwrap().unwrap(),
+            r.fetch_message("m2@x").unwrap().unwrap(),
+        ];
+        let _guard = install_expired_deadline();
+        let err = parallel_confirm_substring(&r, b"smb", hits, 1).unwrap_err();
+        match err {
+            crate::error::Error::QueryTimeout { .. } => {}
+            other => panic!("expected QueryTimeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn patch_search_honors_expired_request_deadline() {
+        let d = tempdir().unwrap();
+        ingest_sample(d.path());
+        let r = Reader::new(d.path());
+
+        let _guard = install_expired_deadline();
+        let err = r.patch_search("smb_check_perm_dacl", None, 10).unwrap_err();
+        match err {
+            crate::error::Error::QueryTimeout { .. } => {}
+            other => panic!("expected QueryTimeout, got {other:?}"),
+        }
+    }
+
+    fn install_expired_deadline() -> crate::timeout::DeadlineGuard {
+        use crate::timeout::{Deadline, DeadlineGuard};
+
+        let guard = DeadlineGuard::install(Deadline::new(0));
+        std::thread::sleep(Duration::from_millis(2));
+        guard
     }
 
     #[test]
@@ -3418,14 +3481,20 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         // Alice is both the declared maintainer AND the sample
         // corpus author → NOT stale (she's "observed" via SOBs).
         assert!(
-            !profile.stale_declared.iter().any(|a| a == "alice@example.com"),
+            !profile
+                .stale_declared
+                .iter()
+                .any(|a| a == "alice@example.com"),
             "alice is active; shouldn't be flagged stale. Got: {:?}",
             profile.stale_declared
         );
         // David Dormant is declared but never appears in the fixture →
         // must be flagged stale.
         assert!(
-            profile.stale_declared.iter().any(|a| a == "david@example.com"),
+            profile
+                .stale_declared
+                .iter()
+                .any(|a| a == "david@example.com"),
             "david is declared-but-never-seen; should be stale. Got: {:?}",
             profile.stale_declared
         );
@@ -3475,7 +3544,9 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         // Ask for just 1 row out of 2 → expect limit_hit=true.
-        let prof = r.author_profile("alice@example.com", None, None, 1).unwrap();
+        let prof = r
+            .author_profile("alice@example.com", None, None, 1)
+            .unwrap();
         assert_eq!(prof.sampled, 1);
         assert!(prof.limit_hit);
     }
@@ -3498,14 +3569,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         assert_eq!(default_scope.mention_count, 0);
 
         let extended = r
-            .author_profile_extended(
-                "carol@example.com",
-                None,
-                None,
-                1000,
-                true,
-                500,
-            )
+            .author_profile_extended("carol@example.com", None, None, 1000, true, 500)
             .unwrap();
         assert!(
             extended.mention_count >= 1,
@@ -3755,7 +3819,10 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         assert_eq!(got.list, "linux-cifs");
         // Original-case from the ddd blob, not the lowercased index col.
         assert_eq!(got.from_addr.as_deref(), Some("Reviewer@Example.COM"));
-        assert_eq!(got.subject_raw.as_deref(), Some("[PATCH 1/2] over-db wiring"));
+        assert_eq!(
+            got.subject_raw.as_deref(),
+            Some("[PATCH 1/2] over-db wiring")
+        );
 
         // Indexed eq scan: case-folded mid-case query should still hit.
         let by_from = reader

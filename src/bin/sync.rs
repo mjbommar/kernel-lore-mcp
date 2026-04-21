@@ -40,8 +40,8 @@ use anyhow::{Context, Result, anyhow};
 use rayon::prelude::*;
 
 use _core::sync::{
-    DEFAULT_MANIFEST_URL, FetchOutcome, diff_manifest, fetch_manifest,
-    fetch_shard, load_local_manifest, save_local_manifest, shard_local_path,
+    DEFAULT_MANIFEST_URL, FetchOutcome, diff_manifest, fetch_manifest, fetch_shard,
+    load_local_manifest, save_local_manifest, shard_local_path,
 };
 
 /// One changed shard we intend to pull + ingest.
@@ -243,8 +243,7 @@ fn main() -> Result<()> {
     for sh in &fetched_ok {
         stores.entry(sh.list.clone()).or_insert_with(|| {
             Mutex::new(
-                _core::Store::open(&data_dir, &sh.list)
-                    .expect("failed to open store for list"),
+                _core::Store::open(&data_dir, &sh.list).expect("failed to open store for list"),
             )
         });
     }
@@ -413,8 +412,7 @@ fn main() -> Result<()> {
             updated_local.insert((*path).to_string(), entry.clone());
         }
     }
-    save_local_manifest(&data_dir, &updated_local)
-        .context("save manifest cache")?;
+    save_local_manifest(&data_dir, &updated_local).context("save manifest cache")?;
 
     tracing::info!(
         elapsed_secs = start.elapsed().as_secs_f64(),
@@ -448,10 +446,9 @@ impl ChangedShard {
                 shard.trim_end_matches(".git").to_string(),
             ),
             // /<list>.git (single-shard v1)
-            [only] if only.ends_with(".git") => (
-                only.trim_end_matches(".git").to_string(),
-                "0".to_string(),
-            ),
+            [only] if only.ends_with(".git") => {
+                (only.trim_end_matches(".git").to_string(), "0".to_string())
+            }
             _ => return None,
         };
         if list.is_empty() {
@@ -501,10 +498,7 @@ fn parse_args() -> Result<Args> {
             "--with-over" => args.with_over = true,
             "--no-over" => args.no_over = true,
             "--max-retries" => {
-                args.max_retries = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(3);
+                args.max_retries = it.next().and_then(|s| s.parse().ok()).unwrap_or(3);
             }
             "--dry-run" => args.dry_run = true,
             "--help" | "-h" => {

@@ -22,12 +22,12 @@ from typing import Annotated, Literal
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.errors import invalid_argument, query_too_long
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import SearchResponse
+from kernel_lore_mcp.reader_cache import get_reader
 from kernel_lore_mcp.timeout import run_with_timeout
 
 _CONCISE_HITS = 10
@@ -100,10 +100,7 @@ async def lore_search(
     q_hash = query_hash("lore_search", query)
     resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     # Oversample to see if there's a next page AND to absorb
     # cursor-skipped rows that arrive ahead of the resume point. 2x
     # + 1 is the smallest oversample that handles the common case

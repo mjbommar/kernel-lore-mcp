@@ -118,10 +118,7 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
 /// Returns total rows updated. Idempotent; safe to re-run.
 #[pyfunction]
 #[pyo3(name = "backfill_side_table_dates")]
-pub fn py_backfill_side_table_dates(
-    py: Python<'_>,
-    data_dir: PathBuf,
-) -> PyResult<u64> {
+pub fn py_backfill_side_table_dates(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
     let n = py.detach(|| -> crate::error::Result<u64> {
         let over_path = data_dir.join("over.db");
         let mut db = crate::over::OverDb::open(&over_path)?;
@@ -174,6 +171,23 @@ pub fn py_backfill_touched_files(py: Python<'_>, data_dir: PathBuf) -> PyResult<
     Ok(n)
 }
 
+/// One-off backfill for the touched-functions side table. Walks
+/// every existing over.db row, decodes its ddd blob, and
+/// materializes `touched_functions` entries so `dfhh:` and
+/// `eq('touched_functions', func)` hit the indexed JOIN path
+/// instead of a full sequential decode of every row. Returns rows
+/// inserted.
+#[pyfunction]
+#[pyo3(name = "backfill_touched_functions")]
+pub fn py_backfill_touched_functions(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let n = py.detach(|| -> crate::error::Result<u64> {
+        let over_path = data_dir.join("over.db");
+        let mut db = crate::over::OverDb::open(&over_path)?;
+        db.backfill_touched_functions()
+    })?;
+    Ok(n)
+}
+
 /// Rebuild the BM25 index from the compressed store + metadata.
 /// Returns the number of docs indexed.
 #[pyfunction]
@@ -197,24 +211,26 @@ pub fn py_git_sidecar_find_sha<'py>(
     repo: String,
     sha: String,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
-    let found = py.detach(|| -> crate::error::Result<Option<crate::git_sidecar::CommitRecord>> {
-        let path = crate::git_sidecar::sidecar_path(&data_dir);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let db = crate::git_sidecar::GitSidecar::open(&path)?;
-        // Try exact match first (fast, PRIMARY KEY); fall back to
-        // prefix match across commits in the repo when the caller
-        // gave a short SHA.
-        if sha.len() == 40 {
-            return db.find_by_sha(&repo, &sha.to_lowercase());
-        }
-        // Short SHA: not indexed. Skip for now — the tool that calls
-        // this already has a full SHA from the lore message in most
-        // cases. Document this limit; revisit if the follow-up tool
-        // actually needs it.
-        Ok(None)
-    })?;
+    let found = py.detach(
+        || -> crate::error::Result<Option<crate::git_sidecar::CommitRecord>> {
+            let path = crate::git_sidecar::sidecar_path(&data_dir);
+            if !path.exists() {
+                return Ok(None);
+            }
+            let db = crate::git_sidecar::GitSidecar::open(&path)?;
+            // Try exact match first (fast, PRIMARY KEY); fall back to
+            // prefix match across commits in the repo when the caller
+            // gave a short SHA.
+            if sha.len() == 40 {
+                return db.find_by_sha(&repo, &sha.to_lowercase());
+            }
+            // Short SHA: not indexed. Skip for now — the tool that calls
+            // this already has a full SHA from the lore message in most
+            // cases. Document this limit; revisit if the follow-up tool
+            // actually needs it.
+            Ok(None)
+        },
+    )?;
     match found {
         None => Ok(None),
         Some(r) => {
@@ -250,14 +266,16 @@ pub fn py_git_sidecar_find_by_subject_author<'py>(
     window_ns: i64,
     center_ns: i64,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let rows = py.detach(|| -> crate::error::Result<Vec<crate::git_sidecar::CommitRecord>> {
-        let path = crate::git_sidecar::sidecar_path(&data_dir);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let db = crate::git_sidecar::GitSidecar::open(&path)?;
-        db.find_by_subject_author(&subject, &author_email, window_ns, center_ns)
-    })?;
+    let rows = py.detach(
+        || -> crate::error::Result<Vec<crate::git_sidecar::CommitRecord>> {
+            let path = crate::git_sidecar::sidecar_path(&data_dir);
+            if !path.exists() {
+                return Ok(Vec::new());
+            }
+            let db = crate::git_sidecar::GitSidecar::open(&path)?;
+            db.find_by_subject_author(&subject, &author_email, window_ns, center_ns)
+        },
+    )?;
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let d = PyDict::new(py);
@@ -284,14 +302,16 @@ pub fn py_git_sidecar_repos<'py>(
     py: Python<'py>,
     data_dir: PathBuf,
 ) -> PyResult<Vec<Bound<'py, PyDict>>> {
-    let repos = py.detach(|| -> crate::error::Result<Vec<(String, u64, Option<String>)>> {
-        let path = crate::git_sidecar::sidecar_path(&data_dir);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let db = crate::git_sidecar::GitSidecar::open(&path)?;
-        db.repos_and_counts()
-    })?;
+    let repos = py.detach(
+        || -> crate::error::Result<Vec<(String, u64, Option<String>)>> {
+            let path = crate::git_sidecar::sidecar_path(&data_dir);
+            if !path.exists() {
+                return Ok(Vec::new());
+            }
+            let db = crate::git_sidecar::GitSidecar::open(&path)?;
+            db.repos_and_counts()
+        },
+    )?;
     let mut out = Vec::with_capacity(repos.len());
     for (repo, count, tip) in repos {
         let d = PyDict::new(py);
@@ -334,10 +354,7 @@ pub fn py_sign_cursor(
 /// callers don't need a PyClass binding for CursorPayload.
 #[pyfunction]
 #[pyo3(name = "verify_cursor")]
-pub fn py_verify_cursor(
-    secret: &[u8],
-    token: &str,
-) -> PyResult<(u64, f64, String)> {
+pub fn py_verify_cursor(secret: &[u8], token: &str) -> PyResult<(u64, f64, String)> {
     let payload = crate::router::verify_cursor(secret, token)?;
     Ok((
         payload.query_hash,
@@ -376,11 +393,7 @@ impl PyEmbeddingBuilder {
         Ok(())
     }
 
-    fn add_batch(
-        &mut self,
-        message_ids: Vec<String>,
-        vectors: Vec<Vec<f32>>,
-    ) -> PyResult<()> {
+    fn add_batch(&mut self, message_ids: Vec<String>, vectors: Vec<Vec<f32>>) -> PyResult<()> {
         if message_ids.len() != vectors.len() {
             return Err(crate::error::Error::State(format!(
                 "add_batch: {} message-ids vs {} vectors",
@@ -399,11 +412,7 @@ impl PyEmbeddingBuilder {
     }
 
     #[pyo3(signature = (build_hnsw=true))]
-    fn finalize<'py>(
-        &mut self,
-        py: Python<'py>,
-        build_hnsw: bool,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    fn finalize<'py>(&mut self, py: Python<'py>, build_hnsw: bool) -> PyResult<Bound<'py, PyDict>> {
         let b = self.inner.take().ok_or_else(|| {
             crate::error::Error::State("EmbeddingBuilder already finalized".into())
         })?;
@@ -779,10 +788,7 @@ impl PyReader {
         recv.set_item("reviewed_by", profile.received_trailers.reviewed_by)?;
         recv.set_item("acked_by", profile.received_trailers.acked_by)?;
         recv.set_item("tested_by", profile.received_trailers.tested_by)?;
-        recv.set_item(
-            "co_developed_by",
-            profile.received_trailers.co_developed_by,
-        )?;
+        recv.set_item("co_developed_by", profile.received_trailers.co_developed_by)?;
         recv.set_item("reported_by", profile.received_trailers.reported_by)?;
         recv.set_item("cc_stable", profile.received_trailers.cc_stable)?;
         d.set_item("received_trailers", recv)?;
@@ -1044,10 +1050,7 @@ impl PyReader {
     ///         ...
     ///       ],
     ///     }
-    fn corpus_stats<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn corpus_stats<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let stats = py.detach(|| self.inner.corpus_stats())?;
         let out = PyDict::new(py);
         out.set_item("total_rows", stats.total_rows)?;
@@ -1219,24 +1222,23 @@ impl PyReader {
             buf.clear();
         };
 
-        self.inner
-            .scan_streaming(list.as_deref(), |row| {
-                if stop {
-                    return false;
-                }
-                if let Some(since) = since_unix_ns {
-                    if let Some(d) = row.date_unix_ns {
-                        if d < since {
-                            return true;
-                        }
+        self.inner.scan_streaming(list.as_deref(), |row| {
+            if stop {
+                return false;
+            }
+            if let Some(since) = since_unix_ns {
+                if let Some(d) = row.date_unix_ns {
+                    if d < since {
+                        return true;
                     }
                 }
-                buf.push(row);
-                if buf.len() >= batch_size {
-                    flush(py, &callback, &mut buf, &mut stop, &mut py_err);
-                }
-                !stop
-            })?;
+            }
+            buf.push(row);
+            if buf.len() >= batch_size {
+                flush(py, &callback, &mut buf, &mut stop, &mut py_err);
+            }
+            !stop
+        })?;
 
         if !stop {
             flush(py, &callback, &mut buf, &mut stop, &mut py_err);

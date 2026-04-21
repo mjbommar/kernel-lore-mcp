@@ -84,27 +84,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_backfill_touched_functions,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_backfill_side_table_dates,
         m
     )?)?;
-    m.add_function(wrap_pyfunction!(
-        crate::python::py_rebuild_path_vocab,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        crate::python::py_path_vocab_ready,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_rebuild_path_vocab, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_path_vocab_ready, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_sign_cursor, m)?)?;
     m.add_function(wrap_pyfunction!(crate::python::py_verify_cursor, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        crate::python::py_git_sidecar_find_sha,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(
-        crate::python::py_git_sidecar_repos,
-        m
-    )?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_git_sidecar_find_sha, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::python::py_git_sidecar_repos, m)?)?;
     m.add_function(wrap_pyfunction!(
         crate::python::py_git_sidecar_find_by_subject_author,
         m

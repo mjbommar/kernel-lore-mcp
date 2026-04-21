@@ -440,10 +440,7 @@ fn parse_args() -> Args {
             "--list" => args.list = it.next(),
             "--run-id" => args.run_id = it.next(),
             "--max-retries" => {
-                args.max_retries = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(3);
+                args.max_retries = it.next().and_then(|s| s.parse().ok()).unwrap_or(3);
             }
             "--with-bm25" => args.with_bm25 = true,
             "--rebuild-bm25" => args.rebuild_bm25_only = true,

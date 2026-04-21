@@ -10,6 +10,49 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-04-20
+
+### Fixed
+
+**Patch / regex search no longer times out under moderate load.**
+- Trigram segment readers now mmap the on-disk FST + postings files
+  instead of `read()`ing whole segment blobs into anonymous memory on
+  demand.
+- Deadline checks now propagate all the way through the rayon-backed
+  trigram candidate and confirmation loops, so an expired request
+  terminates promptly instead of letting the backend keep chewing after
+  the Python timeout fired.
+- The Python MCP layer now reuses one process-local `_core.Reader`
+  instance via `reader_cache.py`, which means warmup actually warms the
+  readers the live tools use instead of throwing work away.
+- `KLMCP_QUERY_WALL_CLOCK_MS` now controls the router-side wall-clock
+  budget instead of the old hard-coded 5 s cap.
+
+**`dfhh:` / touched-function lookups are indexed and upgrade-safe.**
+- Added the `over_touched_function` side table plus covering indexes,
+  so `lore_search(dfhh:...)` and function-scoped activity queries stop
+  full-scanning `over.db`.
+- Existing deployments can backfill in place via
+  `_core.backfill_touched_functions(data_dir)`; fresh DB builds mark the
+  index complete automatically.
+- If the touched-function backfill is still absent or incomplete, the
+  query path now falls back to the old sequential scan instead of
+  returning incorrect empties.
+
+**`kernel-lore-sync` wrapper no longer recurses forever.**
+- `uv run kernel-lore-sync --help` and similar wrapper launches used to
+  rediscover the Python console-script wrapper on `PATH`, `exec()` it,
+  and loop forever.
+- The resolver now prefers nearby `target/release/kernel-lore-sync`
+  outputs in source trees, skips the current wrapper when searching
+  `PATH`, and fails loudly if `KLMCP_SYNC_BINARY` points back at the
+  wrapper.
+
+### Added
+
+- Python regression tests for the `kernel-lore-sync` binary resolver and
+  an MCP router e2e covering `dfhh:` dispatch onto the metadata tier.
+
 ## [0.2.0] — 2026-04-20
 
 ### Added

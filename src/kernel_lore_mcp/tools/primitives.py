@@ -23,7 +23,6 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.errors import invalid_argument, unknown_enum
 from kernel_lore_mcp.freshness import build_freshness
@@ -35,6 +34,7 @@ from kernel_lore_mcp.models import (
     RowsResponse,
     Snippet,
 )
+from kernel_lore_mcp.reader_cache import get_reader
 from kernel_lore_mcp.timeout import run_with_timeout
 
 _EQ_FIELDS = {
@@ -163,10 +163,7 @@ async def lore_eq(
     if field not in _EQ_FIELDS:
         raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     rows = await run_with_timeout(reader.eq, field, value, since_unix_ns, list, limit)
     return _rows_to_response(rows, tier="metadata", reader=reader)
 
@@ -194,10 +191,7 @@ async def lore_in_list(
             example='["alice@example.com", "bob@example.com"]',
         )
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     rows = await run_with_timeout(reader.in_list, field, values, since_unix_ns, list, limit)
     return _rows_to_response(rows, tier="metadata", reader=reader)
 
@@ -220,10 +214,7 @@ async def lore_count(
     if field not in _EQ_FIELDS:
         raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     summary = await run_with_timeout(reader.count, field, value, since_unix_ns, list)
     return CountResponse(
         count=summary["count"],
@@ -255,10 +246,7 @@ async def lore_substr_subject(
 
     Cost: cheap — expected p95 80 ms (metadata column scan, no trigram).
     """
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     rows = await run_with_timeout(reader.substr_subject, needle, list, since_unix_ns, limit)
     return _rows_to_response(
         rows,
@@ -302,10 +290,7 @@ async def lore_substr_trailers(
             code="unknown_trailer_name",
         )
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     rows = await run_with_timeout(
         reader.substr_trailers, name, value_substring, list, since_unix_ns, limit
     )
@@ -376,10 +361,7 @@ async def lore_regex(
             code="unknown_regex_field",
         )
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
 
     q_hash = query_hash(
         "lore_regex",
@@ -454,10 +436,7 @@ async def lore_diff(
             code="unknown_diff_mode",
         )
 
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     result = await run_with_timeout(reader.diff, a, b, mode)
     diff_text = "".join(
         difflib.unified_diff(

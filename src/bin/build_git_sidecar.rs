@@ -27,9 +27,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use _core::{CommitRecord, GitSidecar};
 use anyhow::{Context, Result};
 use gix::ObjectId;
-use _core::{CommitRecord, GitSidecar};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -60,8 +60,8 @@ fn main() -> Result<()> {
         tracing::info!(repo = repo_label, "first ingest (full walk)");
     }
 
-    let mut repo = gix::open(&repo_path)
-        .with_context(|| format!("open {}", repo_path.display()))?;
+    let mut repo =
+        gix::open(&repo_path).with_context(|| format!("open {}", repo_path.display()))?;
     repo.object_cache_size(256 * 1024 * 1024);
 
     let head_id: ObjectId = repo.head_id().context("head_id")?.detach();
@@ -88,11 +88,7 @@ fn main() -> Result<()> {
             .try_into_commit()
             .context("not a commit")?;
         let message_ref = commit.message().context("commit message")?;
-        let subject = message_ref
-            .summary()
-            .to_string()
-            .trim()
-            .to_owned();
+        let subject = message_ref.summary().to_string().trim().to_owned();
         let author = commit.author().context("author")?;
         let email = author.email.to_string().to_ascii_lowercase();
         // SignatureRef::seconds() parses the `time` field and returns

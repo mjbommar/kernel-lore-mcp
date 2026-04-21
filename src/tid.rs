@@ -155,14 +155,8 @@ pub fn rebuild(data_dir: &Path) -> Result<(PathBuf, usize)> {
     let mut chunk: Vec<TidRow> = Vec::with_capacity(PARQUET_BATCH_ROWS);
     for lite in &lite_rows {
         let (files, funcs) = if lite.is_cover_letter {
-            let f = propagated_files
-                .get(&lite.tid)
-                .cloned()
-                .unwrap_or_default();
-            let fn_ = propagated_funcs
-                .get(&lite.tid)
-                .cloned()
-                .unwrap_or_default();
+            let f = propagated_files.get(&lite.tid).cloned().unwrap_or_default();
+            let fn_ = propagated_funcs.get(&lite.tid).cloned().unwrap_or_default();
             (sorted_vec(f), sorted_vec(fn_))
         } else {
             (Vec::new(), Vec::new())

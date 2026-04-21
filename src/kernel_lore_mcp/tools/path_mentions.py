@@ -27,6 +27,7 @@ from kernel_lore_mcp.errors import setup_required
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import RowsResponse
+from kernel_lore_mcp.reader_cache import get_reader
 from kernel_lore_mcp.timeout import run_with_timeout
 
 
@@ -87,7 +88,7 @@ async def lore_path_mentions(
                 f"print(_core.rebuild_path_vocab(\"{settings.data_dir}\"))'"
             ),
         )
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
     rows = await run_with_timeout(reader.path_mentions, path, match, list, since_unix_ns, limit)
     hits = [row_to_search_hit(r, tier_provenance=["path"]) for r in rows]
     return RowsResponse(

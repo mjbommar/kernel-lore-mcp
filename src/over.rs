@@ -174,10 +174,7 @@ impl OverDbPool {
                 return f(&guard);
             }
         }
-        let idx = self
-            .next
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            % self.conns.len();
+        let idx = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % self.conns.len();
         let guard = self.conns[idx]
             .lock()
             .map_err(|_| Error::State("over.db pool mutex poisoned".to_owned()))?;
@@ -195,6 +192,7 @@ impl OverDb {
     /// `meta.schema_version` matches `SCHEMA_VERSION` and returns
     /// `Error::State` otherwise.
     pub fn open(path: &Path) -> Result<Self> {
+        let created = !path.exists();
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -204,7 +202,11 @@ impl OverDb {
         Self::migrate(&conn)?;
         Self::create_indexes_in(&conn)?;
         Self::verify_schema_version(&conn)?;
-        Ok(Self { conn })
+        let db = Self { conn };
+        if created {
+            db.set_meta("touched_function_index_state", "complete")?;
+        }
+        Ok(db)
     }
 
     /// Bulk-load constructor: opens (or creates) the DB, runs the
@@ -218,6 +220,7 @@ impl OverDb {
     /// half-indexed file behind — that's why we write to a tempfile
     /// and atomic-rename only on success.
     pub fn open_for_bulk_load(path: &Path) -> Result<Self> {
+        let created = !path.exists();
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -232,7 +235,11 @@ impl OverDb {
         conn.pragma_update(None, "synchronous", "OFF")?;
         conn.pragma_update(None, "journal_mode", "MEMORY")?;
         Self::verify_schema_version(&conn)?;
-        Ok(Self { conn })
+        let db = Self { conn };
+        if created {
+            db.set_meta("touched_function_index_state", "complete")?;
+        }
+        Ok(db)
     }
 
     /// Build the indexes declared in the schema. Idempotent (every
@@ -255,11 +262,7 @@ impl OverDb {
 
     /// Set `meta.built_at` to the supplied ISO 8601 timestamp.
     pub fn set_built_at(&self, ts: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES ('built_at', ?1)",
-            [ts],
-        )?;
-        Ok(())
+        self.set_meta("built_at", ts)
     }
 
     /// Total row count. Cheap; used by the build binary for the final
@@ -308,7 +311,32 @@ impl OverDb {
         Self::migrate(&conn)?;
         Self::create_indexes_in(&conn)?;
         Self::verify_schema_version(&conn)?;
-        Ok(Self { conn })
+        let db = Self { conn };
+        db.set_meta("touched_function_index_state", "complete")?;
+        Ok(db)
+    }
+
+    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?1, ?2)",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    fn meta_value(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
+    fn touched_function_index_complete(&self) -> Result<bool> {
+        Ok(self.meta_value("touched_function_index_state")?.as_deref() == Some("complete"))
     }
 
     fn configure(conn: &Connection) -> Result<()> {
@@ -405,6 +433,19 @@ impl OverDb {
                 date_unix_ns  INTEGER,
                 PRIMARY KEY (path, message_id, list)
             );
+
+            -- Side table for the list-shaped `touched_functions`
+            -- field. Same shape as `over_touched_file`, keyed by
+            -- exact function name so `dfhh:` can avoid decoding every
+            -- ddd blob in the corpus.
+            CREATE TABLE IF NOT EXISTS over_touched_function (
+                function      TEXT NOT NULL,
+                message_id    TEXT NOT NULL,
+                list          TEXT NOT NULL,
+                -- Denormalized date; see the trailer-email notes.
+                date_unix_ns  INTEGER,
+                PRIMARY KEY (function, message_id, list)
+            );
             "#,
         )?;
 
@@ -423,13 +464,14 @@ impl OverDb {
             conn.execute_batch("ALTER TABLE over ADD COLUMN subject_normalized TEXT;")?;
         }
         if !column_exists(conn, "over_trailer_email", "date_unix_ns")? {
-            conn.execute_batch(
-                "ALTER TABLE over_trailer_email ADD COLUMN date_unix_ns INTEGER;",
-            )?;
+            conn.execute_batch("ALTER TABLE over_trailer_email ADD COLUMN date_unix_ns INTEGER;")?;
         }
         if !column_exists(conn, "over_touched_file", "date_unix_ns")? {
+            conn.execute_batch("ALTER TABLE over_touched_file ADD COLUMN date_unix_ns INTEGER;")?;
+        }
+        if !column_exists(conn, "over_touched_function", "date_unix_ns")? {
             conn.execute_batch(
-                "ALTER TABLE over_touched_file ADD COLUMN date_unix_ns INTEGER;",
+                "ALTER TABLE over_touched_function ADD COLUMN date_unix_ns INTEGER;",
             )?;
         }
         conn.execute(
@@ -484,6 +526,8 @@ impl OverDb {
                 ON over_trailer_email (message_id, list);
             CREATE INDEX IF NOT EXISTS over_touched_file_mid_list
                 ON over_touched_file (message_id, list);
+            CREATE INDEX IF NOT EXISTS over_touched_function_mid_list
+                ON over_touched_function (message_id, list);
 
             -- Covering indexes for the "popular maintainer" access
             -- pattern (#64). Prior to denormalizing date_unix_ns
@@ -496,6 +540,9 @@ impl OverDb {
                 WHERE date_unix_ns IS NOT NULL;
             CREATE INDEX IF NOT EXISTS over_touched_file_path_date
                 ON over_touched_file (path, date_unix_ns DESC)
+                WHERE date_unix_ns IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS over_touched_function_func_date
+                ON over_touched_function (function, date_unix_ns DESC)
                 WHERE date_unix_ns IS NOT NULL;
 
             -- (message_id, list) is the natural identity key. Cross-posts
@@ -562,8 +609,7 @@ impl OverDb {
         for batch in mid_to_tid.chunks(CHUNK) {
             let tx = self.conn.transaction()?;
             {
-                let mut stmt =
-                    tx.prepare("UPDATE over SET tid = ?1 WHERE message_id = ?2")?;
+                let mut stmt = tx.prepare("UPDATE over SET tid = ?1 WHERE message_id = ?2")?;
                 for (mid, tid) in batch {
                     total += stmt.execute(rusqlite::params![tid, mid])? as u64;
                 }
@@ -573,8 +619,7 @@ impl OverDb {
             // across batches. PASSIVE checkpoint is non-blocking and
             // bounded; what we care about is that the WAL doesn't grow
             // unboundedly while readers may also be holding snapshots.
-            self.conn
-                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
         }
         Ok(total)
     }
@@ -634,16 +679,14 @@ impl OverDb {
                 }
             }
             tx.commit()?;
-            self.conn
-                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
             cursor = last_rowid;
         }
         Ok(total)
     }
 
-    /// Fill the denormalized `date_unix_ns` column on existing
-    /// `over_trailer_email` and `over_touched_file` rows by copying
-    /// from the `over` table. Idempotent — skips rows where
+    /// Fill the denormalized `date_unix_ns` column on existing side
+    /// table rows by copying from the `over` table. Idempotent — skips rows where
     /// `date_unix_ns IS NOT NULL`. Returns total updates.
     ///
     /// Needed once on every over.db built before #64 landed so the
@@ -657,6 +700,7 @@ impl OverDb {
         let mut total: u64 = 0;
         total += self.backfill_dates_for_table("over_trailer_email")?;
         total += self.backfill_dates_for_table("over_touched_file")?;
+        total += self.backfill_dates_for_table("over_touched_function")?;
         Ok(total)
     }
 
@@ -678,8 +722,7 @@ impl OverDb {
             let mut last_rowid = cursor;
             {
                 let mut stmt = self.conn.prepare(&select_sql)?;
-                let mut rows =
-                    stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
                 while let Some(r) = rows.next()? {
                     let rowid: i64 = r.get(0)?;
                     let mid: String = r.get(1)?;
@@ -695,9 +738,7 @@ impl OverDb {
             // chunk — avoids the correlated subquery plan that
             // SQLite otherwise turns into a nested-loop full scan.
             let mut date_lookup =
-                std::collections::HashMap::<(String, String), i64>::with_capacity(
-                    pending.len(),
-                );
+                std::collections::HashMap::<(String, String), i64>::with_capacity(pending.len());
             {
                 let mut get = self.conn.prepare(
                     "SELECT date_unix_ns FROM over \
@@ -705,10 +746,9 @@ impl OverDb {
                        AND date_unix_ns IS NOT NULL",
                 )?;
                 for (_, mid, list) in &pending {
-                    if let Ok(d) = get.query_row(
-                        rusqlite::params![mid, list],
-                        |r| r.get::<_, i64>(0),
-                    ) {
+                    if let Ok(d) =
+                        get.query_row(rusqlite::params![mid, list], |r| r.get::<_, i64>(0))
+                    {
                         date_lookup.insert((mid.clone(), list.clone()), d);
                     }
                 }
@@ -724,8 +764,7 @@ impl OverDb {
                 }
             }
             tx.commit()?;
-            self.conn
-                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
             cursor = last_rowid;
         }
         Ok(total)
@@ -780,18 +819,78 @@ impl OverDb {
                     del.execute(rusqlite::params![mid, list])?;
                     for path in paths {
                         if !path.is_empty() {
-                            total += ins.execute(rusqlite::params![
-                                path, mid, list, date
-                            ])? as u64;
+                            total += ins.execute(rusqlite::params![path, mid, list, date])? as u64;
                         }
                     }
                 }
             }
             tx.commit()?;
-            self.conn
-                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
             cursor = last_rowid;
         }
+        Ok(total)
+    }
+
+    /// Populate `over_touched_function` for every existing row by
+    /// decoding its `ddd` blob and expanding `touched_functions`.
+    /// Idempotent — DELETE before INSERT per (message_id, list).
+    /// Same rowid-cursor chunked pattern as the other backfills.
+    pub fn backfill_touched_functions(&mut self) -> Result<u64> {
+        const CHUNK: usize = 50_000;
+        let mut cursor: i64 = 0;
+        let mut total: u64 = 0;
+        self.set_meta("touched_function_index_state", "building")?;
+        loop {
+            let mut pending: Vec<(String, String, Option<i64>, Vec<String>)> =
+                Vec::with_capacity(CHUNK);
+            let mut last_rowid = cursor;
+            {
+                let mut stmt = self.conn.prepare(
+                    "SELECT rowid, message_id, list, date_unix_ns, ddd FROM over \
+                     WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                while let Some(r) = rows.next()? {
+                    let rowid: i64 = r.get(0)?;
+                    let mid: String = r.get(1)?;
+                    let list: String = r.get(2)?;
+                    let date: Option<i64> = r.get(3)?;
+                    let blob: Vec<u8> = r.get(4)?;
+                    let funcs = decode_ddd(&blob)
+                        .map(|p| p.touched_functions)
+                        .unwrap_or_default();
+                    pending.push((mid, list, date, funcs));
+                    last_rowid = rowid;
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction()?;
+            {
+                let mut del = tx.prepare(
+                    "DELETE FROM over_touched_function \
+                     WHERE message_id = ?1 AND list = ?2",
+                )?;
+                let mut ins = tx.prepare(
+                    "INSERT OR IGNORE INTO over_touched_function \
+                        (function, message_id, list, date_unix_ns) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                )?;
+                for (mid, list, date, funcs) in &pending {
+                    del.execute(rusqlite::params![mid, list])?;
+                    for func in funcs {
+                        if !func.is_empty() {
+                            total += ins.execute(rusqlite::params![func, mid, list, date])? as u64;
+                        }
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            cursor = last_rowid;
+        }
+        self.set_meta("touched_function_index_state", "complete")?;
         Ok(total)
     }
 
@@ -845,17 +944,16 @@ impl OverDb {
                         for raw in raws {
                             let email = crate::reader::extract_email(raw);
                             if !email.is_empty() {
-                                total += ins.execute(rusqlite::params![
-                                    kind, email, mid, list, date
-                                ])? as u64;
+                                total += ins
+                                    .execute(rusqlite::params![kind, email, mid, list, date])?
+                                    as u64;
                             }
                         }
                     }
                 }
             }
             tx.commit()?;
-            self.conn
-                .pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
             cursor = last_rowid;
         }
         Ok(total)
@@ -900,6 +998,15 @@ impl OverDb {
         let mut tf_ins = tx.prepare(
             "INSERT OR IGNORE INTO over_touched_file \
                 (path, message_id, list, date_unix_ns) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        let mut th_del = tx.prepare(
+            "DELETE FROM over_touched_function \
+             WHERE message_id = ?1 AND list = ?2",
+        )?;
+        let mut th_ins = tx.prepare(
+            "INSERT OR IGNORE INTO over_touched_function \
+                (function, message_id, list, date_unix_ns) \
              VALUES (?1, ?2, ?3, ?4)",
         )?;
         for row in rows {
@@ -954,6 +1061,19 @@ impl OverDb {
                 if !path.is_empty() {
                     tf_ins.execute(rusqlite::params![
                         path,
+                        row.message_id,
+                        row.list,
+                        row.date_unix_ns,
+                    ])?;
+                }
+            }
+
+            // touched_functions side table — same REPLACE discipline.
+            th_del.execute(rusqlite::params![row.message_id, row.list])?;
+            for func in &row.ddd.touched_functions {
+                if !func.is_empty() {
+                    th_ins.execute(rusqlite::params![
+                        func,
                         row.message_id,
                         row.list,
                         row.date_unix_ns,
@@ -1063,12 +1183,16 @@ impl OverDb {
         // match because kernel paths are case-sensitive (`fs/smb/...`
         // != `fs/SMB/...`).
         if matches!(field, EqField::TouchedFile) {
-            return self.scan_eq_via_touched_file(
-                value,
-                since_unix_ns,
-                list_filter,
-                limit,
-            );
+            return self.scan_eq_via_touched_file(value, since_unix_ns, list_filter, limit);
+        }
+        if matches!(field, EqField::TouchedFunction) {
+            if !self.touched_function_index_complete()? {
+                tracing::warn!(
+                    "touched_function index incomplete; falling back to sequential scan"
+                );
+                return self.scan_eq_sequential(field, value, since_unix_ns, list_filter, limit);
+            }
+            return self.scan_eq_via_touched_function(value, since_unix_ns, list_filter, limit);
         }
 
         let (where_clause, primary): (&str, String) = match field {
@@ -1078,9 +1202,7 @@ impl OverDb {
             EqField::Tid => ("tid = ?1", value.to_string()),
             EqField::BodySha256 => ("body_sha256 = ?1", value.to_string()),
             EqField::CommitOid => ("commit_oid = ?1", value.to_string()),
-            EqField::SubjectNormalized => {
-                ("subject_normalized = ?1", value.to_string())
-            }
+            EqField::SubjectNormalized => ("subject_normalized = ?1", value.to_string()),
             _ => {
                 tracing::warn!(
                     field = ?field,
@@ -1111,9 +1233,7 @@ impl OverDb {
             params.push(Box::new(list.to_string()));
             next_idx += 1;
         }
-        sql.push_str(&format!(
-            " ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"
-        ));
+        sql.push_str(&format!(" ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"));
         params.push(Box::new(limit as i64));
 
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1139,54 +1259,34 @@ impl OverDb {
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
-        // Inner subquery walks the covering index, filters by
-        // since / list, stops at LIMIT. Outer query rebuilds
-        // MessageRows with a bounded number of JOIN probes.
-        let mut inner = String::from(
-            "SELECT message_id, list, date_unix_ns \
-             FROM over_touched_file \
-             WHERE path = ?1 AND date_unix_ns IS NOT NULL",
-        );
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(path.to_string())];
-        let mut next_idx = 2_usize;
-        if let Some(since) = since_unix_ns {
-            inner.push_str(&format!(" AND date_unix_ns >= ?{next_idx}"));
-            params.push(Box::new(since));
-            next_idx += 1;
-        }
-        if let Some(list) = list_filter {
-            inner.push_str(&format!(" AND list = ?{next_idx}"));
-            params.push(Box::new(list.to_string()));
-            next_idx += 1;
-        }
-        inner.push_str(&format!(
-            " ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"
-        ));
-        params.push(Box::new(limit as i64));
+        self.scan_eq_via_list_value_side_table(
+            "over_touched_file",
+            "path",
+            path,
+            since_unix_ns,
+            list_filter,
+            limit,
+        )
+    }
 
-        let sql = format!(
-            "WITH picked AS ({inner}) \
-             SELECT \
-                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
-                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
-                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
-                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
-             FROM picked p \
-             INNER JOIN over o \
-                ON o.message_id = p.message_id AND o.list = p.list \
-             ORDER BY p.date_unix_ns DESC"
-        );
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-        let mut rows = stmt.query(param_refs.as_slice())?;
-        let mut out = Vec::with_capacity(limit.min(1024));
-        while let Some(r) = rows.next()? {
-            out.push(row_to_message(r)?);
-        }
-        Ok(out)
+    /// Indexed path for `eq('touched_functions', <func>)`. Uses the
+    /// `over_touched_function_func_date` covering index to pick the
+    /// top-N newest rows directly, then a bounded JOIN into `over`.
+    fn scan_eq_via_touched_function(
+        &self,
+        func: &str,
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        self.scan_eq_via_list_value_side_table(
+            "over_touched_function",
+            "function",
+            func,
+            since_unix_ns,
+            list_filter,
+            limit,
+        )
     }
 
     /// Indexed path for list-shaped trailer fields whose extracted
@@ -1224,9 +1324,7 @@ impl OverDb {
             params.push(Box::new(list.to_string()));
             next_idx += 1;
         }
-        inner.push_str(&format!(
-            " ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"
-        ));
+        inner.push_str(&format!(" ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"));
         params.push(Box::new(limit as i64));
 
         let sql = format!(
@@ -1243,8 +1341,63 @@ impl OverDb {
         );
 
         let mut stmt = self.conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        let mut out = Vec::with_capacity(limit.min(1024));
+        while let Some(r) = rows.next()? {
+            out.push(row_to_message(r)?);
+        }
+        Ok(out)
+    }
+
+    /// Shared helper for exact-match side tables keyed by one value
+    /// column plus `(message_id, list, date_unix_ns)`. `table` and
+    /// `value_column` are hard-coded internal identifiers, never
+    /// user input.
+    fn scan_eq_via_list_value_side_table(
+        &self,
+        table: &str,
+        value_column: &str,
+        value: &str,
+        since_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let mut inner = format!(
+            "SELECT message_id, list, date_unix_ns \
+             FROM {table} \
+             WHERE {value_column} = ?1 AND date_unix_ns IS NOT NULL",
+        );
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(value.to_string())];
+        let mut next_idx = 2_usize;
+        if let Some(since) = since_unix_ns {
+            inner.push_str(&format!(" AND date_unix_ns >= ?{next_idx}"));
+            params.push(Box::new(since));
+            next_idx += 1;
+        }
+        if let Some(list) = list_filter {
+            inner.push_str(&format!(" AND list = ?{next_idx}"));
+            params.push(Box::new(list.to_string()));
+            next_idx += 1;
+        }
+        inner.push_str(&format!(" ORDER BY date_unix_ns DESC LIMIT ?{next_idx}"));
+        params.push(Box::new(limit as i64));
+
+        let sql = format!(
+            "WITH picked AS ({inner}) \
+             SELECT \
+                o.message_id, o.list, o.from_addr, o.date_unix_ns, o.in_reply_to, o.tid, \
+                o.body_segment_id, o.body_offset, o.body_length, o.body_sha256, \
+                o.has_patch, o.is_cover_letter, o.series_version, o.series_index, o.series_total, \
+                o.files_changed, o.insertions, o.deletions, o.commit_oid, o.ddd \
+             FROM picked p \
+             INNER JOIN over o \
+                ON o.message_id = p.message_id AND o.list = p.list \
+             ORDER BY p.date_unix_ns DESC"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let mut rows = stmt.query(param_refs.as_slice())?;
         let mut out = Vec::with_capacity(limit.min(1024));
         while let Some(r) = rows.next()? {
@@ -1686,9 +1839,7 @@ mod tests {
         rows.push(sample_row("<other@x>", "lkml", 50_000, "u@x"));
         db.insert_batch(&rows).unwrap();
 
-        let hits = db
-            .scan_eq(EqField::List, "netdev", None, None, 5)
-            .unwrap();
+        let hits = db.scan_eq(EqField::List, "netdev", None, None, 5).unwrap();
         assert_eq!(hits.len(), 5);
         for w in hits.windows(2) {
             assert!(w[0].date_unix_ns.unwrap() >= w[1].date_unix_ns.unwrap());
@@ -1732,10 +1883,7 @@ mod tests {
     fn scan_eq_touched_files_joins_side_table() {
         let mut db = OverDb::open_in_memory().unwrap();
         let mut r1 = sample_row("<t1@x>", "netdev", 1_000, "a@x");
-        r1.ddd.touched_files = vec![
-            "drivers/net/foo.c".into(),
-            "include/linux/foo.h".into(),
-        ];
+        r1.ddd.touched_files = vec!["drivers/net/foo.c".into(), "include/linux/foo.h".into()];
         let mut r2 = sample_row("<t2@x>", "linux-fs", 2_000, "b@x");
         r2.ddd.touched_files = vec!["drivers/net/foo.c".into()];
         let mut r3 = sample_row("<t3@x>", "netdev", 3_000, "c@x");
@@ -1807,6 +1955,94 @@ mod tests {
             .scan_eq(EqField::TouchedFile, "fs/new.c", None, None, 10)
             .unwrap();
         assert_eq!(new_hits.len(), 1);
+    }
+
+    #[test]
+    fn scan_eq_touched_functions_joins_side_table() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut r1 = sample_row("<f1@x>", "netdev", 1_000, "a@x");
+        r1.ddd.touched_functions = vec!["ipv6_rpl_srh_rcv".into(), "helper_fn".into()];
+        let mut r2 = sample_row("<f2@x>", "linux-fs", 2_000, "b@x");
+        r2.ddd.touched_functions = vec!["ipv6_rpl_srh_rcv".into()];
+        let mut r3 = sample_row("<f3@x>", "netdev", 3_000, "c@x");
+        r3.ddd.touched_functions = vec!["other_fn".into()];
+        db.insert_batch(&[r1, r2, r3]).unwrap();
+
+        let hits = db
+            .scan_eq(EqField::TouchedFunction, "ipv6_rpl_srh_rcv", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].message_id, "<f2@x>");
+        assert_eq!(hits[1].message_id, "<f1@x>");
+
+        let hits = db
+            .scan_eq(
+                EqField::TouchedFunction,
+                "ipv6_rpl_srh_rcv",
+                None,
+                Some("netdev"),
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<f1@x>");
+    }
+
+    #[test]
+    fn backfill_touched_functions_populates_side_table() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut r1 = sample_row("<bf1@x>", "lkml", 1, "a@x");
+        r1.ddd.touched_functions = vec!["foo_init".into(), "foo_exit".into()];
+        db.insert_batch(&[r1]).unwrap();
+        db.conn
+            .execute("DELETE FROM over_touched_function", [])
+            .unwrap();
+
+        let n = db.backfill_touched_functions().unwrap();
+        assert_eq!(n, 2);
+        let hits = db
+            .scan_eq(EqField::TouchedFunction, "foo_init", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn insert_or_replace_prunes_stale_touched_function_rows() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut v1 = sample_row("<rf@x>", "lkml", 1, "a@x");
+        v1.ddd.touched_functions = vec!["old_fn".into()];
+        db.insert_batch(&[v1]).unwrap();
+        let mut v2 = sample_row("<rf@x>", "lkml", 2, "a@x");
+        v2.ddd.touched_functions = vec!["new_fn".into()];
+        db.insert_batch(&[v2]).unwrap();
+
+        let old_hits = db
+            .scan_eq(EqField::TouchedFunction, "old_fn", None, None, 10)
+            .unwrap();
+        assert!(old_hits.is_empty(), "stale touched_function entry survived");
+        let new_hits = db
+            .scan_eq(EqField::TouchedFunction, "new_fn", None, None, 10)
+            .unwrap();
+        assert_eq!(new_hits.len(), 1);
+    }
+
+    #[test]
+    fn scan_eq_touched_function_falls_back_when_index_incomplete() {
+        let mut db = OverDb::open_in_memory().unwrap();
+        let mut row = sample_row("<fallback@x>", "lkml", 1, "a@x");
+        row.ddd.touched_functions = vec!["fallback_fn".into()];
+        db.insert_batch(&[row]).unwrap();
+        db.conn
+            .execute("DELETE FROM over_touched_function", [])
+            .unwrap();
+        db.set_meta("touched_function_index_state", "building")
+            .unwrap();
+
+        let hits = db
+            .scan_eq(EqField::TouchedFunction, "fallback_fn", None, None, 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<fallback@x>");
     }
 
     #[test]
@@ -1924,13 +2160,7 @@ mod tests {
         ];
         for (field, email) in cases {
             let hits = db.scan_eq(field, email, None, None, 10).unwrap();
-            assert_eq!(
-                hits.len(),
-                1,
-                "{:?} lookup failed for {}",
-                field,
-                email
-            );
+            assert_eq!(hits.len(), 1, "{:?} lookup failed for {}", field, email);
             assert_eq!(hits[0].message_id, "<m@x>");
         }
     }
@@ -2004,7 +2234,13 @@ mod tests {
 
         // Indexed lookup now succeeds.
         let hits = db
-            .scan_eq(EqField::SubjectNormalized, "subj for <bf2@x>", None, None, 10)
+            .scan_eq(
+                EqField::SubjectNormalized,
+                "subj for <bf2@x>",
+                None,
+                None,
+                10,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message_id, "<bf2@x>");
@@ -2025,7 +2261,13 @@ mod tests {
 
         // sample_row sets subject_normalized = "subj for <mid>"
         let hits = db
-            .scan_eq(EqField::SubjectNormalized, "subj for <s2@x>", None, None, 10)
+            .scan_eq(
+                EqField::SubjectNormalized,
+                "subj for <s2@x>",
+                None,
+                None,
+                10,
+            )
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message_id, "<s2@x>");

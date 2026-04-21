@@ -17,12 +17,12 @@ from typing import Annotated
 
 from pydantic import Field
 
-from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.kwic import build_snippet_from_body
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import SearchResponse
+from kernel_lore_mcp.reader_cache import get_reader
 from kernel_lore_mcp.timeout import run_with_timeout
 
 
@@ -75,10 +75,7 @@ async def lore_patch_search(
     Cost: moderate — expected p95 300 ms exact, ~400 ms fuzzy_edits=1.
     SIMD-accelerated Levenshtein confirmation via triple_accel.
     """
-    from kernel_lore_mcp import _core
-
-    settings = get_settings()
-    reader = _core.Reader(settings.data_dir)
+    reader = get_reader()
 
     # Cursor scope: needle + list + fuzzy_edits uniquely define the
     # sorted result set. `limit` is NOT part of the hash so callers
@@ -87,7 +84,7 @@ async def lore_patch_search(
     q_hash = query_hash("lore_patch_search", needle, list or "", fuzzy_edits)
     resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
 
-    # Oversample 2× so we have headroom for the cursor skip PLUS a
+    # Oversample 2x so we have headroom for the cursor skip PLUS a
     # one-row look-ahead to detect "more pages exist." Trigram-
     # confirm is the expensive step; the cap protects against
     # runaway confirm cost (MAX_PATCH_CANDIDATES still applies).

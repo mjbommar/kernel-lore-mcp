@@ -167,8 +167,13 @@ pub fn save_local_manifest(data_dir: &Path, manifest: &Manifest) -> Result<()> {
         .map_err(|e| Error::Sync(format!("encode manifest: {e}")))?;
     std::fs::write(&tmp, &bytes)
         .map_err(|e| Error::Sync(format!("write {}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| Error::Sync(format!("rename {} -> {}: {e}", tmp.display(), path.display())))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        Error::Sync(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -264,11 +269,7 @@ pub fn shard_local_path(data_dir: &Path, shard_path: &str) -> PathBuf {
 /// Uses gix's smart-HTTP transport (enabled via the
 /// `blocking-http-transport-reqwest-rust-tls` feature on our `gix`
 /// pin). Bare repo semantics — no working tree, no index.
-pub fn fetch_shard(
-    data_dir: &Path,
-    shard_path: &str,
-    manifest_url: &str,
-) -> Result<FetchOutcome> {
+pub fn fetch_shard(data_dir: &Path, shard_path: &str, manifest_url: &str) -> Result<FetchOutcome> {
     let url = shard_url(manifest_url, shard_path);
     let local = shard_local_path(data_dir, shard_path);
     if !local.exists() {
@@ -286,23 +287,25 @@ fn clone_shard(url: &str, local: &Path) -> Result<()> {
     }
     let should_interrupt = &std::sync::atomic::AtomicBool::new(false);
     gix::prepare_clone_bare(url, local)
-        .map_err(|e| Error::Sync(format!("prepare_clone_bare {url} -> {}: {e}", local.display())))?
+        .map_err(|e| {
+            Error::Sync(format!(
+                "prepare_clone_bare {url} -> {}: {e}",
+                local.display()
+            ))
+        })?
         .fetch_only(gix::progress::Discard, should_interrupt)
         .map_err(|e| Error::Sync(format!("clone {url} -> {}: {e}", local.display())))?;
     Ok(())
 }
 
 fn fetch_existing_shard(url: &str, local: &Path) -> Result<()> {
-    let repo = gix::open(local)
-        .map_err(|e| Error::Sync(format!("open repo {}: {e}", local.display())))?;
+    let repo =
+        gix::open(local).map_err(|e| Error::Sync(format!("open repo {}: {e}", local.display())))?;
     let should_interrupt = &std::sync::atomic::AtomicBool::new(false);
     let remote = repo
         .remote_at(url)
         .map_err(|e| Error::Sync(format!("remote_at {url}: {e}")))?
-        .with_refspecs(
-            ["+refs/*:refs/*"],
-            gix::remote::Direction::Fetch,
-        )
+        .with_refspecs(["+refs/*:refs/*"], gix::remote::Direction::Fetch)
         .map_err(|e| Error::Sync(format!("refspecs {url}: {e}")))?;
     let connection = remote
         .connect(gix::remote::Direction::Fetch)
@@ -356,9 +359,9 @@ mod tests {
     fn diff_manifest_detects_new_and_changed() {
         let local: Manifest = [("/a".into(), meta("old"))].into_iter().collect();
         let remote: Manifest = [
-            ("/a".into(), meta("new")),     // changed
-            ("/b".into(), meta("bfp")),     // new
-            ("/c".into(), meta("cfp")),     // new
+            ("/a".into(), meta("new")), // changed
+            ("/b".into(), meta("bfp")), // new
+            ("/c".into(), meta("cfp")), // new
         ]
         .into_iter()
         .collect();
@@ -387,12 +390,9 @@ mod tests {
 
     #[test]
     fn diff_manifest_reports_nothing_when_fingerprints_match() {
-        let local: Manifest = [
-            ("/a".into(), meta("one")),
-            ("/b".into(), meta("two")),
-        ]
-        .into_iter()
-        .collect();
+        let local: Manifest = [("/a".into(), meta("one")), ("/b".into(), meta("two"))]
+            .into_iter()
+            .collect();
         let remote = local.clone();
         let none: Vec<String> = vec![];
         assert!(diff_manifest(&remote, &local, &none, &none).is_empty());
@@ -401,7 +401,10 @@ mod tests {
     #[test]
     fn shard_url_strips_manifest_filename() {
         assert_eq!(
-            shard_url("https://lore.kernel.org/manifest.js.gz", "/netdev/git/0.git"),
+            shard_url(
+                "https://lore.kernel.org/manifest.js.gz",
+                "/netdev/git/0.git"
+            ),
             "https://lore.kernel.org/netdev/git/0.git"
         );
     }
@@ -415,12 +418,9 @@ mod tests {
     #[test]
     fn manifest_roundtrip_through_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let m: Manifest = [
-            ("/a".into(), meta("fp1")),
-            ("/b".into(), meta("fp2")),
-        ]
-        .into_iter()
-        .collect();
+        let m: Manifest = [("/a".into(), meta("fp1")), ("/b".into(), meta("fp2"))]
+            .into_iter()
+            .collect();
         save_local_manifest(dir.path(), &m).unwrap();
         let loaded = load_local_manifest(dir.path()).unwrap();
         assert_eq!(loaded, m);

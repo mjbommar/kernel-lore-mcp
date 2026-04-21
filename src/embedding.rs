@@ -167,8 +167,7 @@ impl EmbeddingBuilder {
             let vec_path = tmp_dir.join("vectors.f32");
             let vec_file = File::open(&vec_path)?;
             let mmap = unsafe {
-                Mmap::map(&vec_file)
-                    .map_err(|e| Error::State(format!("mmap vectors.f32: {e}")))?
+                Mmap::map(&vec_file).map_err(|e| Error::State(format!("mmap vectors.f32: {e}")))?
             };
             let d = dim as usize;
             let n = count as usize;
@@ -300,8 +299,7 @@ impl EmbeddingReader {
 
         let vectors_file = File::open(dir.join("vectors.f32"))?;
         let vectors_mmap = unsafe {
-            Mmap::map(&vectors_file)
-                .map_err(|e| Error::State(format!("mmap vectors.f32: {e}")))?
+            Mmap::map(&vectors_file).map_err(|e| Error::State(format!("mmap vectors.f32: {e}")))?
         };
         let bytes_per = meta.dim as usize * 4;
         let expected = bytes_per * meta.count as usize;
@@ -431,12 +429,7 @@ impl EmbeddingReader {
             let mut dot = 0.0_f32;
             for j in 0..dim {
                 let p = j * 4;
-                let v = f32::from_le_bytes([
-                    slice[p],
-                    slice[p + 1],
-                    slice[p + 2],
-                    slice[p + 3],
-                ]);
+                let v = f32::from_le_bytes([slice[p], slice[p + 1], slice[p + 2], slice[p + 3]]);
                 dot += v * query[j];
             }
             let cos = OrdF32(dot);
@@ -450,8 +443,7 @@ impl EmbeddingReader {
             }
         }
 
-        let mut sorted: Vec<(OrdF32, u32)> =
-            heap.into_iter().map(|Reverse(p)| p).collect();
+        let mut sorted: Vec<(OrdF32, u32)> = heap.into_iter().map(|Reverse(p)| p).collect();
         sorted.sort_by(|a, b| b.0.cmp(&a.0));
         let out = sorted
             .into_iter()

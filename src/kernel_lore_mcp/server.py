@@ -66,9 +66,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.author_profile import lore_author_profile
     from kernel_lore_mcp.tools.corpus_stats import lore_corpus_stats
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
+    from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.file_timeline import lore_file_timeline
     from kernel_lore_mcp.tools.maintainer_profile import lore_maintainer_profile
-    from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.message import lore_message
     from kernel_lore_mcp.tools.nearest import lore_nearest, lore_similar
     from kernel_lore_mcp.tools.patch import lore_patch
@@ -262,27 +262,26 @@ def build_server(settings: Settings | None = None) -> FastMCP:
 
 
 def _warmup_tiers(settings: Settings) -> None:
-    """Fire one throwaway query against each tier that mmaps large
-    segments. The OS page cache holds the pages after the reader is
-    dropped, so subsequent per-request Readers get warm mmap state.
+    """Fire one throwaway query against each tier that keeps large
+    read-only state cached in the shared process-local Reader.
     """
     import logging
 
     log = logging.getLogger(__name__)
     try:
-        from kernel_lore_mcp import _core
+        from kernel_lore_mcp.reader_cache import get_reader
 
-        reader = _core.Reader(str(settings.data_dir))
+        reader = get_reader()
         # BM25: cheapest valid query that touches segment readers.
         try:
             reader.prose_search("the", 1)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("bm25 warmup skipped: %s", exc)
         # Trigram / store / over.db indexes get touched lazily on first
         # lookup; one cheap mid-shape router query exercises them.
         try:
             reader.router_search("list:lkml", 1)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("router warmup skipped: %s", exc)
         # Trigram segment cache: `patch_search` opens ~530 segments
         # cross-list on lore scale; first call costs ~9 s page-in
@@ -293,7 +292,7 @@ def _warmup_tiers(settings: Settings) -> None:
         # one result so we don't spend wall-clock on the confirm.
         try:
             reader.patch_search("__function__", None, 1)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("trigram warmup skipped: %s", exc)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("warmup skipped entirely: %s", exc)

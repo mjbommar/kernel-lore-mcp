@@ -72,9 +72,7 @@ fn main() -> Result<()> {
         ));
     }
 
-    let output = args
-        .output
-        .unwrap_or_else(|| data_dir.join("over.db"));
+    let output = args.output.unwrap_or_else(|| data_dir.join("over.db"));
     let batch_size = if args.batch_size == 0 {
         DEFAULT_BATCH_SIZE
     } else {
@@ -126,12 +124,7 @@ fn main() -> Result<()> {
     // Run the build in a scoped block so we can act on errors before
     // returning (we deliberately leave the tempfile on failure for
     // post-mortem; success path moves it).
-    let result = run_build(
-        &data_dir,
-        &tmp_path,
-        args.from_list.as_deref(),
-        batch_size,
-    );
+    let result = run_build(&data_dir, &tmp_path, args.from_list.as_deref(), batch_size);
 
     let row_count = match result {
         Ok(n) => n,
@@ -155,9 +148,7 @@ fn main() -> Result<()> {
     }
 
     let elapsed = start.elapsed();
-    let db_bytes = std::fs::metadata(&output)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let db_bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     let secs = elapsed.as_secs_f64().max(1e-6);
     let mb_per_sec = (db_bytes as f64 / 1_048_576.0) / secs;
 

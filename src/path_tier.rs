@@ -204,14 +204,11 @@ fn collect_paths_from_over(data_dir: &Path) -> Result<Option<Vec<String>>> {
     }
     let conn = Connection::open_with_flags(
         &over_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     // `SELECT DISTINCT path` on the composite PRIMARY KEY streams
     // in sorted order without a temp sort.
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT path FROM over_touched_file ORDER BY path ASC",
-    )?;
+    let mut stmt = conn.prepare("SELECT DISTINCT path FROM over_touched_file ORDER BY path ASC")?;
     let mut rows = stmt.query([])?;
     let mut paths: Vec<String> = Vec::new();
     while let Some(r) = rows.next()? {

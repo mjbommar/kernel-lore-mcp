@@ -108,7 +108,13 @@ Want production-grade systemd deployment (single `klmcp-sync.timer`
 replacing the pre-v0.2.0 grokmirror + ingest pair)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
-## Status — v0.2.0 (2026-04-20)
+## Status — v0.2.1 (2026-04-20)
+
+Latest patch release: fixes the hot-path regressions we hit in live
+agent use. `lore_patch_search` / `lore_regex` now stay responsive under
+load, `dfhh:` function queries use a real side index with safe fallback,
+and the packaged `kernel-lore-sync` wrapper no longer self-recurses
+under `uv run`.
 
 Shipped:
 

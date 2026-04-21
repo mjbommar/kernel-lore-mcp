@@ -84,11 +84,7 @@ impl MaintainerEntry {
     /// Use this when sorting candidates for a path so the most
     /// specific subsystem claim surfaces first.
     pub fn depth(&self) -> usize {
-        self.f_patterns
-            .iter()
-            .map(|p| p.depth)
-            .max()
-            .unwrap_or(0)
+        self.f_patterns.iter().map(|p| p.depth).max().unwrap_or(0)
     }
 }
 
@@ -199,9 +195,10 @@ impl MaintainersIndex {
             }
             // N: contributes depth 0 if it matches and nothing else did.
             if best_depth.is_none() && !entry.n_regex_sources.is_empty() {
-                let n_match = entry.n_regex_sources.iter().any(|src| {
-                    regex_dfa_match(src, path).unwrap_or(false)
-                });
+                let n_match = entry
+                    .n_regex_sources
+                    .iter()
+                    .any(|src| regex_dfa_match(src, path).unwrap_or(false));
                 if n_match {
                     best_depth = Some(0);
                 }
@@ -250,8 +247,7 @@ fn compile_glob(glob: &str) -> Pattern {
                 regex.push_str("[^/]*");
             }
             b'?' => regex.push('.'),
-            b'.' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'+' | b'^' | b'$' | b'|'
-            | b'\\' => {
+            b'.' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'+' | b'^' | b'$' | b'|' | b'\\' => {
                 regex.push('\\');
                 regex.push(c as char);
             }
@@ -402,10 +398,8 @@ S:	Maintained
 
     #[test]
     fn comments_and_blank_sections_skipped() {
-        let idx = MaintainersIndex::parse(
-            "\n# just a comment\n\nNAME\nM:	x@y\nS:	Orphan\nF:	/\n",
-        )
-        .unwrap();
+        let idx = MaintainersIndex::parse("\n# just a comment\n\nNAME\nM:	x@y\nS:	Orphan\nF:	/\n")
+            .unwrap();
         assert_eq!(idx.len(), 1);
         assert_eq!(idx.entries[0].name, "NAME");
     }

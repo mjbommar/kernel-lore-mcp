@@ -182,11 +182,9 @@ impl GitSidecar {
     pub fn tip(&self, repo: &str) -> Result<Option<String>> {
         let row = self
             .conn
-            .query_row(
-                "SELECT tip_sha FROM tips WHERE repo = ?1",
-                [repo],
-                |r| r.get::<_, String>(0),
-            )
+            .query_row("SELECT tip_sha FROM tips WHERE repo = ?1", [repo], |r| {
+                r.get::<_, String>(0)
+            })
             .ok();
         Ok(row)
     }
@@ -203,12 +201,10 @@ impl GitSidecar {
     /// all repos (patch-id is stable under cherry-picks, so a patch
     /// can appear in linux.git + linux-stable.git + a subsystem tree).
     pub fn find_by_patch_id(&self, patch_id: &str) -> Result<Vec<CommitRecord>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT repo, sha, subject, author_email, author_date_ns, patch_id \
+        let mut stmt = self.conn.prepare(
+            "SELECT repo, sha, subject, author_email, author_date_ns, patch_id \
                  FROM commits WHERE patch_id = ?1",
-            )?;
+        )?;
         let rows = stmt.query_map([patch_id], row_to_commit)?;
         let mut out = Vec::new();
         for r in rows {
@@ -280,9 +276,7 @@ impl GitSidecar {
             "SELECT repo, sha, subject, author_email, author_date_ns, patch_id \
              FROM commits WHERE repo = ?1 AND sha = ?2",
         )?;
-        let row = stmt
-            .query_row(params![repo, sha], row_to_commit)
-            .ok();
+        let row = stmt.query_row(params![repo, sha], row_to_commit).ok();
         Ok(row)
     }
 }
@@ -363,9 +357,30 @@ mod tests {
     fn find_by_subject_author_window() {
         let mut db = GitSidecar::open_in_memory().unwrap();
         db.insert_batch(&[
-            row("linux", "aaa", "foo: fix bar", "alice@x", 1_000_000_000, None),
-            row("linux", "bbb", "foo: fix bar", "alice@x", 50_000_000_000, None),
-            row("linux", "ccc", "other subject", "alice@x", 1_100_000_000, None),
+            row(
+                "linux",
+                "aaa",
+                "foo: fix bar",
+                "alice@x",
+                1_000_000_000,
+                None,
+            ),
+            row(
+                "linux",
+                "bbb",
+                "foo: fix bar",
+                "alice@x",
+                50_000_000_000,
+                None,
+            ),
+            row(
+                "linux",
+                "ccc",
+                "other subject",
+                "alice@x",
+                1_100_000_000,
+                None,
+            ),
         ])
         .unwrap();
         let window_ns: i64 = 2_000_000_000;
@@ -417,7 +432,8 @@ mod tests {
         let path = d.path().join("g.db");
         {
             let mut db = GitSidecar::open(&path).unwrap();
-            db.insert_batch(&[row("linux", "a", "s", "e@x", 1, None)]).unwrap();
+            db.insert_batch(&[row("linux", "a", "s", "e@x", 1, None)])
+                .unwrap();
         }
         let db = GitSidecar::open(&path).unwrap();
         assert_eq!(db.count().unwrap(), 1);

@@ -33,6 +33,7 @@ use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use fst::{Map as FstMap, MapBuilder, Streamer};
+use memmap2::Mmap;
 use roaring::RoaringBitmap;
 
 use crate::error::{Error, Result};
@@ -160,16 +161,23 @@ impl SegmentBuilder {
 
 /// Read-only handle on one finalized segment. Mmaps the fst + postings.
 pub struct SegmentReader {
-    fst: FstMap<Vec<u8>>,
-    postings: Vec<u8>,
+    fst: FstMap<Mmap>,
+    postings: Mmap,
     docs: Vec<String>,
 }
 
 impl SegmentReader {
     pub fn open(dir: &Path) -> Result<Self> {
-        let fst_bytes = fs::read(dir.join("trigrams.fst"))?;
+        let fst_file = File::open(dir.join("trigrams.fst"))?;
+        let fst_bytes = unsafe {
+            Mmap::map(&fst_file).map_err(|e| Error::State(format!("mmap trigrams.fst: {e}")))?
+        };
         let fst = FstMap::new(fst_bytes).map_err(|e| Error::State(format!("fst open: {e}")))?;
-        let postings = fs::read(dir.join("trigrams.postings"))?;
+        let postings_file = File::open(dir.join("trigrams.postings"))?;
+        let postings = unsafe {
+            Mmap::map(&postings_file)
+                .map_err(|e| Error::State(format!("mmap trigrams.postings: {e}")))?
+        };
         let mut docs_s = String::new();
         File::open(dir.join("docs.tsv"))?.read_to_string(&mut docs_s)?;
         let docs = docs_s.lines().map(str::to_owned).collect::<Vec<_>>();
@@ -197,7 +205,7 @@ impl SegmentReader {
 
     /// Intersect postings for every required trigram in `needle`.
     /// Returns local docids (into `self.docs`).
-    fn candidate_docids(&self, needle: &[u8]) -> RoaringBitmap {
+    fn candidate_docids(&self, needle: &[u8]) -> Result<RoaringBitmap> {
         let mut trigrams = Vec::new();
         for w in needle.windows(3) {
             if w.iter().all(|b| *b < 0x80) {
@@ -205,7 +213,7 @@ impl SegmentReader {
             }
         }
         if trigrams.is_empty() {
-            return RoaringBitmap::new();
+            return Ok(RoaringBitmap::new());
         }
         trigrams.sort_unstable();
         trigrams.dedup();
@@ -213,24 +221,25 @@ impl SegmentReader {
         let mut iter = trigrams.into_iter();
         let first = iter.next().unwrap();
         let Some(mut acc) = self.posting_for(first) else {
-            return RoaringBitmap::new();
+            return Ok(RoaringBitmap::new());
         };
         for tri in iter {
+            crate::timeout::check_request_deadline()?;
             let Some(b) = self.posting_for(tri) else {
-                return RoaringBitmap::new();
+                return Ok(RoaringBitmap::new());
             };
             acc &= b;
             if acc.is_empty() {
-                return acc;
+                return Ok(acc);
             }
         }
-        acc
+        Ok(acc)
     }
 
     /// Substring search: returns candidate `message_id`s that MIGHT
     /// contain `needle`. Caller must confirm by decompressing the body
     /// and running the real needle.
-    pub fn candidates_for_substring(&self, needle: &[u8]) -> Vec<&str> {
+    pub fn candidates_for_substring(&self, needle: &[u8]) -> Result<Vec<&str>> {
         self.candidates_for_substring_fuzzy(needle, 0)
     }
 
@@ -239,17 +248,21 @@ impl SegmentReader {
     /// uses threshold intersection: require at least
     /// `max(1, num_trigrams - 3*k)` trigrams to match. Each edit can
     /// destroy at most 3 trigrams (pigeonhole principle).
-    pub fn candidates_for_substring_fuzzy(&self, needle: &[u8], fuzzy_edits: u32) -> Vec<&str> {
+    pub fn candidates_for_substring_fuzzy(
+        &self,
+        needle: &[u8],
+        fuzzy_edits: u32,
+    ) -> Result<Vec<&str>> {
         if needle.len() < 3 {
-            return self.docs.iter().map(String::as_str).collect();
+            return Ok(self.docs.iter().map(String::as_str).collect());
         }
         if fuzzy_edits == 0 {
-            let bitmap = self.candidate_docids(needle);
-            return bitmap
+            let bitmap = self.candidate_docids(needle)?;
+            return Ok(bitmap
                 .iter()
                 .take(TRIGRAM_CONFIRM_LIMIT)
                 .filter_map(|docid| self.docs.get(docid as usize).map(String::as_str))
-                .collect();
+                .collect());
         }
 
         // Threshold intersection for fuzzy: a document must contain
@@ -261,7 +274,7 @@ impl SegmentReader {
             }
         }
         if trigrams.is_empty() {
-            return self.docs.iter().map(String::as_str).collect();
+            return Ok(self.docs.iter().map(String::as_str).collect());
         }
         trigrams.sort_unstable();
         trigrams.dedup();
@@ -274,6 +287,7 @@ impl SegmentReader {
         // Count how many of the needle's trigrams each doc matches.
         let mut counts: HashMap<u32, usize> = HashMap::new();
         for tri in &trigrams {
+            crate::timeout::check_request_deadline()?;
             if let Some(bitmap) = self.posting_for(*tri) {
                 for docid in bitmap.iter() {
                     *counts.entry(docid).or_default() += 1;
@@ -298,7 +312,7 @@ impl SegmentReader {
             .filter_map(|(docid, _)| self.docs.get(docid as usize).map(String::as_str))
             .collect();
         out.sort_unstable();
-        out
+        Ok(out)
     }
 
     /// Yield every distinct trigram key in the segment. Useful for
@@ -313,7 +327,7 @@ struct TrigramKeyIter<'a> {
 }
 
 impl<'a> TrigramKeyIter<'a> {
-    fn new(fst: &'a FstMap<Vec<u8>>) -> Self {
+    fn new<D: AsRef<[u8]>>(fst: &'a FstMap<D>) -> Self {
         Self {
             stream: fst.stream(),
         }
@@ -420,22 +434,26 @@ mod tests {
         assert_eq!(reader.len(), 2);
 
         // Substring that appears only in m1's patch
-        let cands = reader.candidates_for_substring(b"smb_check_perm_dacl");
+        let cands = reader
+            .candidates_for_substring(b"smb_check_perm_dacl")
+            .unwrap();
         assert!(cands.contains(&"<m1@x>"));
         assert!(!cands.contains(&"<m2@x>"));
 
         // Substring that appears only in m2
-        let cands = reader.candidates_for_substring(b"other.c");
+        let cands = reader.candidates_for_substring(b"other.c").unwrap();
         assert!(cands.contains(&"<m2@x>"));
         assert!(!cands.contains(&"<m1@x>"));
 
         // Substring shared by both (`diff --git`)
-        let cands = reader.candidates_for_substring(b"diff --git");
+        let cands = reader.candidates_for_substring(b"diff --git").unwrap();
         assert!(cands.contains(&"<m1@x>"));
         assert!(cands.contains(&"<m2@x>"));
 
         // Substring absent from the corpus
-        let cands = reader.candidates_for_substring(b"DOES_NOT_EXIST_ANYWHERE");
+        let cands = reader
+            .candidates_for_substring(b"DOES_NOT_EXIST_ANYWHERE")
+            .unwrap();
         assert!(cands.is_empty());
     }
 
@@ -447,7 +465,7 @@ mod tests {
         b.finalize(&segment_dir(tmp.path(), "l", "r1")).unwrap();
         let segs = list_segments(tmp.path(), "l").unwrap();
         let r = SegmentReader::open(&segs[0]).unwrap();
-        let cands = r.candidates_for_substring(b"hi");
+        let cands = r.candidates_for_substring(b"hi").unwrap();
         assert_eq!(cands, vec!["<m1@x>"]);
     }
 

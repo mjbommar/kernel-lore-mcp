@@ -547,6 +547,19 @@ async def test_lore_search_router_dispatches_to_metadata_tier(client: Client) ->
 
 
 @pytest.mark.asyncio
+async def test_lore_search_router_dispatches_dfhh_to_metadata_tier(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_search",
+        {"query": "dfhh:smb_check_perm_dacl"},
+    )
+    data = result.data
+    assert len(data.results) == 1
+    assert data.results[0].message_id == "m1@x"
+    assert data.query_tiers_hit == ["metadata"]
+    assert data.results[0].is_exact_match is True
+
+
+@pytest.mark.asyncio
 async def test_lore_search_router_combines_dfb_and_list(client: Client) -> None:
     # `dfb:` (trigram) + `list:` (metadata constraint) — single
     # request fuses both tiers.

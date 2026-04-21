@@ -45,7 +45,8 @@
 //! Safety limits:
 //!   - Regex must compile to DFA via `regex-automata` (no backrefs,
 //!     no catastrophic patterns). Rejected with `Error::RegexComplexity`.
-//!   - Per-query wall-clock 5s hard cap.
+//!   - Per-query wall-clock hard cap (default 5s; override via
+//!     `KLMCP_QUERY_WALL_CLOCK_MS`).
 //!   - Unanchored regex on full term-dict is blocked unless `list:`
 //!     or `rt:` narrows candidate set first.
 //!
@@ -76,8 +77,9 @@ type HmacSha256 = Hmac<Sha256>;
 /// Reciprocal Rank Fusion smoothing constant. 60 is the standard.
 const RRF_K: f32 = 60.0;
 
-/// Per-query wall-clock cap. Routers reject queries that take longer.
-const QUERY_WALL_CLOCK_MS: u64 = 5_000;
+/// Default per-query wall-clock cap. Routers reject queries that take
+/// longer. Production can override via `KLMCP_QUERY_WALL_CLOCK_MS`.
+const DEFAULT_QUERY_WALL_CLOCK_MS: u64 = 5_000;
 
 /// Parsed query AST. Each field is optional; the router fills in
 /// what the grammar produced.
@@ -244,7 +246,9 @@ pub fn dispatch(
             return Ok((None, None));
         }
         let rows = if let Some(mid) = &parsed.message_id {
-            reader.fetch_message(mid)?.map_or_else(Vec::new, |r| vec![r])
+            reader
+                .fetch_message(mid)?
+                .map_or_else(Vec::new, |r| vec![r])
         } else if let Some(sha) = &parsed.fixes_sha {
             reader.expand_citation(sha, limit)?
         } else if parsed.touched_file.is_some() || parsed.touched_function.is_some() {
@@ -477,7 +481,11 @@ pub fn verify_cursor(secret: &[u8], token: &str) -> Result<CursorPayload> {
 // the Rust thread. Re-exported so the tool layer stays in sync.
 #[allow(dead_code)]
 pub fn query_wall_clock_ms() -> u64 {
-    QUERY_WALL_CLOCK_MS
+    std::env::var("KLMCP_QUERY_WALL_CLOCK_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_QUERY_WALL_CLOCK_MS)
 }
 
 #[cfg(test)]
