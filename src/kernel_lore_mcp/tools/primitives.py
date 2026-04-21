@@ -23,8 +23,9 @@ from typing import Annotated
 
 from pydantic import Field
 
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
-from kernel_lore_mcp.errors import invalid_argument, unknown_enum
+from kernel_lore_mcp.errors import LoreError, invalid_argument, unknown_enum
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.kwic import build_snippet
 from kernel_lore_mcp.mapping import row_to_search_hit
@@ -99,6 +100,7 @@ _TRAILER_NAMES = {
 
 
 _REGEX_FIELDS = {"subject", "subject_raw", "from", "from_addr", "body_prose", "prose", "patch"}
+_HOSTED_REGEX_FIELDS = {"subject", "subject_raw", "from", "from_addr"}
 
 
 def _from_ns(ns: int | None) -> datetime | None:
@@ -132,6 +134,39 @@ def _rows_to_response(rows: list, *, tier: str, reader, snippet_for=None) -> Row
         for r in rows
     ]
     return RowsResponse(results=hits, total=len(hits), freshness=build_freshness(reader))
+
+
+def _enforce_hosted_regex_posture(
+    *,
+    field: str,
+    pattern: str,
+    anchor_required: bool,
+    list: str | None,
+) -> None:
+    settings = get_settings()
+    if settings.mode != "hosted":
+        return
+    if list is None:
+        raise LoreError(
+            "hosted_restriction",
+            "hosted `lore_regex` requires `list` so the server never runs a full-corpus regex scan.",
+            echoed_input={"field": field, "list": list, "pattern": pattern[:80]},
+            valid_example='{"field": "subject", "pattern": "ksmbd", "list": "linux-cifs"}',
+        )
+    if not anchor_required:
+        raise LoreError(
+            "hosted_restriction",
+            "hosted `lore_regex` requires `anchor_required=true` to keep the candidate filter bounded.",
+            echoed_input={"field": field, "list": list, "anchor_required": anchor_required},
+            valid_example='{"field": "subject", "pattern": "ksmbd", "list": "linux-cifs", "anchor_required": true}',
+        )
+    if field not in _HOSTED_REGEX_FIELDS:
+        raise LoreError(
+            "hosted_restriction",
+            "hosted `lore_regex` is limited to metadata fields (`subject` / `from_addr`). Prose and patch regex scans are local-only.",
+            echoed_input={"field": field, "list": list},
+            valid_example='{"field": "subject", "pattern": "ksmbd", "list": "linux-cifs"}',
+        )
 
 
 async def lore_eq(
@@ -352,6 +387,7 @@ async def lore_regex(
 
     Cost: expensive — expected p95 1500 ms on prose/patch; 200 ms on subject/from.
     Prefer a substring or equality primitive first if you know the string literal.
+    In hosted mode, only list-scoped metadata regexes are allowed.
     """
     if field not in _REGEX_FIELDS:
         raise unknown_enum(
@@ -360,6 +396,12 @@ async def lore_regex(
             valid=_REGEX_FIELDS,
             code="unknown_regex_field",
         )
+    _enforce_hosted_regex_posture(
+        field=field,
+        pattern=pattern,
+        anchor_required=anchor_required,
+        list=list,
+    )
 
     reader = get_reader()
 

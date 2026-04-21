@@ -10,6 +10,7 @@ calls `set_settings(s)` once at startup; all tools call
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,6 +40,13 @@ class Settings(BaseSettings):
         description="HTTP bind host. Override to 0.0.0.0 for public deploy.",
     )
     port: int = Field(default=8080, ge=1, le=65535)
+    mode: Literal["local", "hosted"] = Field(
+        default="local",
+        description=(
+            "Deployment profile. `local` keeps the full research surface; "
+            "`hosted` enables the public-safe posture for expensive tools."
+        ),
+    )
 
     rate_limit_per_ip_per_minute: int = Field(
         default=60,
