@@ -11,10 +11,10 @@ how fresh each tier is. Agents call it once at the start of a
 workflow to pick the right search scope.
 
 Cost is one indexed SQL `GROUP BY list` against over.db (~3 s on the
-17.7M-row corpus; ~50 ms on small corpora). Results cached in-
-process for `CACHE_TTL_SECONDS` so an agent fetching `stats://
-coverage` AND then calling the tool pays the query once. The cache
-is invalidated on generation change — a fresh ingest always bypasses
+17.7M-row corpus; ~50 ms on small corpora). Results are cached per
+(`data_dir`, `generation`) so an agent fetching `stats://coverage`
+AND then calling the tool pays the query once. The cache is
+invalidated on generation change — a fresh ingest always bypasses
 the stale snapshot.
 
 Deliberately does not compute `COUNT(DISTINCT from_addr)` per list —
@@ -25,7 +25,6 @@ that doubles the cost and callers who care can issue a separate
 from __future__ import annotations
 
 import threading
-import time
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -33,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.freshness import Freshness, build_freshness
+from kernel_lore_mcp.reader_cache import get_reader
 from kernel_lore_mcp.timeout import run_with_timeout
 
 
@@ -100,38 +100,78 @@ class CorpusStatsResponse(BaseModel):
     blind_spots_ref: str = "blind-spots://coverage"
 
 
-CACHE_TTL_SECONDS = 30
-
 # Module-level cache. Keyed on (data_dir, corpus_generation) so any
 # ingest commit invalidates the snapshot automatically — we never
 # serve stats for generation N after generation N+1 has landed.
 _cache_lock = threading.Lock()
-_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_cache: dict[tuple[str, int], dict[str, Any]] = {}
+_cache_inflight: dict[tuple[str, int], threading.Event] = {}
 
 
 def _cached_corpus_stats(reader, data_dir: str, generation: int) -> dict[str, Any]:
-    """Return cached Rust-side corpus_stats() dict, refreshing when
-    the TTL has expired or the corpus generation advanced. Thread-
-    safe; the inner query is idempotent so a cache-miss race is
-    correct (both callers would compute the same value)."""
+    """Return cached Rust-side corpus_stats() dict for one generation.
+
+    Concurrent callers collapse to one `reader.corpus_stats()` build
+    per (`data_dir`, `generation`) key instead of stampeding on a cold
+    miss.
+    """
     key = (data_dir, generation)
-    now = time.monotonic()
+    while True:
+        with _cache_lock:
+            cached = _cache.get(key)
+            if cached is not None:
+                return cached
+            waiter = _cache_inflight.get(key)
+            if waiter is None:
+                waiter = threading.Event()
+                _cache_inflight[key] = waiter
+                leader = True
+            else:
+                leader = False
+        if leader:
+            try:
+                snap = reader.corpus_stats()
+            except Exception:
+                with _cache_lock:
+                    waiter = _cache_inflight.pop(key, None)
+                    if waiter is not None:
+                        waiter.set()
+                raise
+            with _cache_lock:
+                _cache[key] = snap
+                # Drop old generation entries for this data_dir so the
+                # cache doesn't grow unboundedly across a long-running
+                # process.
+                stale = [k for k in _cache if k[0] == data_dir and k[1] != generation]
+                for stale_key in stale:
+                    _cache.pop(stale_key, None)
+                waiter = _cache_inflight.pop(key, None)
+                if waiter is not None:
+                    waiter.set()
+            return snap
+        waiter.wait()
+
+
+def warm_corpus_stats_cache(data_dir: str | None = None) -> None:
+    """Best-effort warm path for the current generation's stats cache."""
+    from kernel_lore_mcp import _core
+
+    settings = get_settings()
+    resolved = str(data_dir or settings.data_dir)
+    reader = get_reader() if resolved == str(settings.data_dir) else _core.Reader(resolved)
+    generation = 0
+    try:
+        generation = reader.generation()
+    except Exception:
+        pass
+    _cached_corpus_stats(reader, resolved, generation)
+
+
+def clear_cache() -> None:
+    """For tests: wipe cached snapshots and any in-flight markers."""
     with _cache_lock:
-        if key in _cache:
-            fetched_at, snap = _cache[key]
-            if now - fetched_at < CACHE_TTL_SECONDS:
-                return snap
-    # Miss or stale — compute outside the lock so a slow query
-    # doesn't serialize other callers.
-    snap = reader.corpus_stats()
-    with _cache_lock:
-        _cache[key] = (now, snap)
-        # Drop old generation entries for this data_dir so the cache
-        # doesn't grow unboundedly across a long-running process.
-        stale = [k for k in _cache if k[0] == data_dir and k[1] != generation]
-        for k in stale:
-            _cache.pop(k, None)
-    return snap
+        _cache.clear()
+        _cache_inflight.clear()
 
 
 def _utc(ns: int | None) -> datetime | None:
@@ -167,8 +207,8 @@ async def lore_corpus_stats(
 
     Cost: moderate — expected p95 3500 ms on full lore scale
     (17.7M rows, 341 lists). ~50 ms on small corpora. Result is
-    cached in-process for 30 s and invalidated on generation
-    change, so a burst of calls pays the GROUP BY once.
+    cached per generation, so a burst of calls pays the GROUP BY once
+    and a fresh ingest invalidates the snapshot automatically.
     """
     from kernel_lore_mcp import _core
 

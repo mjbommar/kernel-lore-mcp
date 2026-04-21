@@ -268,10 +268,12 @@ def _warmup_tiers(settings: Settings) -> None:
     read-only state cached in the shared process-local Reader.
     """
     import logging
+    import threading
 
     log = logging.getLogger(__name__)
     try:
         from kernel_lore_mcp.reader_cache import get_reader
+        from kernel_lore_mcp.tools.corpus_stats import warm_corpus_stats_cache
 
         reader = get_reader()
         # BM25: cheapest valid query that touches segment readers.
@@ -296,5 +298,14 @@ def _warmup_tiers(settings: Settings) -> None:
             reader.patch_search("__function__", None, 1)
         except Exception as exc:
             log.debug("trigram warmup skipped: %s", exc)
+        # Corpus stats: warm the generation-bound cache in a daemon
+        # thread so the first hosted caller doesn't pay the cold
+        # GROUP BY path, but server startup also doesn't block on it.
+        threading.Thread(
+            target=warm_corpus_stats_cache,
+            args=(str(settings.data_dir),),
+            name="klmcp-corpus-stats-warmup",
+            daemon=True,
+        ).start()
     except Exception as exc:
         log.debug("warmup skipped entirely: %s", exc)

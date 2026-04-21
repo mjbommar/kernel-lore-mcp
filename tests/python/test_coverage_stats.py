@@ -3,6 +3,9 @@ in-process cache that backs both the tool and the resource."""
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pytest
 
 from kernel_lore_mcp.resources.coverage_stats import render_coverage_stats
@@ -87,10 +90,10 @@ class _FakeReader:
 
 @pytest.fixture(autouse=True)
 def _clear_cache() -> None:
-    stats_mod._cache.clear()
+    stats_mod.clear_cache()
 
 
-def test_cache_returns_same_snapshot_within_ttl() -> None:
+def test_cache_returns_same_snapshot_for_same_generation() -> None:
     r = _FakeReader()
     snap1 = stats_mod._cached_corpus_stats(r, "/data", generation=7)
     snap2 = stats_mod._cached_corpus_stats(r, "/data", generation=7)
@@ -109,13 +112,37 @@ def test_cache_invalidates_on_generation_change() -> None:
     assert keys == [("/data", 8)]
 
 
-def test_cache_respects_ttl_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cache_does_not_expire_within_same_generation() -> None:
     r = _FakeReader()
-    # Freeze time, then advance past TTL.
-    t = [1000.0]
-    monkeypatch.setattr(stats_mod.time, "monotonic", lambda: t[0])
-    stats_mod._cached_corpus_stats(r, "/data", generation=1)
+    snap1 = stats_mod._cached_corpus_stats(r, "/data", generation=1)
     assert r.calls == 1
-    t[0] += stats_mod.CACHE_TTL_SECONDS + 1
-    stats_mod._cached_corpus_stats(r, "/data", generation=1)
-    assert r.calls == 2
+    r._snap = _fixture_stats(generation=999)
+    snap2 = stats_mod._cached_corpus_stats(r, "/data", generation=1)
+    assert snap1 is snap2
+    assert r.calls == 1
+
+
+def test_concurrent_cache_miss_collapses_to_one_query() -> None:
+    class _BlockingReader:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def corpus_stats(self) -> dict:
+            self.calls += 1
+            self.started.set()
+            assert self.release.wait(timeout=2), "timed out waiting to release reader"
+            return _fixture_stats()
+
+    r = _BlockingReader()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(stats_mod._cached_corpus_stats, r, "/data", 1)
+        assert r.started.wait(timeout=1), "leader did not start corpus_stats()"
+        second = pool.submit(stats_mod._cached_corpus_stats, r, "/data", 1)
+        r.release.set()
+        snap1 = first.result(timeout=2)
+        snap2 = second.result(timeout=2)
+
+    assert snap1 == snap2
+    assert r.calls == 1
