@@ -37,7 +37,11 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Literal, ParamSpec, TypeVar
 
+import structlog
+
+from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
+from kernel_lore_mcp.logging_ import profiling_thresholds
 
 CostClass = Literal["cheap", "moderate", "expensive"]
 
@@ -67,6 +71,8 @@ _LIMITS: dict[CostClass, int] = {
 _SEMAPHORES: dict[CostClass, asyncio.Semaphore] = {
     c: asyncio.Semaphore(n) for c, n in _LIMITS.items()
 }
+
+log = structlog.get_logger(__name__)
 
 
 def cost_class_of(fn: Callable[..., object]) -> CostClass:
@@ -135,20 +141,44 @@ def cost_limited(
         try:
             await asyncio.wait_for(sem.acquire(), timeout=0.001)
         except TimeoutError as err:
+            queue_wait = max(0.0, time.monotonic() - base_started)
             record_tool_queue_wait(
                 tool_name,
                 cost,
-                max(0.0, time.monotonic() - base_started),
+                queue_wait,
                 "rate_limited",
             )
+            settings = get_settings()
+            log.warning(
+                "tool admission rejected",
+                tool=tool_name,
+                cost_class=cost,
+                mode=settings.mode,
+                queue_wait_ms=round(queue_wait * 1000, 3),
+                inflight=current_inflight(cost),
+                limit=_LIMITS[cost],
+            )
             raise _rate_limited(cost, tool_name) from err
+        queue_wait = max(0.0, time.monotonic() - base_started)
         record_tool_queue_wait(
             tool_name,
             cost,
-            max(0.0, time.monotonic() - base_started),
+            queue_wait,
             "ok",
         )
-        set_tool_inflight(cost, current_inflight(cost))
+        inflight = current_inflight(cost)
+        set_tool_inflight(cost, inflight)
+        settings = get_settings()
+        if queue_wait >= profiling_thresholds(settings.mode).queue_wait_seconds:
+            log.info(
+                "tool admission delayed",
+                tool=tool_name,
+                cost_class=cost,
+                mode=settings.mode,
+                queue_wait_ms=round(queue_wait * 1000, 3),
+                inflight=inflight,
+                limit=_LIMITS[cost],
+            )
         try:
             return await fn(*args, **kwargs)
         finally:

@@ -71,6 +71,9 @@ env-driven). Proposed:
 ```
 KLMCP_MODE=local     # default
 KLMCP_MODE=hosted    # enables embargo quarantine + rate limits
+
+# or equivalently on the serve CLI:
+kernel-lore-mcp serve --transport http --mode hosted
 ```
 
 No feature flag hides the code paths. A hosted instance that

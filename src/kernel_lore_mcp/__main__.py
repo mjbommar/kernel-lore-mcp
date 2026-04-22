@@ -25,7 +25,11 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+import structlog
+
+from kernel_lore_mcp import __version__
 from kernel_lore_mcp.logging_ import configure as configure_logging
+from kernel_lore_mcp.logging_ import profiling_thresholds
 
 
 def _add_serve_args(parser: argparse.ArgumentParser) -> None:
@@ -50,6 +54,15 @@ def _add_serve_args(parser: argparse.ArgumentParser) -> None:
         "--log-level",
         default=os.environ.get("KLMCP_LOG_LEVEL", "INFO"),
         help="Log level (DEBUG/INFO/WARN/ERROR). Env: KLMCP_LOG_LEVEL.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("local", "hosted"),
+        default=None,
+        help=(
+            "Deployment profile. Defaults to KLMCP_MODE or the config default. "
+            "`hosted` enables the public-safe runtime posture."
+        ),
     )
 
 
@@ -83,16 +96,50 @@ def _run_serve(args: argparse.Namespace) -> int:
     from kernel_lore_mcp.config import Settings
     from kernel_lore_mcp.server import build_server
 
-    configure_logging(transport=args.transport, level=args.log_level)
-    settings = Settings()
+    settings_kwargs: dict[str, object] = {}
+    if args.mode is not None:
+        settings_kwargs["mode"] = args.mode
+    settings = Settings(**settings_kwargs)
+    configure_logging(
+        transport=args.transport,
+        mode=settings.mode,
+        level=args.log_level,
+    )
+    log = structlog.get_logger(__name__)
+    thresholds = profiling_thresholds(settings.mode)
     mcp = build_server(settings)
     if args.transport == "stdio":
+        log.info(
+            "server starting",
+            version=__version__,
+            mode=settings.mode,
+            transport="stdio",
+            data_dir=str(settings.data_dir),
+            log_level=args.log_level.upper(),
+            slow_request_ms=int(thresholds.request_seconds * 1000),
+            slow_tool_ms=int(thresholds.tool_seconds * 1000),
+            slow_queue_wait_ms=int(thresholds.queue_wait_seconds * 1000),
+        )
         mcp.run(transport="stdio")
         return 0
 
     # CLI args override settings; settings override env defaults.
     host = args.host or settings.bind
     port = args.port if args.port != 8080 else settings.port
+    log.info(
+        "server starting",
+        version=__version__,
+        mode=settings.mode,
+        transport="http",
+        data_dir=str(settings.data_dir),
+        bind=host,
+        port=port,
+        uds=args.uds,
+        log_level=args.log_level.upper(),
+        slow_request_ms=int(thresholds.request_seconds * 1000),
+        slow_tool_ms=int(thresholds.tool_seconds * 1000),
+        slow_queue_wait_ms=int(thresholds.queue_wait_seconds * 1000),
+    )
     if args.uds:
         mcp.run(transport="http", uds=args.uds)
     else:

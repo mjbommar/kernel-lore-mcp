@@ -51,6 +51,24 @@ jobs:
       - run: uv run maturin develop --release
       - run: uv run pytest -v
 
+  hosted-load:
+    name: hosted load harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: uv sync
+      - run: uv run maturin develop --release
+      - run: .venv/bin/python scripts/bench/bench_hosted_adversarial.py --json-out hosted-load.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hosted-load-report
+          path: hosted-load.json
+
   wheels:
     name: build abi3 wheels (${{ matrix.target }})
     runs-on: ${{ matrix.os }}

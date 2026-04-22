@@ -215,6 +215,8 @@ retriever on that self-supervised signal. Recipe:
   5-min cadence policy + fanout-to-one cost analysis
 - [`docs/ops/production-hardening.md`](./docs/ops/production-hardening.md) —
   threat model, cost-class caps, capability flags, systemd layout
+- [`docs/ops/public-launch-checklist.md`](./docs/ops/public-launch-checklist.md) —
+  pre-launch hosted-box gate: shard health, metrics, harness, log readability
 - [`docs/mcp/client-config.md`](./docs/mcp/client-config.md) —
   copy-paste snippets for Claude Code, Codex, Cursor, Zed
 - [`docs/mcp/transport-auth.md`](./docs/mcp/transport-auth.md) —

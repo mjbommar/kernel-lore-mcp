@@ -49,7 +49,11 @@ at the open internet.
 | `KLMCP_COST_CAP_EXPENSIVE` | 4 | Rarely; expensive tools are expensive |
 | `KLMCP_MAINTAINERS_FILE` | `<data_dir>/MAINTAINERS` | Custom kernel-tree snapshot path |
 | `KLMCP_CURSOR_KEY` | (unset) | Required in http mode once pagination ships |
+| `KLMCP_MODE` | `local` | `hosted` for the public-safe posture + quieter operator logs |
 | `KLMCP_LOG_LEVEL` | INFO | DEBUG when diagnosing a specific request |
+| `KLMCP_SLOW_REQUEST_MS` | mode-aware (`1000` hosted / `3000` local) | Lower for tighter slow-request profiling |
+| `KLMCP_SLOW_TOOL_MS` | mode-aware (`500` hosted / `2000` local) | Lower for tool-latency profiling |
+| `KLMCP_SLOW_QUEUE_WAIT_MS` | mode-aware (`25` hosted / `100` local) | Lower to surface admission-delay incidents sooner |
 | `KLMCP_DISABLE_OVER` | (unset) | Set to `1` for parity tests that compare the over.db indexed paths against the legacy Parquet scan. Production leaves this unset. |
 | `KLMCP_BIND` | 127.0.0.1 | **`0.0.0.0` only when behind a reverse proxy** |
 
@@ -133,6 +137,25 @@ What to alert on:
 - Process RSS growing past `MemoryHigh` — a scan-accumulating
   regression (the OOM round should make this unreachable, but
   worth watching).
+
+## Adversarial harness
+
+Before changing cost caps or the over.db pool, run the hosted-load
+harness and compare client-observed latency with the server-side
+histograms:
+
+```sh
+./.venv/bin/python scripts/bench/bench_hosted_adversarial.py \
+    --json-out /tmp/klmcp-hosted-load.json
+```
+
+Interpretation:
+
+- If client p95 rises while `/status` stays fast and the server-side
+  tool histogram stays modest, the pain is queueing / transport /
+  admission overhead, not the inner reader path.
+- If server-side tool p95 rises with client p95, the tool body is the
+  real hotspot and merits profiling before any cap changes.
 
 ## Known gaps (not blocking launch, worth knowing)
 

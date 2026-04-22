@@ -18,8 +18,13 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import structlog
+
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
+from kernel_lore_mcp.logging_ import profiling_thresholds
+
+log = structlog.get_logger(__name__)
 
 
 async def run_with_timeout[T](
@@ -44,10 +49,27 @@ async def run_with_timeout[T](
             asyncio.to_thread(fn, *args),
             timeout=ms / 1000.0,
         )
-        record_tool_runtime(tool_name, time.monotonic() - started, "ok")
+        elapsed = time.monotonic() - started
+        record_tool_runtime(tool_name, elapsed, "ok")
+        if elapsed >= profiling_thresholds(settings.mode).tool_seconds:
+            log.info(
+                "tool runtime slow",
+                operation=tool_name,
+                mode=settings.mode,
+                runtime_ms=round(elapsed * 1000, 3),
+                timeout_ms=ms,
+            )
         return result
     except TimeoutError:
-        record_tool_runtime(tool_name, time.monotonic() - started, "timeout")
+        elapsed = time.monotonic() - started
+        record_tool_runtime(tool_name, elapsed, "timeout")
+        log.warning(
+            "tool runtime timeout",
+            operation=tool_name,
+            mode=settings.mode,
+            runtime_ms=round(elapsed * 1000, 3),
+            timeout_ms=ms,
+        )
         raise LoreError(
             "query_timeout",
             f"query exceeded the {ms} ms wall-clock cap",
@@ -55,10 +77,28 @@ async def run_with_timeout[T](
             retry_after_seconds=5,
         ) from None
     except LoreError as exc:
-        record_tool_runtime(tool_name, time.monotonic() - started, exc.code)
+        elapsed = time.monotonic() - started
+        record_tool_runtime(tool_name, elapsed, exc.code)
+        if exc.code != "query_timeout" and elapsed >= profiling_thresholds(settings.mode).tool_seconds:
+            log.info(
+                "tool runtime completed",
+                operation=tool_name,
+                mode=settings.mode,
+                status=exc.code,
+                runtime_ms=round(elapsed * 1000, 3),
+                timeout_ms=ms,
+            )
         raise
     except Exception:
-        record_tool_runtime(tool_name, time.monotonic() - started, "error")
+        elapsed = time.monotonic() - started
+        record_tool_runtime(tool_name, elapsed, "error")
+        log.warning(
+            "tool runtime failed",
+            operation=tool_name,
+            mode=settings.mode,
+            runtime_ms=round(elapsed * 1000, 3),
+            timeout_ms=ms,
+        )
         raise
 
 
