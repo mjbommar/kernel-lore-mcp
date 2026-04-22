@@ -8,6 +8,7 @@ uvicorn.
 
 from __future__ import annotations
 
+import fcntl
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -158,6 +159,8 @@ def test_metrics_route_publishes_freshness_gauges(http_client: TestClient) -> No
     assert "kernel_lore_mcp_configured_interval_seconds 300" in body
     # freshness_ok flips on after a live ingest.
     assert "kernel_lore_mcp_freshness_ok 1.0" in body
+    assert "kernel_lore_mcp_writer_lock_present" in body
+    assert "kernel_lore_mcp_sync_active" in body
 
 
 def test_status_route_reports_freshness_false_on_stale_data(
@@ -182,3 +185,34 @@ def test_status_route_reports_freshness_false_on_stale_data(
     body = http_client.get("/status").json()
     assert body["freshness_ok"] is False
     assert body["last_ingest_age_seconds"] > 3 * 300
+
+
+def test_status_route_reports_live_sync_state(http_client: TestClient) -> None:
+    from kernel_lore_mcp.config import Settings
+
+    data_dir = Settings().data_dir
+    state_dir = data_dir / "state"
+    lock_file = (state_dir / "writer.lock").open("w+")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    (state_dir / "sync.json").write_text(
+        """
+        {
+          "active": true,
+          "stage": "bm25_commit",
+          "updated_unix_secs": 2000000000,
+          "started_unix_secs": 1999999940,
+          "workers": 2
+        }
+        """.strip()
+    )
+    status_mod.clear_cache()
+
+    body = http_client.get("/status").json()
+    assert body["writer_lock_present"] is True
+    assert body["sync_active"] is True
+    assert body["sync"]["active"] is True
+    assert body["sync"]["stage"] == "bm25_commit"
+    assert body["sync"]["writer_lock_present"] is True
+    assert body["sync"]["started_utc"].startswith("2033-05-18T03:32:")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    lock_file.close()

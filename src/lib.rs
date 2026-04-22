@@ -52,7 +52,7 @@ mod trigram;
 // Library re-exports for the `kernel-lore-ingest` binary (and any
 // future internal tooling) so they don't have to name the module
 // paths.
-pub use bm25::BmWriter;
+pub use bm25::{BmWriter, BmWriterConfig};
 pub use embedding::{EmbeddingBuilder, EmbeddingMeta, EmbeddingReader};
 pub use git_sidecar::{CommitRecord, GitSidecar, sidecar_path as git_sidecar_path};
 pub use ingest::{

@@ -22,6 +22,7 @@ import structlog
 
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
+from kernel_lore_mcp.health import suggest_retry_after_seconds
 from kernel_lore_mcp.logging_ import profiling_thresholds
 
 log = structlog.get_logger(__name__)
@@ -63,6 +64,11 @@ async def run_with_timeout[T](
     except TimeoutError:
         elapsed = time.monotonic() - started
         record_tool_runtime(tool_name, elapsed, "timeout")
+        retry_after_seconds, server_note = suggest_retry_after_seconds(
+            data_dir=settings.data_dir,
+            timed_out=True,
+            query_wall_clock_ms=ms,
+        )
         log.warning(
             "tool runtime timeout",
             operation=tool_name,
@@ -72,9 +78,12 @@ async def run_with_timeout[T](
         )
         raise LoreError(
             "query_timeout",
-            f"query exceeded the {ms} ms wall-clock cap",
+            (
+                f"query exceeded the {ms} ms wall-clock cap"
+                + (f"; {server_note}" if server_note else "")
+            ),
             echoed_input=echoed_input or {},
-            retry_after_seconds=5,
+            retry_after_seconds=retry_after_seconds,
         ) from None
     except LoreError as exc:
         elapsed = time.monotonic() - started

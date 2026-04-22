@@ -48,6 +48,10 @@ mkdir -p "$KLMCP_DATA_DIR"
     --include '/netdev/*'
 # Drop --include entirely to mirror all 390 shards (will take hours
 # and ~100+ GB of disk on the first run).
+# Keep BM25 deferred on a serving box unless you have measured that the
+# overlap is acceptable. Inline `--with-bm25` is the heavier path;
+# prefer `kernel-lore-ingest --rebuild-bm25` off-peak if prose freshness
+# matters.
 
 # 0A.5b — over.db has already been written incrementally by the
 # sync in 0A.4 (because we passed --with-over). If you skipped that
@@ -63,6 +67,8 @@ mkdir -p "$KLMCP_DATA_DIR"
 # 0A.6 — confirm the index is live (no HTTP needed)
 ./.venv/bin/kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # Expect: {"generation": >= 1, "freshness_ok": true, ...}
+# While a sync is active, status also reports `writer_lock_present`,
+# `sync_active`, and the current sync stage from `state/sync.json`.
 
 # 0A.6b — inspect shard/index health. If a prior run left poisoned shard
 # repos behind, --heal repairs unborn HEADs in place and removes

@@ -10,12 +10,27 @@ Status markers:
 - `[DEFER]` — decided to defer past v1; must have a `--> docs/...`
   pointer explaining why
 
-## Current release track (2026-04-21)
+## Current release track (2026-04-22)
 
-We are working straight to `v0.3.0` now. There is **no standalone
-`0.2.3` release tag** planned, but the would-be `0.2.3` hardening
-line is still tracked separately here because it is the first block
-of work that must land before a public hosted launch.
+`v0.3.0` shipped on 2026-04-21. The active patch line is
+`v0.3.1`: sync-under-load hardening, operator visibility, and release
+cleanup after the first same-box hosted soak on `server6`.
+
+### 0.3.1 target — sync-under-load visibility + safer inline BM25
+
+- [x] `kernel-lore-sync` writes live machine-readable progress under
+  `state/sync.json`, and `/status` + `kernel-lore-mcp status` surface
+  `writer_lock_present`, `sync_active`, and the current sync stage.
+- [x] Sync logs the post-ingest work explicitly:
+  `bm25_commit`, `tid_rebuild`, `path_vocab_rebuild`,
+  `generation_bump`, and `save_manifest` are no longer silent gaps.
+- [x] Inline BM25 is safer-by-default and operator-tunable:
+  default BM25 writer thread count is conservative, and env knobs exist
+  for thread count + memory budget.
+- [x] `rate_limited` / `query_timeout` retry hints are load-aware and
+  rise when a live writer-heavy sync stage is active.
+- [x] The async + multiprocess soak harness used against `server6`
+  lives in-tree and is referenced by the launch docs.
 
 ### 0.2.3 carry-forward — land these in `v0.3.0` first
 

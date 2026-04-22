@@ -116,6 +116,7 @@ async def test_rate_limited_tool_call_records_queue_wait_and_inflight(
     with pytest.raises(LoreError) as exc_info:
         await _invoke_via_middleware()
     assert exc_info.value.code == "rate_limited"
+    assert exc_info.value.retry_after_seconds == 5
 
     body = generate_latest(REGISTRY).decode()
     assert (

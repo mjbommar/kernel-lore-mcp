@@ -109,7 +109,7 @@ const MANIFEST_TIMEOUT_SECS: u64 = 60;
 pub fn fetch_manifest(manifest_url: &str) -> Result<Manifest> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(MANIFEST_TIMEOUT_SECS)))
-        .user_agent(&user_agent())
+        .user_agent(user_agent())
         .build()
         .new_agent();
 

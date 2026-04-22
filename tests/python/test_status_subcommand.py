@@ -43,6 +43,9 @@ def test_status_on_empty_data_dir(tmp_path: Path) -> None:
     assert out["last_ingest_utc"] is None
     assert out["last_ingest_age_seconds"] is None
     assert out["freshness_ok"] is None
+    assert out["writer_lock_present"] is False
+    assert out["sync_active"] is False
+    assert out["sync"] is None
     assert "note" in out
 
 
@@ -67,6 +70,8 @@ def test_status_after_real_ingest(tmp_path: Path) -> None:
     assert out["last_ingest_age_seconds"] >= 0
     assert out["last_ingest_age_seconds"] < 120
     assert out["freshness_ok"] is True
+    assert out["writer_lock_present"] is False
+    assert out["sync_active"] is False
 
 
 def test_status_reports_stale_after_backdated_mtime(tmp_path: Path) -> None:

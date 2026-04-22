@@ -71,6 +71,11 @@ def test_invalid_argument_includes_reason_and_example() -> None:
     assert "Example:" in str(err)
 
 
+def test_lore_error_formats_retry_after() -> None:
+    err = LoreError("rate_limited", "busy", retry_after_seconds=7)
+    assert "Retry after 7s." in str(err)
+
+
 @pytest.mark.asyncio
 async def test_live_tool_error_carries_structured_code() -> None:
     """End-to-end: a bad field name produces a LoreError, and the

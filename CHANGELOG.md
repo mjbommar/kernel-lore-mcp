@@ -10,6 +10,40 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-04-22
+
+### Added
+
+- `/status` and `kernel-lore-mcp status` now surface live writer state:
+  `writer_lock_present`, `sync_active`, and a `sync` block populated
+  from `kernel-lore-sync`'s machine-readable heartbeat file.
+- Added `kernel_lore_mcp_writer_lock_present` and
+  `kernel_lore_mcp_sync_active` gauges to `/metrics`.
+- Added `scripts/bench/stress_mcp_multiprocess.py`, the async +
+  multiprocess soak harness used to pressure-test a hosted box over a
+  longer run.
+
+### Changed
+
+- `kernel-lore-sync` now writes `state/sync.json` while it runs and
+  emits explicit operator-facing stage logs for `bm25_commit`,
+  `tid_rebuild`, `path_vocab_rebuild`, `generation_bump`, and
+  `save_manifest`.
+- Inline BM25 uses conservative explicit writer defaults instead of
+  Tantivy's auto-thread selection. New env knobs:
+  `KLMCP_BM25_WRITER_THREADS` and `KLMCP_BM25_WRITER_MEMORY_MB`.
+- `rate_limited` and `query_timeout` now return load-aware in-band
+  retry hints. Retry guidance rises when a writer-heavy sync stage is
+  active on the same box.
+
+### Fixed
+
+- Writer activity detection no longer confuses “lockfile exists” with
+  “writer lock is actively held”; status probes now test the live flock
+  state.
+- The “ingest phase done, then silence for minutes” sync log shape is
+  gone; BM25 finalization is visible instead of looking hung.
+
 ## [0.3.0] — 2026-04-21
 
 ### Added

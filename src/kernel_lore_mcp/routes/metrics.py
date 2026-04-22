@@ -10,6 +10,8 @@ Current surface:
     to tool admission (captures pre-tool overhead and fast-reject saturation)
   * `kernel_lore_mcp_tool_inflight{cost_class}` — current in-flight calls per cost class
   * `kernel_lore_mcp_index_generation` — gauge mirroring `/status.generation`
+  * `kernel_lore_mcp_writer_lock_present` / `kernel_lore_mcp_sync_active`
+    — coarse writer/sync pressure signals from `/status`
 
 Bind localhost-only by default. Exposed via `@mcp.custom_route`.
 """
@@ -209,6 +211,18 @@ FRESHNESS_OK = Gauge(
     registry=REGISTRY,
 )
 
+WRITER_LOCK_PRESENT = Gauge(
+    "kernel_lore_mcp_writer_lock_present",
+    "1 when a writer lockfile is present under data_dir/state, 0 otherwise.",
+    registry=REGISTRY,
+)
+
+SYNC_ACTIVE = Gauge(
+    "kernel_lore_mcp_sync_active",
+    "1 when kernel-lore-sync reports an active run, 0 otherwise.",
+    registry=REGISTRY,
+)
+
 
 async def metrics_endpoint(request: Request) -> Response:
     from kernel_lore_mcp.cost_class import current_inflight
@@ -222,5 +236,7 @@ async def metrics_endpoint(request: Request) -> Response:
     CONFIGURED_INTERVAL.set(status.get("configured_interval_seconds", 0))
     ok = status.get("freshness_ok")
     FRESHNESS_OK.set(1 if ok is True else (0 if ok is False else -1))
+    WRITER_LOCK_PRESENT.set(1 if status.get("writer_lock_present") else 0)
+    SYNC_ACTIVE.set(1 if status.get("sync_active") else 0)
     body = generate_latest(REGISTRY)
     return Response(content=body, media_type=CONTENT_TYPE_LATEST)

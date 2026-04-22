@@ -61,6 +61,21 @@ Pass criteria:
   histogram summaries so we can distinguish queueing from tool-body
   work.
 
+For a longer soak on a live box, also run:
+
+```sh
+uv run python scripts/bench/stress_mcp_multiprocess.py \
+    --base-url http://127.0.0.1:8080 \
+    --scenario mixed_hot \
+    --processes 4 \
+    --concurrency-per-process 16 \
+    --duration-seconds 600 \
+    --json-out /tmp/klmcp-soak.json
+```
+
+Use this when you want the “can we make it ugly over 10 minutes?”
+answer, not just the short adversarial gate.
+
 ## 5. Operator-log readability
 
 - Hosted default logs are readable without hand-filtering.

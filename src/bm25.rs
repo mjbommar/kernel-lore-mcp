@@ -28,6 +28,7 @@
 
 #![allow(dead_code)]
 
+use std::env;
 use std::path::{Path, PathBuf};
 
 use tantivy::Index;
@@ -43,6 +44,9 @@ use crate::error::{Error, Result};
 
 pub const KERNEL_PROSE: &str = "kernel_prose";
 pub const RAW_LC: &str = "raw_lc";
+pub const DEFAULT_BM25_WRITER_THREADS: usize = 1;
+pub const DEFAULT_BM25_WRITER_MEMORY_MB: usize = 128;
+const MIB: usize = 1024 * 1024;
 
 // --------------------------------------------------------------------
 // Custom tokenizer: scan [A-Za-z0-9_]+ runs.
@@ -187,12 +191,40 @@ pub struct BmWriter {
     _index: Index,
     writer: IndexWriter,
     schema: BmSchema,
+    config: BmWriterConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BmWriterConfig {
+    pub num_threads: usize,
+    pub memory_budget_bytes: usize,
+}
+
+impl BmWriterConfig {
+    pub fn from_env() -> Result<Self> {
+        let num_threads = read_env_usize("KLMCP_BM25_WRITER_THREADS", DEFAULT_BM25_WRITER_THREADS)?;
+        let memory_budget_mb =
+            read_env_usize("KLMCP_BM25_WRITER_MEMORY_MB", DEFAULT_BM25_WRITER_MEMORY_MB)?;
+        Ok(Self {
+            num_threads,
+            memory_budget_bytes: memory_budget_mb.saturating_mul(MIB),
+        })
+    }
+
+    pub fn memory_budget_mb(self) -> usize {
+        self.memory_budget_bytes / MIB
+    }
 }
 
 impl BmWriter {
     /// Open (or create) the single BM25 index under
     /// `<data_dir>/bm25/`. Requires the writer flock held externally.
     pub fn open(data_dir: &Path) -> Result<Self> {
+        let config = BmWriterConfig::from_env()?;
+        Self::open_with_config(data_dir, config)
+    }
+
+    pub fn open_with_config(data_dir: &Path, config: BmWriterConfig) -> Result<Self> {
         let dir = data_dir.join("bm25");
         std::fs::create_dir_all(&dir)?;
         let mmap = MmapDirectory::open(&dir)
@@ -202,18 +234,22 @@ impl BmWriter {
         let index = Index::open_or_create(mmap, schema)?;
         register_analyzers(&index);
 
-        // 128 MiB is plenty for the per-shard batch sizes we see in
-        // tests; the CLI binary can override via env later.
-        let writer = index.writer(128 * 1024 * 1024)?;
+        let writer =
+            index.writer_with_num_threads(config.num_threads, config.memory_budget_bytes)?;
         Ok(Self {
             _index: index,
             writer,
             schema: bm,
+            config,
         })
     }
 
     pub fn schema(&self) -> BmSchema {
         self.schema
+    }
+
+    pub fn config(&self) -> BmWriterConfig {
+        self.config
     }
 
     pub fn add(
@@ -396,6 +432,19 @@ impl BmReader {
 
 pub fn bm25_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("bm25")
+}
+
+fn read_env_usize(name: &str, default: usize) -> Result<usize> {
+    let Some(raw) = env::var(name).ok() else {
+        return Ok(default);
+    };
+    let value = raw
+        .parse::<usize>()
+        .map_err(|e| Error::State(format!("{name} parse: {e}")))?;
+    if value == 0 {
+        return Err(Error::State(format!("{name} must be >= 1")));
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

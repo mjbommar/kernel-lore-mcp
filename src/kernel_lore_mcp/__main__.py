@@ -28,6 +28,7 @@ from pathlib import Path
 import structlog
 
 from kernel_lore_mcp import __version__
+from kernel_lore_mcp.health import read_sync_state, writer_lock_present
 from kernel_lore_mcp.logging_ import configure as configure_logging
 from kernel_lore_mcp.logging_ import profiling_thresholds
 
@@ -153,6 +154,8 @@ def _run_status(args: argparse.Namespace) -> int:
 
     data_dir = Path(args.data_dir) if args.data_dir else Settings().data_dir
     gen_file = data_dir / "state" / "generation"
+    sync = read_sync_state(data_dir)
+    writer_active = writer_lock_present(data_dir)
 
     if not gen_file.exists():
         out = {
@@ -163,6 +166,9 @@ def _run_status(args: argparse.Namespace) -> int:
             "last_ingest_age_seconds": None,
             "configured_interval_seconds": Settings().grokmirror_interval_seconds,
             "freshness_ok": None,
+            "writer_lock_present": writer_active,
+            "sync_active": bool(sync and sync.get("active")),
+            "sync": sync,
             "note": "no ingest has run against this data_dir yet",
         }
         json.dump(out, sys.stdout)
@@ -185,6 +191,9 @@ def _run_status(args: argparse.Namespace) -> int:
         "last_ingest_age_seconds": age,
         "configured_interval_seconds": interval,
         "freshness_ok": age < 3 * interval,
+        "writer_lock_present": writer_active,
+        "sync_active": bool(sync and sync.get("active")),
+        "sync": sync,
     }
     json.dump(out, sys.stdout)
     sys.stdout.write("\n")

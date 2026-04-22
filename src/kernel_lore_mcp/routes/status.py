@@ -25,6 +25,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from kernel_lore_mcp.config import Settings
+from kernel_lore_mcp.health import read_sync_state, writer_lock_present
 
 # Cache keyed by data_dir so multi-config / test embedding doesn't
 # cross-contaminate. TTL from settings.freshness_cache_ttl_seconds.
@@ -69,6 +70,8 @@ def _build_status(settings: Settings) -> dict[str, Any]:
     data_dir = settings.data_dir
     generation, last_ingest = _read_generation(data_dir)
     per_list = _per_list_shards(data_dir)
+    writer_lock = writer_lock_present(data_dir)
+    sync = read_sync_state(data_dir)
 
     interval = settings.grokmirror_interval_seconds
     last_ingest_age_seconds: int | None = None
@@ -90,6 +93,9 @@ def _build_status(settings: Settings) -> dict[str, Any]:
         "last_ingest_age_seconds": last_ingest_age_seconds,
         "configured_interval_seconds": interval,
         "freshness_ok": freshness_ok,
+        "writer_lock_present": writer_lock,
+        "sync_active": bool(sync and sync.get("active")),
+        "sync": sync,
         "per_list": per_list,
         "capabilities": capabilities(data_dir),
         "blind_spots_ref": "blind-spots://coverage",
@@ -166,9 +172,11 @@ def get_status(settings: Settings | None = None) -> dict[str, Any]:
     cache_key = str(settings.data_dir)
     ttl = settings.freshness_cache_ttl_seconds
     now = time.monotonic()
+    live_writer = writer_lock_present(settings.data_dir)
+    effective_ttl = min(ttl, 1) if live_writer else ttl
     if cache_key in _cache:
         cached_at, body = _cache[cache_key]
-        if now - cached_at < ttl:
+        if now - cached_at < effective_ttl:
             return body
     body = _build_status(settings)
     _cache[cache_key] = (now, body)

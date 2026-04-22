@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use serde::Serialize;
 
 use _core::sync::{
     DEFAULT_MANIFEST_URL, FetchOutcome, diff_manifest, fetch_manifest, fetch_shard,
@@ -113,6 +114,150 @@ struct PhaseHeartbeat {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SyncStatusRecord {
+    version: String,
+    run_id: String,
+    active: bool,
+    stage: String,
+    with_bm25: bool,
+    with_over: bool,
+    workers: usize,
+    total_shards: usize,
+    started_shards: usize,
+    completed_shards: usize,
+    succeeded_shards: usize,
+    failed_shards: usize,
+    in_flight_shards: usize,
+    elapsed_secs: f64,
+    process_rss_mb: Option<u64>,
+    memory_available_mb: Option<u64>,
+    memory_total_mb: Option<u64>,
+    started_unix_secs: u64,
+    updated_unix_secs: u64,
+    note: Option<String>,
+}
+
+#[derive(Clone)]
+struct SyncStateReporter {
+    path: PathBuf,
+    inner: std::sync::Arc<Mutex<SyncStatusRecord>>,
+}
+
+struct SyncStateCleaner {
+    reporter: SyncStateReporter,
+}
+
+impl SyncStateReporter {
+    fn start(
+        data_dir: &Path,
+        run_id: &str,
+        with_bm25: bool,
+        with_over: bool,
+        workers: usize,
+        total_shards: usize,
+    ) -> Result<Self> {
+        let started_unix_secs = current_unix_secs();
+        let path = data_dir.join("state").join("sync.json");
+        let reporter = Self {
+            path,
+            inner: std::sync::Arc::new(Mutex::new(SyncStatusRecord {
+                version: SYNC_VERSION.to_string(),
+                run_id: run_id.to_string(),
+                active: true,
+                stage: "starting".to_string(),
+                with_bm25,
+                with_over,
+                workers,
+                total_shards,
+                started_shards: 0,
+                completed_shards: 0,
+                succeeded_shards: 0,
+                failed_shards: 0,
+                in_flight_shards: 0,
+                elapsed_secs: 0.0,
+                process_rss_mb: None,
+                memory_available_mb: None,
+                memory_total_mb: None,
+                started_unix_secs,
+                updated_unix_secs: started_unix_secs,
+                note: None,
+            })),
+        };
+        reporter.flush()?;
+        Ok(reporter)
+    }
+
+    fn set_stage(&self, stage: &str, note: Option<String>) -> Result<()> {
+        self.update(|status| {
+            status.stage = stage.to_string();
+            status.note = note;
+        })
+    }
+
+    fn set_phase_progress(
+        &self,
+        stage: &str,
+        snap: &PhaseSnapshot,
+        elapsed_secs: f64,
+        memory: MemorySnapshot,
+    ) -> Result<()> {
+        self.update(|status| {
+            status.stage = stage.to_string();
+            status.started_shards = snap.started;
+            status.completed_shards = snap.completed;
+            status.succeeded_shards = snap.succeeded;
+            status.failed_shards = snap.failed;
+            status.in_flight_shards = snap.started.saturating_sub(snap.completed);
+            status.elapsed_secs = elapsed_secs;
+            status.process_rss_mb = memory.process_rss_bytes.map(bytes_to_mib);
+            status.memory_available_mb = memory.available_bytes.map(bytes_to_mib);
+            status.memory_total_mb = memory.total_bytes.map(bytes_to_mib);
+        })
+    }
+
+    fn clear(&self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+
+    fn update<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut SyncStatusRecord),
+    {
+        {
+            let mut status = self
+                .inner
+                .lock()
+                .map_err(|_| anyhow!("sync status mutex poisoned"))?;
+            f(&mut status);
+            status.updated_unix_secs = current_unix_secs();
+        }
+        self.flush()
+    }
+
+    fn flush(&self) -> Result<()> {
+        let status = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("sync status mutex poisoned"))?
+            .clone();
+        let bytes = serde_json::to_vec_pretty(&status).context("serialize sync status")?;
+        atomic_write_bytes(&self.path, &bytes)
+    }
+}
+
+impl SyncStateCleaner {
+    fn new(reporter: SyncStateReporter) -> Self {
+        Self { reporter }
+    }
+}
+
+impl Drop for SyncStateCleaner {
+    fn drop(&mut self) {
+        self.reporter.clear();
+    }
+}
+
 impl PhaseTracker {
     fn new(stage: &'static str, total: usize, memory_policy: MemoryPolicy) -> Self {
         Self {
@@ -126,7 +271,7 @@ impl PhaseTracker {
         }
     }
 
-    fn heartbeat(&self) -> PhaseHeartbeat {
+    fn heartbeat(&self, sync_state: Option<SyncStateReporter>) -> PhaseHeartbeat {
         let tracker = self.clone();
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let stop_for_thread = std::sync::Arc::clone(&stop);
@@ -142,7 +287,7 @@ impl PhaseTracker {
                     break;
                 }
                 let elapsed_secs = start.elapsed().as_secs_f64();
-                log_phase_progress(&tracker, &snap, elapsed_secs);
+                log_phase_progress(&tracker, &snap, elapsed_secs, sync_state.as_ref());
             }
         });
         PhaseHeartbeat {
@@ -292,6 +437,29 @@ fn main() -> Result<()> {
         .context("another writer is running (writer.lock held)")?;
     tracing::info!("writer lock acquired");
 
+    let run_id = args.run_id.unwrap_or_else(|| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        format!("sync-{now}")
+    });
+
+    let skip_bm25 = !args.with_bm25;
+    if skip_bm25 {
+        tracing::info!(
+            "BM25 deferred (default). Run `kernel-lore-ingest --rebuild-bm25` after sync if needed."
+        );
+    }
+
+    let over_path = data_dir.join("over.db");
+    let with_over = match (args.with_over, args.no_over) {
+        (true, true) => anyhow::bail!("--with-over and --no-over are mutually exclusive"),
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => over_path.exists(),
+    };
+
     // Resolve manifest paths to ChangedShard descriptors.
     let changed: Vec<ChangedShard> = changed_paths
         .iter()
@@ -303,6 +471,19 @@ fn main() -> Result<()> {
             "some manifest paths were unparseable; skipping those shards"
         );
     }
+    let sync_state = SyncStateReporter::start(
+        &data_dir,
+        &run_id,
+        !skip_bm25,
+        with_over,
+        workers,
+        changed.len(),
+    )
+    .context("create sync status reporter")?;
+    let _sync_state_cleaner = SyncStateCleaner::new(sync_state.clone());
+    sync_state
+        .set_stage("fetch", None)
+        .context("write initial sync status")?;
     tracing::info!(
         shards = changed.len(),
         workers = workers,
@@ -315,7 +496,7 @@ fn main() -> Result<()> {
     // is lore's not ours.
     let fetch_phase_start = Instant::now();
     let fetch_tracker = PhaseTracker::new("fetch", changed.len(), worker_plan.memory_policy);
-    let fetch_heartbeat = fetch_tracker.heartbeat();
+    let fetch_heartbeat = fetch_tracker.heartbeat(Some(sync_state.clone()));
     let fetch_results: Vec<Result<FetchOutcome, String>> = worker_pool.install(|| {
         changed
             .par_iter()
@@ -373,39 +554,24 @@ fn main() -> Result<()> {
 
     if fetched_ok.is_empty() {
         tracing::warn!("no shards fetched successfully; skipping ingest");
+        sync_state.clear();
         std::process::exit(if fetch_failed.is_empty() { 0 } else { 2 });
     }
 
     // Step 4: orchestrate ingest over successfully-fetched shards.
     // Mirrors bin/ingest.rs's orchestration but scoped to the changed
     // subset — no whole-corpus rescan per sync tick.
-    let run_id = args.run_id.unwrap_or_else(|| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        format!("sync-{now}")
-    });
-
-    let skip_bm25 = !args.with_bm25;
-    if skip_bm25 {
-        tracing::info!(
-            "BM25 deferred (default). Run `kernel-lore-ingest --rebuild-bm25` after sync if needed."
-        );
-    }
-
-    let over_path = data_dir.join("over.db");
-    let with_over = match (args.with_over, args.no_over) {
-        (true, true) => anyhow::bail!("--with-over and --no-over are mutually exclusive"),
-        (true, false) => true,
-        (false, true) => false,
-        (false, false) => over_path.exists(),
-    };
-
+    let mut bm25_config: Option<_core::BmWriterConfig> = None;
     let bm25 = if !skip_bm25 {
-        Some(Mutex::new(
-            _core::BmWriter::open(&data_dir).context("open BM25 writer")?,
-        ))
+        let writer = _core::BmWriter::open(&data_dir).context("open BM25 writer")?;
+        let config = writer.config();
+        tracing::warn!(
+            bm25_writer_threads = config.num_threads,
+            bm25_memory_budget_mb = config.memory_budget_mb(),
+            "inline BM25 enabled; prefer deferred `kernel-lore-ingest --rebuild-bm25` on serving hosts"
+        );
+        bm25_config = Some(config);
+        Some(Mutex::new(writer))
     } else {
         None
     };
@@ -431,6 +597,16 @@ fn main() -> Result<()> {
     }
 
     let max_retries = args.max_retries;
+    sync_state
+        .set_stage(
+            "ingest",
+            if skip_bm25 {
+                Some("BM25 deferred for this run".to_string())
+            } else {
+                None
+            },
+        )
+        .context("update sync status to ingest")?;
     tracing::info!(
         shards = fetched_ok.len(),
         lists = stores.len(),
@@ -441,7 +617,7 @@ fn main() -> Result<()> {
     );
     let ingest_phase_start = Instant::now();
     let ingest_tracker = PhaseTracker::new("ingest", fetched_ok.len(), worker_plan.memory_policy);
-    let ingest_heartbeat = ingest_tracker.heartbeat();
+    let ingest_heartbeat = ingest_tracker.heartbeat(Some(sync_state.clone()));
     let ingest_results: Vec<(&ChangedShard, Result<_core::IngestStats>, f64)> = worker_pool
         .install(|| {
             fetched_ok
@@ -510,20 +686,56 @@ fn main() -> Result<()> {
 
     // Commit BM25 once, after all shards finish.
     if let Some(ref bm25_mutex) = bm25 {
+        let memory = current_memory_snapshot();
+        let config = bm25_config.expect("bm25 config must exist when writer exists");
+        sync_state
+            .set_stage(
+                "bm25_commit",
+                Some(format!(
+                    "threads={} memory_budget_mb={}",
+                    config.num_threads,
+                    config.memory_budget_mb()
+                )),
+            )
+            .context("update sync status to bm25_commit")?;
+        tracing::info!(
+            bm25_writer_threads = config.num_threads,
+            bm25_memory_budget_mb = config.memory_budget_mb(),
+            process_rss_mb = ?memory.process_rss_bytes.map(bytes_to_mib),
+            memory_available_mb = ?memory.available_bytes.map(bytes_to_mib),
+            memory_total_mb = ?memory.total_bytes.map(bytes_to_mib),
+            "bm25 commit starting"
+        );
         let mut w = bm25_mutex
             .lock()
             .map_err(|_| anyhow!("bm25 writer mutex poisoned"))?;
-        w.commit().context("bm25 commit")?;
+        let opstamp = w.commit().context("bm25 commit")?;
+        let memory = current_memory_snapshot();
+        tracing::info!(
+            opstamp = opstamp,
+            process_rss_mb = ?memory.process_rss_bytes.map(bytes_to_mib),
+            memory_available_mb = ?memory.available_bytes.map(bytes_to_mib),
+            memory_total_mb = ?memory.total_bytes.map(bytes_to_mib),
+            "bm25 commit done"
+        );
     }
 
     // tid rebuild: reasonable to do every sync tick; touches only the
     // subset of rows whose tid changed. Cheap at steady state.
+    sync_state
+        .set_stage("tid_rebuild", None)
+        .context("update sync status to tid_rebuild")?;
+    tracing::info!("tid rebuild starting");
     let tid_result = _core::rebuild_tid(&data_dir).context("rebuild tid side-table")?;
     tracing::info!(
         rows = tid_result.1,
         path = %tid_result.0.display(),
         "tid rebuild done"
     );
+    sync_state
+        .set_stage("path_vocab_rebuild", None)
+        .context("update sync status to path_vocab_rebuild")?;
+    tracing::info!("path vocab rebuild starting");
     if let Some(path_count) = rebuild_path_vocab_after_sync(&data_dir)? {
         tracing::info!(
             paths = path_count,
@@ -573,6 +785,10 @@ fn main() -> Result<()> {
         }
     }
 
+    sync_state
+        .set_stage("generation_bump", None)
+        .context("update sync status to generation_bump")?;
+    tracing::info!("generation bump starting");
     let new_gen = state.bump_generation().context("bump generation")?;
     tracing::info!(generation = new_gen, "generation bumped");
 
@@ -605,6 +821,10 @@ fn main() -> Result<()> {
     // the paths that both fetched AND ingested successfully this run.
     // Fetch-failed or ingest-failed shards keep their old (or absent)
     // cache entry so the next sync re-tries them.
+    sync_state
+        .set_stage("save_manifest", None)
+        .context("update sync status to save_manifest")?;
+    tracing::info!("manifest cache save starting");
     let mut updated_local = local;
     for path in &successful_paths {
         if let Some(entry) = remote.get(*path) {
@@ -612,6 +832,7 @@ fn main() -> Result<()> {
         }
     }
     save_local_manifest(&data_dir, &updated_local).context("save manifest cache")?;
+    tracing::info!("manifest cache save done");
 
     tracing::info!(
         elapsed_secs = start.elapsed().as_secs_f64(),
@@ -626,6 +847,7 @@ fn main() -> Result<()> {
     );
 
     if total_failed > 0 || !fetch_failed.is_empty() || total_over_failed > 0 {
+        sync_state.clear();
         std::process::exit(2);
     }
     Ok(())
@@ -737,7 +959,9 @@ fn parse_args() -> Result<Args> {
                      --include PATTERN     fnmatch; repeatable (default: all)\n\
                      --exclude PATTERN     fnmatch; repeatable\n\
                      --run-id STRING       stable id for this run\n\
-                     --with-bm25           build BM25 inline\n\
+                     --with-bm25           build BM25 inline (heavier;\n\
+                                           prefer deferred rebuild on\n\
+                                           serving hosts)\n\
                      --with-over           force on over.db writes\n\
                      --no-over             force off over.db writes\n\
                                            (default: on iff <data_dir>/over.db exists)\n\
@@ -749,6 +973,10 @@ fn parse_args() -> Result<Args> {
                                                   (default: 8192)\n\
                      KLMCP_SYNC_MEMORY_RESERVE_MB keep this much RAM free\n\
                                                   (default: 4096)\n\
+                     KLMCP_BM25_WRITER_THREADS   BM25 indexing worker threads\n\
+                                                  (default: 1)\n\
+                     KLMCP_BM25_WRITER_MEMORY_MB BM25 total writer memory budget\n\
+                                                  in MiB (default: 128)\n\
                      KLMCP_SKIP_PATH_VOCAB=1     skip automatic paths/vocab.txt rebuild\n"
                 );
                 std::process::exit(0);
@@ -866,7 +1094,36 @@ fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / MIB
 }
 
-fn log_phase_progress(tracker: &PhaseTracker, snap: &PhaseSnapshot, elapsed_secs: f64) {
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn atomic_write_bytes(final_path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| anyhow!("no parent dir for {}", final_path.display()))?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.tmp",
+        final_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("sync")
+    ));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, final_path)?;
+    Ok(())
+}
+
+fn log_phase_progress(
+    tracker: &PhaseTracker,
+    snap: &PhaseSnapshot,
+    elapsed_secs: f64,
+    sync_state: Option<&SyncStateReporter>,
+) {
     let memory = current_memory_snapshot();
     tracing::info!(
         stage = tracker.stage,
@@ -882,6 +1139,11 @@ fn log_phase_progress(tracker: &PhaseTracker, snap: &PhaseSnapshot, elapsed_secs
         memory_total_mb = ?memory.total_bytes.map(bytes_to_mib),
         "progress"
     );
+    if let Some(sync_state) = sync_state {
+        if let Err(e) = sync_state.set_phase_progress(tracker.stage, snap, elapsed_secs, memory) {
+            tracing::warn!(stage = tracker.stage, error = %e, "failed to write sync status");
+        }
+    }
     if let Some(available_bytes) = memory.available_bytes {
         if available_bytes < tracker.memory_policy.reserve_bytes {
             tracing::warn!(
@@ -966,7 +1228,13 @@ mod tests {
             fs::remove_dir_all(shard_dir).unwrap();
         }
         let out = Command::new("git")
-            .args(["clone", "--bare", "-q", work.to_str().unwrap(), shard_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                "--bare",
+                "-q",
+                work.to_str().unwrap(),
+                shard_dir.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
         assert!(

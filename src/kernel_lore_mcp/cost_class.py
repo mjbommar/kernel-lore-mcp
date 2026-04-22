@@ -41,6 +41,7 @@ import structlog
 
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
+from kernel_lore_mcp.health import suggest_retry_after_seconds
 from kernel_lore_mcp.logging_ import profiling_thresholds
 
 CostClass = Literal["cheap", "moderate", "expensive"]
@@ -97,14 +98,22 @@ def current_inflight(cost: CostClass) -> int:
 
 
 def _rate_limited(cost: CostClass, tool_name: str) -> LoreError:
+    settings = get_settings()
+    retry_after_seconds, server_note = suggest_retry_after_seconds(
+        data_dir=settings.data_dir,
+        cost_class=cost,
+    )
+    message = (
+        f"server is at capacity for `{cost}` tools "
+        f"({_LIMITS[cost]} concurrent max). `{tool_name}` was "
+        f"rejected to protect the worker pool from saturation."
+    )
+    if server_note:
+        message = f"{message} {server_note}."
     return LoreError(
         "rate_limited",
-        (
-            f"server is at capacity for `{cost}` tools "
-            f"({_LIMITS[cost]} concurrent max). `{tool_name}` was "
-            f"rejected to protect the worker pool from saturation."
-        ),
-        retry_after_seconds=5,
+        message,
+        retry_after_seconds=retry_after_seconds,
         echoed_input={"cost_class": cost, "tool": tool_name},
     )
 

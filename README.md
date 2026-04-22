@@ -43,21 +43,19 @@ kernel-lore-sync \
     --include '/wireguard/*' --include '/linux-cifs/*'
 # Drop --include to mirror all ~390 lists. Plan the disk + time.
 
-# 3. (optional, recommended) build the path-mention index. Tiny, fast.
-python -c 'from kernel_lore_mcp import _core; \
-           print(_core.rebuild_path_vocab("'"$KLMCP_DATA_DIR"'"))'
-
-# 4. confirm freshness + which capabilities are provisioned
+# 3. confirm freshness + which capabilities are provisioned
 kernel-lore-mcp status --data-dir "$KLMCP_DATA_DIR"
 # Look at `capabilities`: each over_db / bm25 / path_vocab / embedding /
 # maintainers / git_sidecar boolean tells you which tools will actually
-# return data on this deployment.
+# return data on this deployment. While a sync is active, the same
+# status output also shows `writer_lock_present`, `sync_active`, and
+# the current sync stage.
 
-# 4b. inspect shard/index health; add --heal to repair unborn shard HEADs
+# 3b. inspect shard/index health; add --heal to repair unborn shard HEADs
 #     and remove unrecoverable shard repos so the next sync reclones them
 kernel-lore-doctor --data-dir "$KLMCP_DATA_DIR"
 
-# 5. verify the MCP surface — zero API cost
+# 4. verify the MCP surface — zero API cost
 git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp && ./scripts/agentic_smoke.sh local
 # PASS: 7/7 tools, 5/5 resource templates, 5/5 prompts (the
@@ -113,15 +111,13 @@ Want production-grade systemd deployment (single `klmcp-sync.timer`
 replacing the pre-v0.2.0 grokmirror + ingest pair)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
-## Status — v0.3.0 (2026-04-21)
+## Status — v0.3.1 (2026-04-22)
 
-Current release: the hosted-readiness line that would previously have
-been cut as `0.2.3` now lands in `v0.3.0`. The main additions on top of
-`0.2.2` are: sync self-healing for poisoned shard repos, hosted-mode
-regex gating, generation-bound `lore_corpus_stats` caching, automatic
-path-vocab rebuild during sync, explicit `local`/`hosted` deployment
-profiles, structured slow-path profiling logs, and a repeatable
-HTTP/MCP adversarial-load harness plus public-launch checklist.
+Current release: `v0.3.1`, the first patch line after the hosted
+readiness release. The focus is same-box sync visibility and safer
+inline BM25 behavior: live sync state in `/status`, explicit
+post-ingest stage logs, conservative BM25 writer defaults, and
+load-aware retry hints when writer-heavy work is active.
 
 Shipped:
 

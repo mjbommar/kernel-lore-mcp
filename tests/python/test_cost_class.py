@@ -5,6 +5,8 @@ cap + structured rate_limited rejection.
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import json
 
 import pytest
 
@@ -103,6 +105,7 @@ async def test_cost_limited_rejects_over_capacity(monkeypatch) -> None:
     msg = str(exc_info.value)
     assert "rate_limited" in msg
     assert "moderate" in msg
+    assert "Retry after 5s." in msg
 
     # Let the slow calls complete so the test tears down cleanly.
     gate.set()
@@ -133,3 +136,53 @@ async def test_cost_limited_releases_on_exception(monkeypatch) -> None:
     # A second call must still acquire.
     with pytest.raises(ValueError):
         await wrapped()
+
+
+@pytest.mark.asyncio
+async def test_cost_limited_retry_after_rises_during_active_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    lock_file = (state / "writer.lock").open("w+")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    (state / "sync.json").write_text(
+        json.dumps(
+            {
+                "active": True,
+                "stage": "bm25_commit",
+                "updated_unix_secs": 2_000_000_000,
+                "started_unix_secs": 1_999_999_940,
+            }
+        )
+    )
+    monkeypatch.setenv("KLMCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setitem(cost_class._LIMITS, "moderate", 1)
+    monkeypatch.setitem(
+        cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(1)
+    )
+
+    gate = asyncio.Event()
+
+    async def _slow():
+        """Placeholder.
+
+        Cost: moderate — expected p95 100 ms.
+        """
+        await gate.wait()
+        return "ok"
+
+    wrapped = cost_class.cost_limited(_slow)
+    first = asyncio.create_task(wrapped())
+    await asyncio.sleep(0.01)
+
+    with pytest.raises(LoreError) as exc_info:
+        await wrapped()
+    assert "bm25_commit" in str(exc_info.value)
+    assert "Retry after 20s." in str(exc_info.value)
+
+    gate.set()
+    await first
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    lock_file.close()
