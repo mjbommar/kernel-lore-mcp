@@ -10,6 +10,57 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-21
+
+### Added
+
+**Hosted deployment profile + operator profiling.**
+- `kernel-lore-mcp serve` now accepts `--mode local|hosted`, and the
+  chosen runtime posture is logged explicitly at startup along with
+  bind/port, data dir, and the active slow-path thresholds.
+- Python-side hosted logging now emits structured slow-path events for
+  MCP requests, tool calls, inner runtime, and cost-class admission
+  delay, so operators can distinguish queueing from tool-body work
+  during live incidents.
+- New environment knobs:
+  `KLMCP_SLOW_REQUEST_MS`, `KLMCP_SLOW_TOOL_MS`, and
+  `KLMCP_SLOW_QUEUE_WAIT_MS`.
+
+**Repeatable hosted-load gate.**
+- Added `scripts/bench/bench_hosted_adversarial.py`: a real HTTP/MCP
+  harness that boots the server in hosted mode, floods cheap queries,
+  saturates moderate and expensive tools, polls `/status` concurrently,
+  and emits a JSON report comparing client-observed latency with
+  server-side histograms.
+- Wired the harness into CI and added
+  `docs/ops/public-launch-checklist.md` so launch readiness is a
+  repeatable gate, not an operator memory exercise.
+
+### Changed
+
+**The would-be `0.2.3` hosted-hardening line ships here.**
+- `kernel-lore-sync` now self-heals poisoned local shard repos by
+  deleting zero-ref / unopenable repos and recloning them during sync.
+- Hosted `lore_regex` is permanently narrowed to list-scoped,
+  anchored, metadata-only regex shapes; unsafe full-corpus / prose /
+  patch scans now reject fast with `hosted_restriction`.
+- `lore_corpus_stats` is now cached by generation and warmed at server
+  startup so the steady-state path stays off the timeout cliff.
+- Sync rebuilds `paths/vocab.txt` automatically, eliminating the
+  post-sync manual step for `lore_path_mentions`.
+- `/metrics` now records end-to-end request latency, queue-wait, tool
+  latency, and non-`ok` statuses including `rate_limited` even when a
+  call is rejected before the tool body runs.
+
+### Fixed
+
+- Hosted default logs are quiet enough to follow a real incident:
+  third-party INFO chatter is suppressed by default while our own
+  warnings/errors remain visible.
+- The latency gap seen in client stress runs is now measurable rather
+  than anecdotal: the hosted-load harness and the new metrics/logging
+  surface make queueing / transport inflation directly visible.
+
 ## [0.2.2] — 2026-04-21
 
 ### Fixed

@@ -113,13 +113,15 @@ Want production-grade systemd deployment (single `klmcp-sync.timer`
 replacing the pre-v0.2.0 grokmirror + ingest pair)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
-## Status — v0.2.2 (2026-04-21)
+## Status — v0.3.0 (2026-04-21)
 
-Latest patch release: hardens `kernel-lore-sync` for real full-corpus
-bootstrap loads. Sync now chooses a memory-aware worker count, reports
-its RAM budget in startup logs, and emits live RSS / available-memory
-telemetry during fetch and ingest so operators can see pressure before
-the host gets OOM-killed.
+Current release: the hosted-readiness line that would previously have
+been cut as `0.2.3` now lands in `v0.3.0`. The main additions on top of
+`0.2.2` are: sync self-healing for poisoned shard repos, hosted-mode
+regex gating, generation-bound `lore_corpus_stats` caching, automatic
+path-vocab rebuild during sync, explicit `local`/`hosted` deployment
+profiles, structured slow-path profiling logs, and a repeatable
+HTTP/MCP adversarial-load harness plus public-launch checklist.
 
 Shipped:
 
