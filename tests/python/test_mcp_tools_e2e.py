@@ -574,6 +574,17 @@ async def test_lore_search_router_combines_dfb_and_list(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_lore_search_router_accepts_human_since_until_bounds(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_search",
+        {"query": "since:2026-04-14T12:04:00Z until:2026-04-14T12:06:00Z ksmbd"},
+    )
+    data = result.data
+    mids = {hit.message_id for hit in data.results}
+    assert mids == {"m2@x"}
+
+
+@pytest.mark.asyncio
 async def test_lore_search_unknown_predicate_raises(client: Client) -> None:
     from fastmcp.exceptions import ToolError
 

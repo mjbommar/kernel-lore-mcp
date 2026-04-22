@@ -33,6 +33,7 @@ from kernel_lore_mcp.models import (
     ReceivedTrailerStats,
     SubsystemBucket,
 )
+from kernel_lore_mcp.time_bounds import TIME_BOUND_DESCRIPTION, resolve_time_bounds
 from kernel_lore_mcp.timeout import run_with_timeout
 
 
@@ -64,9 +65,21 @@ async def lore_author_profile(
             ),
         ),
     ] = None,
+    since: Annotated[
+        str | None,
+        Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
     since_unix_ns: Annotated[
         int | None,
         Field(description="Lower-bound on message date (ns since epoch)."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None,
+        Field(description="Exclusive upper-bound on message date (ns since epoch)."),
     ] = None,
     limit: Annotated[
         int,
@@ -128,18 +141,27 @@ async def lore_author_profile(
             value=addr,
             example="gregkh@linuxfoundation.org",
         )
-    if include_mentions and list_filter is None and since_unix_ns is None:
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
+    if include_mentions and list_filter is None and resolved_since is None:
         raise invalid_argument(
             name="include_mentions",
             reason=(
                 "unbounded mention scan is not allowed on this server; "
                 "pass either `list_filter` (e.g. list_filter='linux-cifs') "
-                "or `since_unix_ns` (a date lower bound) to narrow"
+                "or `since` / `since_unix_ns` (a date lower bound) to narrow"
             ),
-            value={"include_mentions": True, "list_filter": None, "since_unix_ns": None},
-            example=(
-                '{"include_mentions": true, "list_filter": "linux-cifs"}'
-            ),
+            value={
+                "include_mentions": True,
+                "list_filter": None,
+                "since": since,
+                "since_unix_ns": since_unix_ns,
+            },
+            example=('{"include_mentions": true, "list_filter": "linux-cifs"}'),
         )
 
     from kernel_lore_mcp import _core
@@ -150,7 +172,8 @@ async def lore_author_profile(
         reader.author_profile,
         addr,
         list_filter,
-        since_unix_ns,
+        resolved_since,
+        resolved_until,
         limit,
         include_mentions,
         mention_limit,

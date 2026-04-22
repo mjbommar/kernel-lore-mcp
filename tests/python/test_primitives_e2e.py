@@ -57,6 +57,21 @@ async def test_eq_by_from_addr(client: Client) -> None:
 
 
 @pytest.mark.asyncio
+async def test_eq_accepts_human_time_bounds(client: Client) -> None:
+    result = await client.call_tool(
+        "lore_eq",
+        {
+            "field": "from_addr",
+            "value": "alice@example.com",
+            "since": "2026-04-14T12:04:00Z",
+            "until": "2026-04-14T12:06:00Z",
+        },
+    )
+    mids = {h.message_id for h in result.data.results}
+    assert mids == {"m2@x"}
+
+
+@pytest.mark.asyncio
 async def test_eq_on_touched_file_set_membership(client: Client) -> None:
     result = await client.call_tool(
         "lore_eq",

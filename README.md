@@ -60,7 +60,7 @@ git clone --depth 1 https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp && ./scripts/agentic_smoke.sh local
 # PASS: 7/7 tools, 5/5 resource templates, 5/5 prompts (the
 # `REQUIRED_*` subset from src/kernel_lore_mcp/_surface_manifest.py;
-# the live server registers 24 tools in total).
+# the live server registers 25 tools in total).
 ```
 
 Then pick your agent and copy its snippet from
@@ -111,13 +111,14 @@ Want production-grade systemd deployment (single `klmcp-sync.timer`
 replacing the pre-v0.2.0 grokmirror + ingest pair)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
-## Status — v0.3.1 (2026-04-22)
+## Status — v0.3.2 (2026-04-22)
 
-Current release: `v0.3.1`, the first patch line after the hosted
-readiness release. The focus is same-box sync visibility and safer
-inline BM25 behavior: live sync state in `/status`, explicit
-post-ingest stage logs, conservative BM25 writer defaults, and
-load-aware retry hints when writer-heavy work is active.
+Current release: `v0.3.2`, the follow-on patch after the hosted
+readiness and same-box sync hardening line. The focus is better bug
+workflow ergonomics and safer query scoping: a first-class
+`lore_fix_status` tool, indexed trailer-reference correlation for
+syzbot / lore / `Fixes:` joins, and human-readable `since` / `until`
+bounds across both tools and `lore_search`.
 
 Shipped:
 
@@ -129,7 +130,7 @@ Shipped:
   manifest fetch, gix smart-HTTP clone-or-fetch (rayon-fanned
   across shards), ingest, tid rebuild, generation bump — all
   under one writer lock so there's no trigger/debounce race.
-- Full MCP surface: **24 tools** (search, primitives, sampling-
+- Full MCP surface: **25 tools** (search, primitives, sampling-
   backed summarize/classify/explain, authoritative `merged` /
   `picked_up` verdicts via git-sidecar, `lore_corpus_stats` for
   coverage transparency, `lore_author_footprint` for address-

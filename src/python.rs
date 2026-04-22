@@ -110,6 +110,22 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
     Ok(n)
 }
 
+/// One-off backfill for the normalized trailer-reference side table.
+/// Walks every existing over.db row, decodes its ddd blob, and
+/// materializes normalized lookup keys from {reported_by, fixes,
+/// link, closes} so bug-centric workflows can use indexed joins
+/// instead of trailer substring scans.
+#[pyfunction]
+#[pyo3(name = "backfill_trailer_refs")]
+pub fn py_backfill_trailer_refs(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
+    let n = py.detach(|| -> crate::error::Result<u64> {
+        let over_path = data_dir.join("over.db");
+        let mut db = crate::over::OverDb::open(&over_path)?;
+        db.backfill_trailer_refs()
+    })?;
+    Ok(n)
+}
+
 /// Backfill the denormalized `date_unix_ns` column on the trailer
 /// and touched-file side tables. Needed once on over.db files
 /// built before the #64 composite-index optimization — rows with
@@ -522,13 +538,14 @@ impl PyReader {
         row.map(|r| row_to_pydict(py, &r)).transpose()
     }
 
-    #[pyo3(signature = (file=None, function=None, since_unix_ns=None, list=None, limit=100))]
+    #[pyo3(signature = (file=None, function=None, since_unix_ns=None, until_unix_ns=None, list=None, limit=100))]
     fn activity<'py>(
         &self,
         py: Python<'py>,
         file: Option<String>,
         function: Option<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list: Option<String>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
@@ -538,6 +555,7 @@ impl PyReader {
                 file.as_deref(),
                 function.as_deref(),
                 since_unix_ns,
+                until_unix_ns,
                 list.as_deref(),
                 limit,
             )
@@ -668,13 +686,14 @@ impl PyReader {
     /// touched_files, touched_functions, references, subject_tags,
     /// signed_off_by, reviewed_by, acked_by, tested_by,
     /// co_developed_by, reported_by, fixes, link, closes, cc_stable}.
-    #[pyo3(signature = (field, value, since_unix_ns=None, list=None, limit=100))]
+    #[pyo3(signature = (field, value, since_unix_ns=None, until_unix_ns=None, list=None, limit=100))]
     fn eq<'py>(
         &self,
         py: Python<'py>,
         field: String,
         value: String,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list: Option<String>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
@@ -682,28 +701,41 @@ impl PyReader {
             .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
         let _guard = read_query_guard();
         let rows = py.detach(|| {
-            self.inner
-                .eq(f, &value, since_unix_ns, list.as_deref(), limit)
+            self.inner.eq(
+                f,
+                &value,
+                since_unix_ns,
+                until_unix_ns,
+                list.as_deref(),
+                limit,
+            )
         })?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
 
     /// `WHERE field IN (values)`. Same field set as `eq`.
-    #[pyo3(signature = (field, values, since_unix_ns=None, list=None, limit=100))]
+    #[pyo3(signature = (field, values, since_unix_ns=None, until_unix_ns=None, list=None, limit=100))]
     fn in_list<'py>(
         &self,
         py: Python<'py>,
         field: String,
         values: Vec<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list: Option<String>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let f = EqField::from_name(&field)
             .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
         let rows = py.detach(|| {
-            self.inner
-                .in_list(f, &values, since_unix_ns, list.as_deref(), limit)
+            self.inner.in_list(
+                f,
+                &values,
+                since_unix_ns,
+                until_unix_ns,
+                list.as_deref(),
+                limit,
+            )
         })?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
@@ -711,18 +743,22 @@ impl PyReader {
     /// Aggregate counts over the same predicate as `eq`.
     /// Returns {"count", "distinct_authors", "earliest_unix_ns",
     /// "latest_unix_ns"}.
-    #[pyo3(signature = (field, value, since_unix_ns=None, list=None))]
+    #[pyo3(signature = (field, value, since_unix_ns=None, until_unix_ns=None, list=None))]
     fn count<'py>(
         &self,
         py: Python<'py>,
         field: String,
         value: String,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let f = EqField::from_name(&field)
             .ok_or_else(|| crate::error::Error::QueryParse(format!("unknown field {field:?}")))?;
-        let summary = py.detach(|| self.inner.count(f, &value, since_unix_ns, list.as_deref()))?;
+        let summary = py.detach(|| {
+            self.inner
+                .count(f, &value, since_unix_ns, until_unix_ns, list.as_deref())
+        })?;
         let d = PyDict::new(py);
         d.set_item("count", summary.count)?;
         d.set_item("distinct_authors", summary.distinct_authors)?;
@@ -741,6 +777,7 @@ impl PyReader {
         addr,
         list=None,
         since_unix_ns=None,
+        until_unix_ns=None,
         limit=10_000,
         include_mentions=false,
         mention_limit=2_000,
@@ -751,6 +788,7 @@ impl PyReader {
         addr: String,
         list: Option<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
         include_mentions: bool,
         mention_limit: usize,
@@ -761,6 +799,7 @@ impl PyReader {
                 &addr,
                 list.as_deref(),
                 since_unix_ns,
+                until_unix_ns,
                 limit,
                 include_mentions,
                 mention_limit,
@@ -879,19 +918,25 @@ impl PyReader {
     }
 
     /// Case-insensitive byte substring scan over `subject_raw`.
-    #[pyo3(signature = (needle, list=None, since_unix_ns=None, limit=100))]
+    #[pyo3(signature = (needle, list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
     fn substr_subject<'py>(
         &self,
         py: Python<'py>,
         needle: String,
         list: Option<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let _guard = read_query_guard();
         let rows = py.detach(|| {
-            self.inner
-                .substr_subject(&needle, list.as_deref(), since_unix_ns, limit)
+            self.inner.substr_subject(
+                &needle,
+                list.as_deref(),
+                since_unix_ns,
+                until_unix_ns,
+                limit,
+            )
         })?;
         rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
@@ -899,7 +944,7 @@ impl PyReader {
     /// Substring scan inside one named trailer column. `name` ∈
     /// {fixes, link, closes, cc-stable, signed-off-by, reviewed-by,
     /// acked-by, tested-by, co-developed-by, reported-by}.
-    #[pyo3(signature = (name, value_substring, list=None, since_unix_ns=None, limit=100))]
+    #[pyo3(signature = (name, value_substring, list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
     fn substr_trailers<'py>(
         &self,
         py: Python<'py>,
@@ -907,6 +952,7 @@ impl PyReader {
         value_substring: String,
         list: Option<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let _guard = read_query_guard();
@@ -916,6 +962,7 @@ impl PyReader {
                 &value_substring,
                 list.as_deref(),
                 since_unix_ns,
+                until_unix_ns,
                 limit,
             )
         })?;
@@ -925,7 +972,7 @@ impl PyReader {
     /// DFA-only regex over one of {subject, from_addr, body_prose,
     /// patch}. Patterns with backrefs / lookaround are rejected.
     /// `anchor_required=True` rejects leading `.*` patterns.
-    #[pyo3(signature = (field, pattern, anchor_required=true, list=None, since_unix_ns=None, limit=100))]
+    #[pyo3(signature = (field, pattern, anchor_required=true, list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
     #[allow(clippy::too_many_arguments)]
     fn regex<'py>(
         &self,
@@ -935,6 +982,7 @@ impl PyReader {
         anchor_required: bool,
         list: Option<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let f = RegexField::from_name(&field).ok_or_else(|| {
@@ -950,6 +998,7 @@ impl PyReader {
                 anchor_required,
                 list.as_deref(),
                 since_unix_ns,
+                until_unix_ns,
                 limit,
             )
         })?;
@@ -1085,7 +1134,7 @@ impl PyReader {
     ///
     /// `match_mode`: "exact" | "basename" | "prefix".
     /// Returns a list of row-dicts (same shape as `fetch_message`).
-    #[pyo3(signature = (path, match_mode="exact", list=None, since_unix_ns=None, limit=100))]
+    #[pyo3(signature = (path, match_mode="exact", list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
     fn path_mentions<'py>(
         &self,
         py: Python<'py>,
@@ -1093,6 +1142,7 @@ impl PyReader {
         match_mode: &str,
         list: Option<String>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyDict>>> {
         use crate::path_tier;
@@ -1138,6 +1188,13 @@ impl PyReader {
                             }
                         }
                     }
+                    if let Some(until) = until_unix_ns {
+                        if let Some(d) = row.date_unix_ns {
+                            if d >= until {
+                                return true;
+                            }
+                        }
+                    }
                     let body = match reader.fetch_body(&row.message_id) {
                         Ok(Some(b)) => b,
                         Ok(None) => return true,
@@ -1165,6 +1222,37 @@ impl PyReader {
         rows.iter()
             .map(|r| crate::python::row_to_pydict(py, r))
             .collect()
+    }
+
+    /// Exact lookup over the normalized trailer-reference surface.
+    ///
+    /// `name`: one of {reported_by, fixes, link, closes}
+    /// `ref_kind`: one of {raw_lc, email, sha_prefix, syzbot_hash, lore_mid, url_lc}
+    #[pyo3(signature = (name, ref_kind, ref_value, list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
+    fn trailer_ref_lookup<'py>(
+        &self,
+        py: Python<'py>,
+        name: String,
+        ref_kind: String,
+        ref_value: String,
+        list: Option<String>,
+        since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
+        limit: usize,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let _guard = read_query_guard();
+        let rows = py.detach(|| {
+            self.inner.trailer_ref_lookup(
+                &name,
+                &ref_kind,
+                &ref_value,
+                since_unix_ns,
+                until_unix_ns,
+                list.as_deref(),
+                limit,
+            )
+        })?;
+        rows.iter().map(|r| row_to_pydict(py, r)).collect()
     }
 
     /// Stream every row in the metadata tier through a Python

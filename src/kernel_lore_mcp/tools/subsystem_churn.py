@@ -152,10 +152,7 @@ async def lore_subsystem_churn(
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
 
-    since_ns = int(
-        (datetime.now(tz=UTC) - timedelta(days=window_days)).timestamp()
-        * 1_000_000_000
-    )
+    since_ns = int((datetime.now(tz=UTC) - timedelta(days=window_days)).timestamp() * 1_000_000_000)
 
     if kind == "list":
         rows = await run_with_timeout(
@@ -163,6 +160,7 @@ async def lore_subsystem_churn(
             "list",
             value,
             since_ns,
+            None,
             None,
             sample_limit,
         )
@@ -172,6 +170,7 @@ async def lore_subsystem_churn(
             value,
             None,
             since_ns,
+            None,
             None,
             sample_limit,
         )
@@ -201,9 +200,7 @@ async def lore_subsystem_churn(
                 files_first[path] = (
                     min(files_first[path], date_ns) if path in files_first else date_ns
                 )
-                files_last[path] = (
-                    max(files_last[path], date_ns) if path in files_last else date_ns
-                )
+                files_last[path] = max(files_last[path], date_ns) if path in files_last else date_ns
         if date_ns is not None:
             label = _bucket_label(date_ns, bucket)
             bucket_patches[label] += 1

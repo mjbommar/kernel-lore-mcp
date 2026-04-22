@@ -30,7 +30,7 @@ use crate::over::{DddPayload, OverDb, OverRow};
 use crate::parse::{self, ParsedMessage};
 use crate::state::State;
 use crate::store::{Store, StoreOffset};
-use crate::trigram::{segment_dir as trigram_segment_dir, SegmentBuilder as TrigramBuilder};
+use crate::trigram::{SegmentBuilder as TrigramBuilder, segment_dir as trigram_segment_dir};
 
 /// Ingest one public-inbox shard end-to-end.
 ///

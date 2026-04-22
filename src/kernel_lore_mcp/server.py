@@ -70,6 +70,7 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.file_timeline import lore_file_timeline
+    from kernel_lore_mcp.tools.fix_status import lore_fix_status
     from kernel_lore_mcp.tools.maintainer_profile import lore_maintainer_profile
     from kernel_lore_mcp.tools.message import lore_message
     from kernel_lore_mcp.tools.nearest import lore_nearest, lore_similar
@@ -165,6 +166,10 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     _reg(
         lore_thread_state,
         "Classify a thread (rfc/superseded/nacked/...)",
+    )
+    _reg(
+        lore_fix_status,
+        "Correlate a bug report to candidate fixes across threads",
     )
     _reg(
         lore_subsystem_churn,

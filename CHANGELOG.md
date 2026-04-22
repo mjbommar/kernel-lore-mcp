@@ -10,6 +10,41 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-04-22
+
+### Added
+
+- Added `lore_fix_status`, a bug-centric fix-correlation tool that
+  follows `Reported-by:`, `Link:`, and `Closes:` evidence across
+  separate lore threads and upgrades to an authoritative `merged`
+  verdict when the git sidecar can confirm it.
+- Added a normalized trailer-reference side index in `over.db` for
+  `reported_by`, `fixes`, `link`, and `closes`, plus backfill support
+  and reader-side exact lookups for syzbot hashes, lore message-ids,
+  SHA prefixes, lowercased URLs, and normalized trailer payloads.
+- Added human-friendly `since` / `until` parsing for MCP tools and the
+  Rust query router: raw nanoseconds remain supported, but callers can
+  now also pass ISO dates, RFC3339 timestamps, and relative windows
+  such as `90d`.
+
+### Changed
+
+- `lore_activity`, `lore_author_profile`, `lore_file_timeline`,
+  `lore_path_mentions`, `lore_eq`, `lore_in_list`, `lore_count`,
+  `lore_substr_subject`, `lore_substr_trailers`, and `lore_regex` now
+  accept both legacy `*_unix_ns` bounds and new human-readable
+  `since` / `until` fields, with shared validation.
+- `lore_search` query parsing now understands `since:` and `until:`
+  bounds in human formats instead of requiring raw integer nanoseconds
+  only.
+
+### Fixed
+
+- Upper-bound date filtering is now carried consistently through the
+  Rust reader, over.db index helpers, PyO3 boundary, and MCP tool
+  layer instead of being post-filtered inconsistently or silently
+  ignored on some paths.
+
 ## [0.3.1] — 2026-04-22
 
 ### Added

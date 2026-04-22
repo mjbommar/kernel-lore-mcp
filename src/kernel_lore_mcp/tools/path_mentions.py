@@ -28,6 +28,7 @@ from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import RowsResponse
 from kernel_lore_mcp.reader_cache import get_reader
+from kernel_lore_mcp.time_bounds import TIME_BOUND_DESCRIPTION, resolve_time_bounds
 from kernel_lore_mcp.timeout import run_with_timeout
 
 
@@ -55,8 +56,19 @@ async def lore_path_mentions(
         ),
     ] = "exact",
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
+    since: Annotated[
+        str | None,
+        Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Date upper-bound (ns since epoch, exclusive).")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
@@ -85,11 +97,25 @@ async def lore_path_mentions(
             missing=f"{settings.data_dir}/paths/vocab.txt",
             build_cmd=(
                 "python -c 'from kernel_lore_mcp import _core; "
-                f"print(_core.rebuild_path_vocab(\"{settings.data_dir}\"))'"
+                f'print(_core.rebuild_path_vocab("{settings.data_dir}"))\''
             ),
         )
     reader = get_reader()
-    rows = await run_with_timeout(reader.path_mentions, path, match, list, since_unix_ns, limit)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
+    rows = await run_with_timeout(
+        reader.path_mentions,
+        path,
+        match,
+        list,
+        resolved_since,
+        resolved_until,
+        limit,
+    )
     hits = [row_to_search_hit(r, tier_provenance=["path"]) for r in rows]
     return RowsResponse(
         results=hits,

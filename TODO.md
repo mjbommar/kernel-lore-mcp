@@ -13,8 +13,22 @@ Status markers:
 ## Current release track (2026-04-22)
 
 `v0.3.0` shipped on 2026-04-21. The active patch line is
-`v0.3.1`: sync-under-load hardening, operator visibility, and release
-cleanup after the first same-box hosted soak on `server6`.
+`v0.3.2`: bug-workflow correlation and human time-bound ergonomics
+after the same-box hosted soak and sync-under-load hardening on
+`server6`.
+
+### 0.3.2 target — bug correlation + human time bounds
+
+- [x] Add a first-class `lore_fix_status` tool for bug-centric
+  correlation across separate lore threads, with authoritative
+  `merged` only when the git sidecar can confirm it.
+- [x] Materialize a normalized trailer-reference index for
+  `reported_by`, `fixes`, `link`, and `closes`, and expose exact
+  reader lookups over syzbot hashes, lore mids, SHA prefixes, and
+  normalized trailer values.
+- [x] Accept human-friendly `since` / `until` values across the
+  low-level tools and query router, while keeping raw
+  `*_unix_ns` compatibility for existing clients.
 
 ### 0.3.1 target — sync-under-load visibility + safer inline BM25
 

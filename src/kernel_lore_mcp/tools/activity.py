@@ -15,6 +15,7 @@ from kernel_lore_mcp.cursor import decode_cursor, mint_cursor, query_hash
 from kernel_lore_mcp.freshness import build_freshness
 from kernel_lore_mcp.mapping import row_to_activity_row
 from kernel_lore_mcp.models import ActivityResponse
+from kernel_lore_mcp.time_bounds import TIME_BOUND_DESCRIPTION, resolve_time_bounds
 from kernel_lore_mcp.timeout import run_with_timeout
 
 _CONCISE_ROWS = 20
@@ -29,9 +30,21 @@ async def lore_activity(
         str | None,
         Field(description="Exact identifier, e.g. `smb_check_perm_dacl`."),
     ] = None,
+    since: Annotated[
+        str | None,
+        Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
     since_unix_ns: Annotated[
         int | None,
         Field(description="Lower bound on message date (nanoseconds since epoch UTC)."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None,
+        Field(description="Exclusive upper bound on message date (nanoseconds since epoch UTC)."),
     ] = None,
     list: Annotated[
         str | None,
@@ -78,6 +91,12 @@ async def lore_activity(
 
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
 
     # Cursor scope: (file, function, since, list) define the sorted
     # result set. `limit` / `response_format` can change between
@@ -86,7 +105,8 @@ async def lore_activity(
         "lore_activity",
         file or "",
         function or "",
-        since_unix_ns or 0,
+        resolved_since or 0,
+        resolved_until or 0,
         list or "",
     )
     resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
@@ -98,7 +118,8 @@ async def lore_activity(
         reader.activity,
         file,
         function,
-        since_unix_ns,
+        resolved_since,
+        resolved_until,
         list,
         fetch_budget,
     )

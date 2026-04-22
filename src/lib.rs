@@ -47,6 +47,7 @@ mod store;
 pub mod sync;
 mod tid;
 mod timeout;
+mod trailer_refs;
 mod trigram;
 
 // Library re-exports for the `kernel-lore-ingest` binary (and any
@@ -77,6 +78,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(
         crate::python::py_backfill_trailer_emails,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        crate::python::py_backfill_trailer_refs,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(

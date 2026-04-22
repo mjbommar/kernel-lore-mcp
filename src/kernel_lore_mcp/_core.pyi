@@ -33,6 +33,7 @@ def rebuild_tid(data_dir: str | PathLike[str]) -> TidRebuildResult: ...
 def rebuild_bm25(data_dir: str | PathLike[str]) -> int: ...
 def backfill_subject_normalized(data_dir: str | PathLike[str]) -> int: ...
 def backfill_trailer_emails(data_dir: str | PathLike[str]) -> int: ...
+def backfill_trailer_refs(data_dir: str | PathLike[str]) -> int: ...
 def backfill_touched_files(data_dir: str | PathLike[str]) -> int: ...
 def backfill_side_table_dates(data_dir: str | PathLike[str]) -> int: ...
 def rebuild_path_vocab(data_dir: str | PathLike[str]) -> int: ...
@@ -109,6 +110,7 @@ class Reader:
         file: str | None = ...,
         function: str | None = ...,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         list: str | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
@@ -144,6 +146,7 @@ class Reader:
         field: str,
         value: str,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         list: str | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
@@ -152,6 +155,7 @@ class Reader:
         field: str,
         values: list[str],
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         list: str | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
@@ -160,6 +164,7 @@ class Reader:
         field: str,
         value: str,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         list: str | None = ...,
     ) -> dict[str, Any]: ...
     def author_profile(
@@ -167,6 +172,7 @@ class Reader:
         addr: str,
         list: str | None = ...,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         limit: int = ...,
         include_mentions: bool = ...,
         mention_limit: int = ...,
@@ -182,6 +188,7 @@ class Reader:
         needle: str,
         list: str | None = ...,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
     def substr_trailers(
@@ -190,6 +197,17 @@ class Reader:
         value_substring: str,
         list: str | None = ...,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
+        limit: int = ...,
+    ) -> list[dict[str, Any]]: ...
+    def trailer_ref_lookup(
+        self,
+        name: str,
+        ref_kind: str,
+        ref_value: str,
+        list: str | None = ...,
+        since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
     def regex(
@@ -199,6 +217,7 @@ class Reader:
         anchor_required: bool = ...,
         list: str | None = ...,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...
     def diff(
@@ -234,5 +253,6 @@ class Reader:
         match_mode: str = ...,
         list: str | None = ...,
         since_unix_ns: int | None = ...,
+        until_unix_ns: int | None = ...,
         limit: int = ...,
     ) -> list[dict[str, Any]]: ...

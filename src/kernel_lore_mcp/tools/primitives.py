@@ -36,6 +36,7 @@ from kernel_lore_mcp.models import (
     Snippet,
 )
 from kernel_lore_mcp.reader_cache import get_reader
+from kernel_lore_mcp.time_bounds import TIME_BOUND_DESCRIPTION, resolve_time_bounds
 from kernel_lore_mcp.timeout import run_with_timeout
 
 _EQ_FIELDS = {
@@ -185,8 +186,18 @@ async def lore_eq(
         ),
     ],
     value: Annotated[str, Field(min_length=1, max_length=512)],
+    since: Annotated[
+        str | None, Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}")
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Exclusive upper-bound (ns since epoch).")
     ] = None,
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
@@ -199,15 +210,33 @@ async def lore_eq(
         raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
 
     reader = get_reader()
-    rows = await run_with_timeout(reader.eq, field, value, since_unix_ns, list, limit)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
+    rows = await run_with_timeout(
+        reader.eq, field, value, resolved_since, resolved_until, list, limit
+    )
     return _rows_to_response(rows, tier="metadata", reader=reader)
 
 
 async def lore_in_list(
     field: Annotated[str, Field(min_length=1, description="Same set as lore_eq.")],
     values: Annotated[list[str], Field(min_length=1, max_length=512)],
+    since: Annotated[
+        str | None, Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}")
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Exclusive upper-bound (ns since epoch).")
     ] = None,
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
@@ -227,15 +256,39 @@ async def lore_in_list(
         )
 
     reader = get_reader()
-    rows = await run_with_timeout(reader.in_list, field, values, since_unix_ns, list, limit)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
+    rows = await run_with_timeout(
+        reader.in_list,
+        field,
+        values,
+        resolved_since,
+        resolved_until,
+        list,
+        limit,
+    )
     return _rows_to_response(rows, tier="metadata", reader=reader)
 
 
 async def lore_count(
     field: Annotated[str, Field(min_length=1, description="Same set as lore_eq.")],
     value: Annotated[str, Field(min_length=1, max_length=512)],
+    since: Annotated[
+        str | None, Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}")
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Exclusive upper-bound (ns since epoch).")
     ] = None,
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
 ) -> CountResponse:
@@ -250,7 +303,15 @@ async def lore_count(
         raise unknown_enum(field_name="field", bad_value=field, valid=_EQ_FIELDS)
 
     reader = get_reader()
-    summary = await run_with_timeout(reader.count, field, value, since_unix_ns, list)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
+    summary = await run_with_timeout(
+        reader.count, field, value, resolved_since, resolved_until, list
+    )
     return CountResponse(
         count=summary["count"],
         distinct_authors=summary["distinct_authors"],
@@ -272,8 +333,18 @@ async def lore_substr_subject(
         ),
     ],
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
+    since: Annotated[
+        str | None, Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}")
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Exclusive upper-bound (ns since epoch).")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
@@ -282,7 +353,15 @@ async def lore_substr_subject(
     Cost: cheap — expected p95 80 ms (metadata column scan, no trigram).
     """
     reader = get_reader()
-    rows = await run_with_timeout(reader.substr_subject, needle, list, since_unix_ns, limit)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
+    rows = await run_with_timeout(
+        reader.substr_subject, needle, list, resolved_since, resolved_until, limit
+    )
     return _rows_to_response(
         rows,
         tier="metadata",
@@ -308,8 +387,18 @@ async def lore_substr_trailers(
         Field(min_length=1, max_length=512, description="Case-insensitive substring."),
     ],
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
+    since: Annotated[
+        str | None, Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}")
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Exclusive upper-bound (ns since epoch).")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=500)] = 100,
 ) -> RowsResponse:
@@ -326,8 +415,20 @@ async def lore_substr_trailers(
         )
 
     reader = get_reader()
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
     rows = await run_with_timeout(
-        reader.substr_trailers, name, value_substring, list, since_unix_ns, limit
+        reader.substr_trailers,
+        name,
+        value_substring,
+        list,
+        resolved_since,
+        resolved_until,
+        limit,
     )
     return _rows_to_response(
         rows,
@@ -366,8 +467,18 @@ async def lore_regex(
         ),
     ] = True,
     list: Annotated[str | None, Field(description="Restrict to one mailing list.")] = None,
+    since: Annotated[
+        str | None, Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}")
+    ] = None,
     since_unix_ns: Annotated[
         int | None, Field(description="Date lower-bound (ns since epoch).")
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
+    until_unix_ns: Annotated[
+        int | None, Field(description="Exclusive upper-bound (ns since epoch).")
     ] = None,
     limit: Annotated[int, Field(ge=1, le=200)] = 100,
     cursor: Annotated[
@@ -377,7 +488,7 @@ async def lore_regex(
                 "Opaque HMAC-signed pagination token. Pass a prior "
                 "response's `next_cursor` to resume newest-first "
                 "after the last returned hit. Bound to the "
-                "(field, pattern, anchor_required, list, since) "
+                "(field, pattern, anchor_required, list, since, until) "
                 "combination — changing any invalidates the cursor."
             ),
         ),
@@ -404,6 +515,12 @@ async def lore_regex(
     )
 
     reader = get_reader()
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
 
     q_hash = query_hash(
         "lore_regex",
@@ -411,7 +528,8 @@ async def lore_regex(
         pattern,
         int(anchor_required),
         list or "",
-        since_unix_ns or 0,
+        resolved_since or 0,
+        resolved_until or 0,
     )
     resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
 
@@ -422,7 +540,8 @@ async def lore_regex(
         pattern,
         anchor_required,
         list,
-        since_unix_ns,
+        resolved_since,
+        resolved_until,
         fetch_budget,
     )
 

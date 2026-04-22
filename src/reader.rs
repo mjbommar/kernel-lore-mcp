@@ -633,14 +633,16 @@ impl Reader {
         &self,
         list: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: Option<usize>,
     ) -> Result<Vec<MessageRow>> {
         const DEFAULT_CAP: usize = 1_000_000;
         let cap = limit.unwrap_or(DEFAULT_CAP);
 
         if let Some(l) = list
-            && let Some(res) =
-                self.with_over(|db| db.scan_eq(EqField::List, l, since_unix_ns, None, cap))
+            && let Some(res) = self.with_over(|db| {
+                db.scan_eq(EqField::List, l, since_unix_ns, until_unix_ns, None, cap)
+            })
         {
             return res;
         }
@@ -657,6 +659,13 @@ impl Reader {
                 if let Some(since) = since_unix_ns {
                     if let Some(d) = r.date_unix_ns {
                         if d < since {
+                            return true;
+                        }
+                    }
+                }
+                if let Some(until) = until_unix_ns {
+                    if let Some(d) = r.date_unix_ns {
+                        if d >= until {
                             return true;
                         }
                     }
@@ -828,6 +837,7 @@ impl Reader {
         file: Option<&str>,
         function: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
@@ -850,6 +860,7 @@ impl Reader {
                     EqField::TouchedFile,
                     path,
                     since_unix_ns,
+                    until_unix_ns,
                     list_filter.as_deref(),
                     scan_limit,
                 )
@@ -859,6 +870,7 @@ impl Reader {
                     EqField::TouchedFunction,
                     func,
                     since_unix_ns,
+                    until_unix_ns,
                     list_filter.as_deref(),
                     limit,
                 )
@@ -900,7 +912,14 @@ impl Reader {
         if let Some(l) = &list_filter
             && let Some(res) = self.with_over(|db| {
                 let scan_limit = limit.saturating_mul(64).max(4_096);
-                db.scan_eq(EqField::List, l, since_unix_ns, None, scan_limit)
+                db.scan_eq(
+                    EqField::List,
+                    l,
+                    since_unix_ns,
+                    until_unix_ns,
+                    None,
+                    scan_limit,
+                )
             })
         {
             let rows = res?;
@@ -938,6 +957,12 @@ impl Reader {
                 if let Some(t) = since_unix_ns {
                     match r.date_unix_ns {
                         Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
                         _ => return false,
                     }
                 }
@@ -984,7 +1009,7 @@ impl Reader {
         // on every query.
         if let Some(seed_tid) = seed.tid.clone().filter(|t| !t.is_empty())
             && let Some(res) =
-                self.with_over(|db| db.scan_eq(EqField::Tid, &seed_tid, None, None, 10_000))
+                self.with_over(|db| db.scan_eq(EqField::Tid, &seed_tid, None, None, None, 10_000))
         {
             let siblings = res?;
             let mut out: Vec<MessageRow> = siblings
@@ -1035,6 +1060,7 @@ impl Reader {
         field: EqField,
         value: &str,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
@@ -1043,8 +1069,16 @@ impl Reader {
         // (over.db's sequential scan would also work, but the plan
         // explicitly defers it to keep this change small + bisectable).
         if eq_field_is_over_indexed(field)
-            && let Some(res) =
-                self.with_over(|db| db.scan_eq(field, value, since_unix_ns, list_filter, limit))
+            && let Some(res) = self.with_over(|db| {
+                db.scan_eq(
+                    field,
+                    value,
+                    since_unix_ns,
+                    until_unix_ns,
+                    list_filter,
+                    limit,
+                )
+            })
         {
             return res;
         }
@@ -1065,6 +1099,12 @@ impl Reader {
                         _ => return false,
                     }
                 }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
+                        _ => return false,
+                    }
+                }
                 eq_field_matches(field, r, &value_owned)
             },
             |r| {
@@ -1082,6 +1122,7 @@ impl Reader {
         field: EqField,
         values: &[String],
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
@@ -1098,6 +1139,12 @@ impl Reader {
                 if let Some(t) = since_unix_ns {
                     match r.date_unix_ns {
                         Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
                         _ => return false,
                     }
                 }
@@ -1119,6 +1166,7 @@ impl Reader {
         field: EqField,
         value: &str,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         list_filter: Option<&str>,
     ) -> Result<CountSummary> {
         let value_owned = value.to_owned();
@@ -1135,6 +1183,12 @@ impl Reader {
                 if let Some(t) = since_unix_ns {
                     match r.date_unix_ns {
                         Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
                         _ => return false,
                     }
                 }
@@ -1178,9 +1232,18 @@ impl Reader {
         addr: &str,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> Result<AuthorProfile> {
-        self.author_profile_inner(addr, list_filter, since_unix_ns, limit, false, 0)
+        self.author_profile_inner(
+            addr,
+            list_filter,
+            since_unix_ns,
+            until_unix_ns,
+            limit,
+            false,
+            0,
+        )
     }
 
     /// Same as `author_profile`, but optionally ALSO aggregates rows
@@ -1193,6 +1256,7 @@ impl Reader {
         addr: &str,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
         include_mentions: bool,
         mention_limit: usize,
@@ -1201,6 +1265,7 @@ impl Reader {
             addr,
             list_filter,
             since_unix_ns,
+            until_unix_ns,
             limit,
             include_mentions,
             mention_limit,
@@ -1212,11 +1277,19 @@ impl Reader {
         addr: &str,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
         include_mentions: bool,
         mention_limit: usize,
     ) -> Result<AuthorProfile> {
-        let mut rows = self.eq(EqField::FromAddr, addr, since_unix_ns, list_filter, limit)?;
+        let mut rows = self.eq(
+            EqField::FromAddr,
+            addr,
+            since_unix_ns,
+            until_unix_ns,
+            list_filter,
+            limit,
+        )?;
         let authored_count = rows.len() as u64;
         let limit_hit = (rows.len() >= limit) && limit > 0;
 
@@ -1228,8 +1301,13 @@ impl Reader {
         let mut mention_limit_hit = false;
 
         if include_mentions && mention_limit > 0 {
-            let mention_rows =
-                self.trailer_mentions(addr, list_filter, since_unix_ns, mention_limit)?;
+            let mention_rows = self.trailer_mentions(
+                addr,
+                list_filter,
+                since_unix_ns,
+                until_unix_ns,
+                mention_limit,
+            )?;
             mention_limit_hit = mention_rows.len() >= mention_limit;
             for r in mention_rows {
                 if seen.insert(r.message_id.clone()) {
@@ -1328,6 +1406,7 @@ impl Reader {
         addr: &str,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
         let needle_lc = addr.to_ascii_lowercase();
@@ -1342,6 +1421,11 @@ impl Reader {
                 }
                 if let Some(t) = since_unix_ns
                     && r.date_unix_ns.is_some_and(|d| d < t)
+                {
+                    return false;
+                }
+                if let Some(t) = until_unix_ns
+                    && !r.date_unix_ns.is_some_and(|d| d < t)
                 {
                     return false;
                 }
@@ -1403,7 +1487,7 @@ impl Reader {
         } else {
             None
         };
-        let rows = self.activity(Some(path), None, since_unix_ns, None, activity_limit)?;
+        let rows = self.activity(Some(path), None, since_unix_ns, None, None, activity_limit)?;
         out.sampled_patches = rows.len() as u64;
 
         // Aggregate observed trailer counts per address.
@@ -1494,6 +1578,7 @@ impl Reader {
         needle: &str,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
         let needle_lc = needle.to_ascii_lowercase();
@@ -1509,6 +1594,12 @@ impl Reader {
                 if let Some(t) = since_unix_ns {
                     match r.date_unix_ns {
                         Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
                         _ => return false,
                     }
                 }
@@ -1539,6 +1630,7 @@ impl Reader {
         value_substring: &str,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
         let name_lc = name.to_ascii_lowercase();
@@ -1558,7 +1650,96 @@ impl Reader {
                         _ => return false,
                     }
                 }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
+                        _ => return false,
+                    }
+                }
                 trailer_matches(r, &name_lc, &needle_lc)
+            },
+            |r| {
+                out.push(r);
+                out.len() < limit
+            },
+        )?;
+        out.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+        Ok(out)
+    }
+
+    /// Exact lookup against normalized trailer-derived references
+    /// such as syzbot hashes, lore message-ids, SHA prefixes, and
+    /// lowercased raw trailer strings.
+    ///
+    /// Used by bug-centric workflows (`lore_fix_status`) that need
+    /// to hop across threads via `Reported-by:`, `Link:`, `Closes:`,
+    /// or `Fixes:` without paying a full-corpus substring scan.
+    pub fn trailer_ref_lookup(
+        &self,
+        name: &str,
+        ref_kind: &str,
+        ref_value: &str,
+        since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
+        list_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<MessageRow>> {
+        let kind_norm = name.to_ascii_lowercase().replace('-', "_");
+        let ref_value_norm = crate::trailer_refs::normalize_trailer_ref_value(ref_kind, ref_value);
+
+        let over_ready = match self.with_over(|db| db.trailer_ref_index_complete()) {
+            Some(res) => res?,
+            None => false,
+        };
+        if over_ready
+            && let Some(res) = self.with_over(|db| {
+                db.scan_trailer_ref(
+                    &kind_norm,
+                    ref_kind,
+                    &ref_value_norm,
+                    since_unix_ns,
+                    until_unix_ns,
+                    list_filter,
+                    limit,
+                )
+            })
+        {
+            return res;
+        }
+
+        let list_owned = list_filter.map(str::to_owned);
+        let mut out = Vec::new();
+        self.scan(
+            |r| {
+                if let Some(ref l) = list_owned
+                    && &r.list != l
+                {
+                    return false;
+                }
+                if let Some(t) = since_unix_ns
+                    && r.date_unix_ns.is_some_and(|d| d < t)
+                {
+                    return false;
+                }
+                if let Some(t) = until_unix_ns
+                    && !r.date_unix_ns.is_some_and(|d| d < t)
+                {
+                    return false;
+                }
+                let bag: &[String] = match kind_norm.as_str() {
+                    "reported_by" => &r.reported_by,
+                    "fixes" => &r.fixes,
+                    "link" => &r.link,
+                    "closes" => &r.closes,
+                    _ => return false,
+                };
+                bag.iter().any(|raw| {
+                    crate::trailer_refs::extract_trailer_refs(&kind_norm, raw)
+                        .iter()
+                        .any(|entry| {
+                            entry.ref_kind == ref_kind && entry.ref_value == ref_value_norm
+                        })
+                })
             },
             |r| {
                 out.push(r);
@@ -1584,6 +1765,7 @@ impl Reader {
         anchor_required: bool,
         list_filter: Option<&str>,
         since_unix_ns: Option<i64>,
+        until_unix_ns: Option<i64>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
         if anchor_required && (pattern.starts_with(".*") || pattern.starts_with("^.*")) {
@@ -1619,6 +1801,12 @@ impl Reader {
                 if let Some(t) = since_unix_ns {
                     match r.date_unix_ns {
                         Some(d) if d >= t => {}
+                        _ => return false,
+                    }
+                }
+                if let Some(t) = until_unix_ns {
+                    match r.date_unix_ns {
+                        Some(d) if d < t => {}
                         _ => return false,
                     }
                 }
@@ -1722,8 +1910,8 @@ impl Reader {
         // after a rebuild, "all messages in the thread" is a single
         // B-tree lookup on `over_tid`. Mirrors the series_timeline fix.
         if let Some(seed_tid) = seed.tid.as_deref().filter(|t| !t.is_empty())
-            && let Some(res) =
-                self.with_over(|db| db.scan_eq(EqField::Tid, seed_tid, None, None, max_messages))
+            && let Some(res) = self
+                .with_over(|db| db.scan_eq(EqField::Tid, seed_tid, None, None, None, max_messages))
         {
             let mut rows = res?;
             rows.sort_by_key(|r| r.date_unix_ns.unwrap_or(i64::MIN));
@@ -2343,31 +2531,7 @@ fn any_trailer_contains_email(row: &MessageRow, addr_lc: &str) -> bool {
 /// empty when the pattern doesn't match. Case-folded to match the
 /// lowercased indexing in over.db / ddd payloads.
 pub(crate) fn extract_email(s: &str) -> String {
-    let start = match s.rfind('<') {
-        Some(i) => i + 1,
-        None => {
-            // Bare email — take first whitespace-delimited token
-            // that contains `@`.
-            return s
-                .split_whitespace()
-                .find(|tok| tok.contains('@'))
-                .map(|tok| {
-                    tok.trim_matches(|c: char| !c.is_ascii_graphic())
-                        .to_ascii_lowercase()
-                })
-                .unwrap_or_default();
-        }
-    };
-    let end = match s[start..].find('>') {
-        Some(i) => start + i,
-        None => return String::new(),
-    };
-    let email = &s[start..end];
-    if email.contains('@') {
-        email.to_ascii_lowercase()
-    } else {
-        String::new()
-    }
+    crate::trailer_refs::extract_email(s)
 }
 
 pub struct DiffResult {
@@ -2716,10 +2880,7 @@ fn list_trigram_lists(data_dir: &Path) -> Result<Vec<String>> {
 // ---- internals ----
 
 fn strip_angles(s: &str) -> &str {
-    let s = s.trim();
-    s.strip_prefix('<')
-        .and_then(|s| s.strip_suffix('>'))
-        .unwrap_or(s)
+    crate::trailer_refs::strip_angles(s)
 }
 
 fn is_sha_prefix(s: &str) -> bool {
@@ -3154,13 +3315,13 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let rows = r
-            .activity(Some("fs/smb/server/smbacl.c"), None, None, None, 50)
+            .activity(Some("fs/smb/server/smbacl.c"), None, None, None, None, 50)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m1@x");
 
         let none = r
-            .activity(Some("no/such/file.c"), None, None, None, 50)
+            .activity(Some("no/such/file.c"), None, None, None, None, 50)
             .unwrap();
         assert!(none.is_empty());
     }
@@ -3171,7 +3332,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let rows = r
-            .activity(None, Some("smb2_create"), None, None, 50)
+            .activity(None, Some("smb2_create"), None, None, None, 50)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m2@x");
@@ -3285,7 +3446,9 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         // Error::QueryTimeout. Without the deadline wiring, substr_subject
         // completes; with it, it Errs.
         let _guard = install_expired_deadline();
-        let err = r.substr_subject("ksmbd", None, None, 100).unwrap_err();
+        let err = r
+            .substr_subject("ksmbd", None, None, None, 100)
+            .unwrap_err();
         match err {
             crate::error::Error::QueryTimeout { .. } => {}
             other => panic!("expected QueryTimeout, got {other:?}"),
@@ -3419,7 +3582,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let rows = r
-            .eq(EqField::FromAddr, "alice@example.com", None, None, 50)
+            .eq(EqField::FromAddr, "alice@example.com", None, None, None, 50)
             .unwrap();
         let mids: std::collections::HashSet<&str> =
             rows.iter().map(|r| r.message_id.as_str()).collect();
@@ -3436,6 +3599,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
             .eq(
                 EqField::TouchedFile,
                 "fs/smb/server/smb2pdu.c",
+                None,
                 None,
                 None,
                 50,
@@ -3457,6 +3621,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
                     "fs/smb/server/smbacl.c".to_owned(),
                     "fs/smb/server/smb2pdu.c".to_owned(),
                 ],
+                None,
                 None,
                 None,
                 50,
@@ -3548,7 +3713,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let prof = r
-            .author_profile("alice@example.com", None, None, 1000)
+            .author_profile("alice@example.com", None, None, None, 1000)
             .unwrap();
         // Two messages from Alice in the sample corpus.
         assert_eq!(prof.addr_queried, "alice@example.com");
@@ -3572,7 +3737,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let r = Reader::new(d.path());
         // Ask for just 1 row out of 2 → expect limit_hit=true.
         let prof = r
-            .author_profile("alice@example.com", None, None, 1)
+            .author_profile("alice@example.com", None, None, None, 1)
             .unwrap();
         assert_eq!(prof.sampled, 1);
         assert!(prof.limit_hit);
@@ -3589,14 +3754,14 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let r = Reader::new(d.path());
 
         let default_scope = r
-            .author_profile("carol@example.com", None, None, 1000)
+            .author_profile("carol@example.com", None, None, None, 1000)
             .unwrap();
         assert_eq!(default_scope.sampled, 0);
         assert_eq!(default_scope.authored_count, 0);
         assert_eq!(default_scope.mention_count, 0);
 
         let extended = r
-            .author_profile_extended("carol@example.com", None, None, 1000, true, 500)
+            .author_profile_extended("carol@example.com", None, None, None, 1000, true, 500)
             .unwrap();
         assert!(
             extended.mention_count >= 1,
@@ -3619,7 +3784,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let prof = r
-            .author_profile("nobody@nowhere.invalid", None, None, 100)
+            .author_profile("nobody@nowhere.invalid", None, None, None, 100)
             .unwrap();
         assert_eq!(prof.sampled, 0);
         assert_eq!(prof.subsystems.len(), 0);
@@ -3632,7 +3797,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let s = r
-            .count(EqField::FromAddr, "alice@example.com", None, None)
+            .count(EqField::FromAddr, "alice@example.com", None, None, None)
             .unwrap();
         assert_eq!(s.count, 2);
         assert_eq!(s.distinct_authors, 1);
@@ -3645,11 +3810,11 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         let d = tempdir().unwrap();
         ingest_sample(d.path());
         let r = Reader::new(d.path());
-        let rows = r.substr_subject("ksmbd", None, None, 50).unwrap();
+        let rows = r.substr_subject("ksmbd", None, None, None, 50).unwrap();
         assert!(rows.iter().any(|r| r.message_id == "m1@x"));
         assert!(rows.iter().any(|r| r.message_id == "m2@x"));
         // Uppercase needle still hits.
-        let rows = r.substr_subject("KSMBD", None, None, 50).unwrap();
+        let rows = r.substr_subject("KSMBD", None, None, None, 50).unwrap();
         assert_eq!(rows.len(), 2);
     }
 
@@ -3659,14 +3824,14 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let rows = r
-            .substr_trailers("fixes", "deadbeef", None, None, 50)
+            .substr_trailers("fixes", "deadbeef", None, None, None, 50)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m1@x");
 
         // Unknown trailer name returns empty without erroring.
         assert!(
-            r.substr_trailers("nonsense", "x", None, None, 5)
+            r.substr_trailers("nonsense", "x", None, None, None, 5)
                 .unwrap()
                 .is_empty()
         );
@@ -3684,6 +3849,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
                 false,
                 None,
                 None,
+                None,
                 10,
             )
             .unwrap();
@@ -3697,7 +3863,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         ingest_sample(d.path());
         let r = Reader::new(d.path());
         let err = r
-            .regex(RegexField::Subject, ".*ksmbd.*", true, None, None, 10)
+            .regex(RegexField::Subject, ".*ksmbd.*", true, None, None, None, 10)
             .unwrap_err();
         match err {
             crate::error::Error::RegexComplexity(_) => {}
@@ -3715,6 +3881,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
                 RegexField::Patch,
                 r"smb_check_perm_dacl\(",
                 false,
+                None,
                 None,
                 None,
                 10,
@@ -3853,14 +4020,21 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
 
         // Indexed eq scan: case-folded mid-case query should still hit.
         let by_from = reader
-            .eq(EqField::FromAddr, "reviewer@example.com", None, None, 10)
+            .eq(
+                EqField::FromAddr,
+                "reviewer@example.com",
+                None,
+                None,
+                None,
+                10,
+            )
             .unwrap();
         assert_eq!(by_from.len(), 1);
         assert_eq!(by_from[0].message_id, "over-test-a@x");
 
         // Indexed list scan, ordered date-DESC.
         let by_list = reader
-            .eq(EqField::List, "linux-cifs", None, None, 10)
+            .eq(EqField::List, "linux-cifs", None, None, None, 10)
             .unwrap();
         assert_eq!(by_list.len(), 2);
         assert_eq!(by_list[0].message_id, "over-test-b@x");
@@ -3868,7 +4042,7 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
 
         // all_rows(list:_) routes through over.db's list-date index.
         let all = reader
-            .all_rows(Some("linux-cifs"), None, Some(100))
+            .all_rows(Some("linux-cifs"), None, None, Some(100))
             .unwrap();
         assert_eq!(all.len(), 2);
     }

@@ -180,9 +180,7 @@ async def lore_stable_backport_status(
     sidecar_repos: list[str] = []
     if len(needle) == 40:
         try:
-            repos = await run_with_timeout(
-                _core.git_sidecar_repos, settings.data_dir
-            )
+            repos = await run_with_timeout(_core.git_sidecar_repos, settings.data_dir)
             sidecar_repos = [r["repo"] for r in repos]
             for repo in sidecar_repos:
                 if not (repo == "linux-stable" or repo.startswith("linux-stable")):
@@ -265,9 +263,7 @@ async def lore_stable_backport_status(
     # heterogeneous indexing.
     noautosel_seen = False
     try:
-        nauto = await run_with_timeout(
-            reader.substr_subject, f"noautosel", None, None, 10
-        )
+        nauto = await run_with_timeout(reader.substr_subject, f"noautosel", None, None, None, 10)
         for hit in nauto:
             if needle in ((hit.get("subject_raw") or "") + (hit.get("message_id") or "")):
                 noautosel_seen = True

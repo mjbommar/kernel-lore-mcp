@@ -30,6 +30,7 @@ from kernel_lore_mcp.errors import invalid_argument
 from kernel_lore_mcp.freshness import Freshness, build_freshness
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import SearchHit
+from kernel_lore_mcp.time_bounds import TIME_BOUND_DESCRIPTION, resolve_time_bounds
 from kernel_lore_mcp.timeout import run_with_timeout
 
 
@@ -76,9 +77,17 @@ async def lore_file_timeline(
             description="Kernel tree path, e.g. `fs/smb/server/smbacl.c`.",
         ),
     ],
+    since: Annotated[
+        str | None,
+        Field(description=f"Human-friendly lower bound. {TIME_BOUND_DESCRIPTION}"),
+    ] = None,
     since_unix_ns: Annotated[
         int | None,
         Field(description="Window lower bound (ns since epoch); None = beginning of corpus."),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Field(description=f"Human-friendly exclusive upper bound. {TIME_BOUND_DESCRIPTION}"),
     ] = None,
     until_unix_ns: Annotated[
         int | None,
@@ -144,18 +153,21 @@ async def lore_file_timeline(
 
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
+    resolved_since, resolved_until = resolve_time_bounds(
+        since=since,
+        since_unix_ns=since_unix_ns,
+        until=until,
+        until_unix_ns=until_unix_ns,
+    )
     rows = await run_with_timeout(
         reader.activity,
         path,
         None,  # function
-        since_unix_ns,
+        resolved_since,
+        resolved_until,
         None,  # list
         activity_sample,
     )
-
-    # Apply until_unix_ns post-filter (activity has no upper bound arg).
-    if until_unix_ns is not None:
-        rows = [r for r in rows if (r.get("date_unix_ns") or 0) < until_unix_ns]
 
     # Sort per `order` on date_unix_ns; rows with no date sink.
     rows_with_date = [r for r in rows if r.get("date_unix_ns") is not None]
@@ -187,10 +199,7 @@ async def lore_file_timeline(
 
     # Truncate events AFTER histogram (so histogram reflects full window).
     events_rows = ordered[:limit]
-    events = [
-        row_to_search_hit(r, tier_provenance=["metadata"])
-        for r in events_rows
-    ]
+    events = [row_to_search_hit(r, tier_provenance=["metadata"]) for r in events_rows]
 
     def _utc_of(ns: int | None) -> datetime | None:
         if ns is None:

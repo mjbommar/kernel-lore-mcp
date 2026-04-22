@@ -68,6 +68,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{Date, Duration, OffsetDateTime, PrimitiveDateTime, Time};
 
 use crate::error::{Error, Result};
 use crate::reader::{MessageRow, Reader};
@@ -101,8 +104,10 @@ pub struct ParsedQuery {
     pub from_addr: Option<String>,
     /// `fixes:<sha>` reverse fixes lookup.
     pub fixes_sha: Option<String>,
-    /// `since:<unix-ns>` lower bound on date.
+    /// `since:<unix-ns|iso|rel>` lower bound on date.
     pub since_unix_ns: Option<i64>,
+    /// `until:<unix-ns|iso|rel>` exclusive upper bound on date.
+    pub until_unix_ns: Option<i64>,
 }
 
 /// Parse a tiny grammar: space-separated tokens of the form
@@ -123,9 +128,10 @@ pub fn parse_query(q: &str) -> Result<ParsedQuery> {
                 "f" => out.from_addr = Some(value.to_owned()),
                 "fixes" => out.fixes_sha = Some(value.to_owned()),
                 "since" => {
-                    out.since_unix_ns = Some(value.parse::<i64>().map_err(|e| {
-                        Error::QueryParse(format!("since: not an integer ns: {e}"))
-                    })?);
+                    out.since_unix_ns = Some(parse_time_bound("since", value)?);
+                }
+                "until" => {
+                    out.until_unix_ns = Some(parse_time_bound("until", value)?);
                 }
                 "b" => {
                     if was_quoted {
@@ -141,7 +147,7 @@ pub fn parse_query(q: &str) -> Result<ParsedQuery> {
                 }
                 _ => {
                     return Err(Error::QueryParse(format!(
-                        "unknown predicate {key:?}; supported: list dfn dfhh dfb mid f fixes since b"
+                        "unknown predicate {key:?}; supported: list dfn dfhh dfb mid f fixes since until b"
                     )));
                 }
             }
@@ -157,7 +163,72 @@ pub fn parse_query(q: &str) -> Result<ParsedQuery> {
             out.free_text.push(tok);
         }
     }
+    if let (Some(since), Some(until)) = (out.since_unix_ns, out.until_unix_ns)
+        && since >= until
+    {
+        return Err(Error::QueryParse(format!(
+            "since must be earlier than until (since={since}, until={until})"
+        )));
+    }
     Ok(out)
+}
+
+fn parse_time_bound(name: &str, raw: &str) -> Result<i64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(Error::QueryParse(format!("{name}: empty time bound")));
+    }
+    if value.as_bytes().iter().all(u8::is_ascii_digit) {
+        return value
+            .parse::<i64>()
+            .map_err(|e| Error::QueryParse(format!("{name}: not an integer ns: {e}")));
+    }
+
+    if let Some(ns) = parse_relative_time_bound(value) {
+        return Ok(ns);
+    }
+
+    const DATE_FMT: &[time::format_description::FormatItem<'static>] =
+        format_description!("[year]-[month]-[day]");
+    if let Ok(date) = Date::parse(value, DATE_FMT) {
+        let dt = PrimitiveDateTime::new(date, Time::MIDNIGHT).assume_utc();
+        return Ok(dt.unix_timestamp_nanos() as i64);
+    }
+
+    if let Ok(dt) = OffsetDateTime::parse(value, &Rfc3339) {
+        return Ok(dt.unix_timestamp_nanos() as i64);
+    }
+
+    const NAIVE_DT_FMT: &[time::format_description::FormatItem<'static>] =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+    if let Ok(dt) = PrimitiveDateTime::parse(value, NAIVE_DT_FMT) {
+        return Ok(dt.assume_utc().unix_timestamp_nanos() as i64);
+    }
+
+    Err(Error::QueryParse(format!(
+        "{name}: unsupported time bound {value:?}; use unix ns, YYYY-MM-DD, RFC3339, or relative windows like 90d"
+    )))
+}
+
+fn parse_relative_time_bound(value: &str) -> Option<i64> {
+    let split_at = value
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .filter(|idx| *idx > 0)?;
+    let (digits, suffix) = value.split_at(split_at);
+    let amount = digits.parse::<i64>().ok()?;
+    let unit_ns = match suffix {
+        "s" => Duration::seconds(amount),
+        "h" => Duration::hours(amount),
+        "d" => Duration::days(amount),
+        "w" => Duration::weeks(amount),
+        "mo" => Duration::days(amount.saturating_mul(30)),
+        "y" => Duration::days(amount.saturating_mul(365)),
+        _ => return None,
+    };
+    let now = OffsetDateTime::now_utc();
+    now.checked_sub(unit_ns)
+        .map(|dt| dt.unix_timestamp_nanos() as i64)
 }
 
 /// Tokenize and tag each token with whether it came from inside
@@ -256,6 +327,7 @@ pub fn dispatch(
                 parsed.touched_file.as_deref(),
                 parsed.touched_function.as_deref(),
                 parsed.since_unix_ns,
+                parsed.until_unix_ns,
                 parsed.list.as_deref(),
                 limit,
             )?
@@ -268,15 +340,24 @@ pub fn dispatch(
                 crate::reader::EqField::FromAddr,
                 from,
                 parsed.since_unix_ns,
+                parsed.until_unix_ns,
                 parsed.list.as_deref(),
                 limit,
             )?
-        } else if parsed.list.is_some() || parsed.since_unix_ns.is_some() {
+        } else if parsed.list.is_some()
+            || parsed.since_unix_ns.is_some()
+            || parsed.until_unix_ns.is_some()
+        {
             // Pure list:/since: predicate. Cap is tight (RRF merge
             // below only uses the first `limit * 2` anyway); loading
             // a million rows per query piles up memory under load.
             let cap = limit.saturating_mul(20).max(10_000);
-            reader.all_rows(parsed.list.as_deref(), parsed.since_unix_ns, Some(cap))?
+            reader.all_rows(
+                parsed.list.as_deref(),
+                parsed.since_unix_ns,
+                parsed.until_unix_ns,
+                Some(cap),
+            )?
         } else {
             Vec::new()
         };
@@ -368,6 +449,9 @@ pub fn dispatch(
     }
     if let Some(since) = parsed.since_unix_ns {
         merged.retain(|h| h.row.date_unix_ns.is_some_and(|d| d >= since));
+    }
+    if let Some(until) = parsed.until_unix_ns {
+        merged.retain(|h| h.row.date_unix_ns.is_some_and(|d| d < until));
     }
     merged.truncate(limit);
 
@@ -512,6 +596,29 @@ mod tests {
         let q = parse_query(r#"dfb:"some literal" list:linux-cifs"#).unwrap();
         assert_eq!(q.patch_substring.as_deref(), Some("some literal"));
         assert_eq!(q.list.as_deref(), Some("linux-cifs"));
+    }
+
+    #[test]
+    fn parse_human_time_bounds() {
+        let q = parse_query("since:2026-04-14 until:2026-04-15T00:00:00Z ksmbd").unwrap();
+        assert_eq!(q.free_text, vec!["ksmbd"]);
+        assert_eq!(
+            q.since_unix_ns,
+            Some(parse_time_bound("since", "2026-04-14").unwrap())
+        );
+        assert_eq!(
+            q.until_unix_ns,
+            Some(parse_time_bound("until", "2026-04-15T00:00:00Z").unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_inverted_time_bounds_rejected() {
+        let err = parse_query("since:2026-04-15 until:2026-04-14").unwrap_err();
+        match err {
+            Error::QueryParse(msg) => assert!(msg.contains("since must be earlier than until")),
+            other => panic!("wrong error: {other:?}"),
+        }
     }
 
     #[test]

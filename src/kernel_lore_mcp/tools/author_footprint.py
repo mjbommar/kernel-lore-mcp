@@ -66,9 +66,7 @@ class FootprintHit(BaseModel):
 
 class AuthorFootprintResponse(BaseModel):
     addr_queried: str
-    total_distinct: int = Field(
-        description="Distinct message_ids across all three sources."
-    )
+    total_distinct: int = Field(description="Distinct message_ids across all three sources.")
     authored_count: int
     trailer_mention_count: int
     body_mention_count: int
@@ -165,7 +163,7 @@ async def lore_author_footprint(
 
     # Source 1: authored rows, via indexed from_addr.
     authored_rows = await run_with_timeout(
-        reader.eq, "from_addr", addr, None, list_filter, limit
+        reader.eq, "from_addr", addr, None, None, list_filter, limit
     )
     authored_mids = {r["message_id"] for r in authored_rows}
 
@@ -181,6 +179,7 @@ async def lore_author_footprint(
                 reader.author_profile,
                 addr,
                 list_filter,
+                None,
                 None,
                 0,  # we don't want the authored slice here
                 True,  # include_mentions
@@ -209,11 +208,7 @@ async def lore_author_footprint(
         query = " ".join(tokens)
         try:
             scored = await run_with_timeout(reader.prose_search, query, limit)
-            body_rows = [
-                (r, r.get("_score", 0.0))
-                for r in scored
-                if r.get("message_id")
-            ]
+            body_rows = [(r, r.get("_score", 0.0)) for r in scored if r.get("message_id")]
         except Exception:  # noqa: BLE001
             # BM25 can still error on pathological inputs; skipping
             # this source is better than 500ing the whole tool.
@@ -241,11 +236,7 @@ async def lore_author_footprint(
     # Optional list_filter post-filter on body_mention rows
     # (BM25 doesn't honor it intrinsically).
     if list_filter is not None:
-        per_mid = {
-            mid: row
-            for mid, row in per_mid.items()
-            if row.get("list") == list_filter
-        }
+        per_mid = {mid: row for mid, row in per_mid.items() if row.get("list") == list_filter}
         roles = {mid: roles[mid] for mid in per_mid}
 
     # Sort newest-first; cursor-skip before truncating.
@@ -283,15 +274,9 @@ async def lore_author_footprint(
         for row in page
     ]
 
-    authored_count = sum(
-        1 for h in hits if "authored" in h.roles
-    )
-    trailer_count = sum(
-        1 for h in hits if "trailer_mention" in h.roles
-    )
-    body_count = sum(
-        1 for h in hits if "body_mention" in h.roles
-    )
+    authored_count = sum(1 for h in hits if "authored" in h.roles)
+    trailer_count = sum(1 for h in hits if "trailer_mention" in h.roles)
+    body_count = sum(1 for h in hits if "body_mention" in h.roles)
 
     next_cursor: str | None = None
     if hits and total_available > limit:
