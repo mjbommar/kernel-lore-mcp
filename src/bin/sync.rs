@@ -114,6 +114,11 @@ struct PhaseHeartbeat {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+struct StageHeartbeat {
+    stop: std::sync::Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct SyncStatusRecord {
     version: String,
@@ -192,6 +197,23 @@ impl SyncStateReporter {
         self.update(|status| {
             status.stage = stage.to_string();
             status.note = note;
+        })
+    }
+
+    fn refresh_stage(
+        &self,
+        stage: &str,
+        note: Option<String>,
+        elapsed_secs: f64,
+        memory: MemorySnapshot,
+    ) -> Result<()> {
+        self.update(|status| {
+            status.stage = stage.to_string();
+            status.note = note;
+            status.elapsed_secs = elapsed_secs;
+            status.process_rss_mb = memory.process_rss_bytes.map(bytes_to_mib);
+            status.memory_available_mb = memory.available_bytes.map(bytes_to_mib);
+            status.memory_total_mb = memory.total_bytes.map(bytes_to_mib);
         })
     }
 
@@ -328,6 +350,46 @@ impl Drop for PhaseHeartbeat {
             handle.thread().unpark();
             let _ = handle.join();
         }
+    }
+}
+
+impl Drop for StageHeartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
+}
+
+fn stage_heartbeat(
+    sync_state: SyncStateReporter,
+    stage: &'static str,
+    note: Option<String>,
+    run_started: Instant,
+) -> StageHeartbeat {
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_for_thread = std::sync::Arc::clone(&stop);
+    let stage_name = stage.to_string();
+    let handle = std::thread::spawn(move || {
+        loop {
+            std::thread::park_timeout(PROGRESS_LOG_INTERVAL);
+            if stop_for_thread.load(Ordering::Relaxed) {
+                break;
+            }
+            let elapsed_secs = run_started.elapsed().as_secs_f64();
+            let memory = current_memory_snapshot();
+            if let Err(e) =
+                sync_state.refresh_stage(&stage_name, note.clone(), elapsed_secs, memory)
+            {
+                tracing::warn!(stage = stage_name, error = %e, "failed to write sync status");
+            }
+        }
+    });
+    StageHeartbeat {
+        stop,
+        handle: Some(handle),
     }
 }
 
@@ -688,16 +750,15 @@ fn main() -> Result<()> {
     if let Some(ref bm25_mutex) = bm25 {
         let memory = current_memory_snapshot();
         let config = bm25_config.expect("bm25 config must exist when writer exists");
+        let note = Some(format!(
+            "threads={} memory_budget_mb={}",
+            config.num_threads,
+            config.memory_budget_mb()
+        ));
         sync_state
-            .set_stage(
-                "bm25_commit",
-                Some(format!(
-                    "threads={} memory_budget_mb={}",
-                    config.num_threads,
-                    config.memory_budget_mb()
-                )),
-            )
+            .set_stage("bm25_commit", note.clone())
             .context("update sync status to bm25_commit")?;
+        let stage_guard = stage_heartbeat(sync_state.clone(), "bm25_commit", note, start);
         tracing::info!(
             bm25_writer_threads = config.num_threads,
             bm25_memory_budget_mb = config.memory_budget_mb(),
@@ -718,6 +779,7 @@ fn main() -> Result<()> {
             memory_total_mb = ?memory.total_bytes.map(bytes_to_mib),
             "bm25 commit done"
         );
+        drop(stage_guard);
     }
 
     // tid rebuild: reasonable to do every sync tick; touches only the
@@ -725,6 +787,7 @@ fn main() -> Result<()> {
     sync_state
         .set_stage("tid_rebuild", None)
         .context("update sync status to tid_rebuild")?;
+    let tid_stage_guard = stage_heartbeat(sync_state.clone(), "tid_rebuild", None, start);
     tracing::info!("tid rebuild starting");
     let tid_result = _core::rebuild_tid(&data_dir).context("rebuild tid side-table")?;
     tracing::info!(
@@ -732,9 +795,11 @@ fn main() -> Result<()> {
         path = %tid_result.0.display(),
         "tid rebuild done"
     );
+    drop(tid_stage_guard);
     sync_state
         .set_stage("path_vocab_rebuild", None)
         .context("update sync status to path_vocab_rebuild")?;
+    let path_stage_guard = stage_heartbeat(sync_state.clone(), "path_vocab_rebuild", None, start);
     tracing::info!("path vocab rebuild starting");
     if let Some(path_count) = rebuild_path_vocab_after_sync(&data_dir)? {
         tracing::info!(
@@ -743,6 +808,7 @@ fn main() -> Result<()> {
             "path vocab rebuild done"
         );
     }
+    drop(path_stage_guard);
 
     // Tally.
     let mut total_ingested: u64 = 0;

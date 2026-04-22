@@ -29,6 +29,8 @@
 //!     hot paths; per batch is ~1024 rows / ~1 ms between checks.
 
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use crate::error::{Error, Result};
@@ -42,6 +44,11 @@ thread_local! {
     /// every scan call site (~18 in reader.rs) for a feature that
     /// only a handful of entry points activate.
     static REQUEST_DEADLINE: RefCell<Option<Deadline>> = const { RefCell::new(None) };
+    /// Cooperative cancellation token for the current request. Python
+    /// flips this when `asyncio.wait_for(...)` times out or the HTTP
+    /// request is cancelled, letting long-running Rust loops return
+    /// promptly instead of burning CPU in a detached thread.
+    static REQUEST_CANCEL_TOKEN: RefCell<Option<CancelToken>> = const { RefCell::new(None) };
 }
 
 /// A wall-clock deadline for a single query. Immutable once constructed.
@@ -80,6 +87,36 @@ impl Deadline {
     }
 }
 
+/// Cooperative request-cancellation token shared between the async
+/// Python caller and the native worker thread it spawned.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken {
+    inner: Arc<AtomicBool>,
+}
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.load(Ordering::Relaxed)
+    }
+
+    pub fn check(&self) -> Result<()> {
+        if self.is_cancelled() {
+            return Err(Error::QueryCancelled);
+        }
+        Ok(())
+    }
+}
+
 /// Convenience for call sites that may or may not have a budget.
 #[allow(dead_code)]
 pub fn check(deadline: Option<&Deadline>) -> Result<()> {
@@ -95,6 +132,11 @@ pub fn current_deadline() -> Option<Deadline> {
     REQUEST_DEADLINE.with(|c| *c.borrow())
 }
 
+/// Snapshot the thread-local cancellation token if one is installed.
+pub fn current_cancel_token() -> Option<CancelToken> {
+    REQUEST_CANCEL_TOKEN.with(|c| c.borrow().clone())
+}
+
 /// Verify the thread-local deadline, if present. No-op on threads
 /// without a guard. Used by `scan()` at batch boundaries so scans
 /// fired under a `DeadlineGuard` honor the budget; scans fired
@@ -102,6 +144,10 @@ pub fn current_deadline() -> Option<Deadline> {
 pub fn check_request_deadline() -> Result<()> {
     REQUEST_DEADLINE.with(|c| match c.borrow().as_ref() {
         Some(d) => d.check(),
+        None => Ok(()),
+    })?;
+    REQUEST_CANCEL_TOKEN.with(|c| match c.borrow().as_ref() {
+        Some(token) => token.check(),
         None => Ok(()),
     })
 }
@@ -140,6 +186,26 @@ impl Drop for DeadlineGuard {
     }
 }
 
+/// RAII guard for the cooperative cancellation token. Nested usage is
+/// safe; the previous token is restored on drop.
+pub struct CancelGuard {
+    prev: Option<CancelToken>,
+}
+
+impl CancelGuard {
+    pub fn install(token: CancelToken) -> Self {
+        let prev = REQUEST_CANCEL_TOKEN.with(|c| c.replace(Some(token)));
+        Self { prev }
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        REQUEST_CANCEL_TOKEN.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +231,38 @@ mod tests {
     #[test]
     fn check_helper_is_noop_when_none() {
         assert!(check(None).is_ok());
+    }
+
+    #[test]
+    fn cancellation_token_fires_when_cancelled() {
+        let token = CancelToken::new();
+        let _guard = CancelGuard::install(token.clone());
+        assert!(check_request_deadline().is_ok());
+        token.cancel();
+        match check_request_deadline() {
+            Err(Error::QueryCancelled) => {}
+            other => panic!("expected QueryCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_guard_restores_previous_token() {
+        let outer = CancelToken::new();
+        let inner = CancelToken::new();
+        let _outer_guard = CancelGuard::install(outer.clone());
+        {
+            let _inner_guard = CancelGuard::install(inner.clone());
+            inner.cancel();
+            match check_request_deadline() {
+                Err(Error::QueryCancelled) => {}
+                other => panic!("expected QueryCancelled, got {other:?}"),
+            }
+        }
+        assert!(check_request_deadline().is_ok());
+        outer.cancel();
+        match check_request_deadline() {
+            Err(Error::QueryCancelled) => {}
+            other => panic!("expected QueryCancelled, got {other:?}"),
+        }
     }
 }

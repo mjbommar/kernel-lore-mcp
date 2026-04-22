@@ -41,7 +41,7 @@ import structlog
 
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
-from kernel_lore_mcp.health import suggest_retry_after_seconds
+from kernel_lore_mcp.health import should_shed_tool_call, suggest_retry_after_seconds
 from kernel_lore_mcp.logging_ import profiling_thresholds
 
 CostClass = Literal["cheap", "moderate", "expensive"]
@@ -147,6 +147,30 @@ def cost_limited(
         # Pair with a zero-timeout acquire for the "reject fast"
         # shape — acquire() would block if locked.
         base_started = current_tool_request_started() or time.monotonic()
+        settings = get_settings()
+        should_shed, shed_reason = should_shed_tool_call(
+            data_dir=settings.data_dir,
+            cost_class=cost,
+        )
+        if should_shed:
+            queue_wait = max(0.0, time.monotonic() - base_started)
+            record_tool_queue_wait(
+                tool_name,
+                cost,
+                queue_wait,
+                "rate_limited",
+            )
+            log.warning(
+                "tool admission shed",
+                tool=tool_name,
+                cost_class=cost,
+                mode=settings.mode,
+                queue_wait_ms=round(queue_wait * 1000, 3),
+                inflight=current_inflight(cost),
+                limit=_LIMITS[cost],
+                reason=shed_reason,
+            )
+            raise _rate_limited(cost, tool_name)
         try:
             await asyncio.wait_for(sem.acquire(), timeout=0.001)
         except TimeoutError as err:
@@ -157,7 +181,6 @@ def cost_limited(
                 queue_wait,
                 "rate_limited",
             )
-            settings = get_settings()
             log.warning(
                 "tool admission rejected",
                 tool=tool_name,

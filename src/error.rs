@@ -18,6 +18,9 @@ pub enum Error {
     #[error("query exceeded {limit_ms} ms wall-clock limit")]
     QueryTimeout { limit_ms: u64 },
 
+    #[error("query cancelled by caller")]
+    QueryCancelled,
+
     #[error("invalid cursor: {0}")]
     InvalidCursor(String),
 

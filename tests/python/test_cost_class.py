@@ -49,9 +49,7 @@ async def test_cost_limited_admits_under_capacity(monkeypatch) -> None:
 
     # Shrink the cap to 2 for this test so we can reason about the boundary.
     monkeypatch.setitem(cost_class._LIMITS, "moderate", 2)
-    monkeypatch.setitem(
-        cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(2)
-    )
+    monkeypatch.setitem(cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(2))
 
     call_count = 0
 
@@ -76,9 +74,7 @@ async def test_cost_limited_rejects_over_capacity(monkeypatch) -> None:
     rate_limited LoreError instead of queueing.
     """
     monkeypatch.setitem(cost_class._LIMITS, "moderate", 2)
-    monkeypatch.setitem(
-        cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(2)
-    )
+    monkeypatch.setitem(cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(2))
 
     # A slow fn so the first two hold the semaphore while the third tries.
     gate = asyncio.Event()
@@ -118,9 +114,7 @@ async def test_cost_limited_releases_on_exception(monkeypatch) -> None:
     callers don't see phantom saturation.
     """
     monkeypatch.setitem(cost_class._LIMITS, "expensive", 1)
-    monkeypatch.setitem(
-        cost_class._SEMAPHORES, "expensive", asyncio.Semaphore(1)
-    )
+    monkeypatch.setitem(cost_class._SEMAPHORES, "expensive", asyncio.Semaphore(1))
 
     async def _boom():
         """Placeholder.
@@ -159,30 +153,60 @@ async def test_cost_limited_retry_after_rises_during_active_sync(
     )
     monkeypatch.setenv("KLMCP_DATA_DIR", str(tmp_path))
     monkeypatch.setitem(cost_class._LIMITS, "moderate", 1)
-    monkeypatch.setitem(
-        cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(1)
-    )
+    monkeypatch.setitem(cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(1))
 
-    gate = asyncio.Event()
-
-    async def _slow():
+    async def _moderate():
         """Placeholder.
 
         Cost: moderate — expected p95 100 ms.
         """
-        await gate.wait()
         return "ok"
 
-    wrapped = cost_class.cost_limited(_slow)
-    first = asyncio.create_task(wrapped())
-    await asyncio.sleep(0.01)
-
+    wrapped = cost_class.cost_limited(_moderate)
     with pytest.raises(LoreError) as exc_info:
         await wrapped()
     assert "bm25_commit" in str(exc_info.value)
     assert "Retry after 20s." in str(exc_info.value)
 
-    gate.set()
-    await first
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    lock_file.close()
+
+
+@pytest.mark.asyncio
+async def test_cost_limited_sheds_moderate_work_during_writer_heavy_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(parents=True)
+    lock_file = (state / "writer.lock").open("w+")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    (state / "sync.json").write_text(
+        json.dumps(
+            {
+                "active": True,
+                "stage": "tid_rebuild",
+                "updated_unix_secs": 2_000_000_000,
+                "started_unix_secs": 1_999_999_940,
+            }
+        )
+    )
+    monkeypatch.setenv("KLMCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setitem(cost_class._LIMITS, "moderate", 8)
+    monkeypatch.setitem(cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(8))
+
+    async def _moderate():
+        """Placeholder.
+
+        Cost: moderate — expected p95 100 ms.
+        """
+        return "ok"
+
+    wrapped = cost_class.cost_limited(_moderate)
+    with pytest.raises(LoreError) as exc_info:
+        await wrapped()
+    assert exc_info.value.code == "rate_limited"
+    assert "Retry after 10s." in str(exc_info.value)
+
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
     lock_file.close()

@@ -11,6 +11,14 @@ from pathlib import Path
 from typing import Any
 
 _ACTIVE_SYNC_STALE_AFTER_SECONDS = 30
+_SYNC_SHED_STAGES = {
+    "ingest",
+    "bm25_commit",
+    "tid_rebuild",
+    "path_vocab_rebuild",
+    "generation_bump",
+    "save_manifest",
+}
 
 
 def writer_lock_present(data_dir: Path) -> bool:
@@ -62,9 +70,7 @@ def read_sync_state(data_dir: Path) -> dict[str, Any] | None:
     active = bool(payload.get("active"))
     if heartbeat_age_seconds is not None:
         active = (
-            active
-            and writer_active
-            and heartbeat_age_seconds <= _ACTIVE_SYNC_STALE_AFTER_SECONDS
+            active and writer_active and heartbeat_age_seconds <= _ACTIVE_SYNC_STALE_AFTER_SECONDS
         )
     else:
         active = active and writer_active
@@ -120,6 +126,26 @@ def suggest_retry_after_seconds(
         return max(retry_after, 10), "a writer lock is active on this box"
 
     return retry_after, None
+
+
+def should_shed_tool_call(*, data_dir: Path, cost_class: str) -> tuple[bool, str | None]:
+    """Whether the server should fast-reject this tool class.
+
+    Cheap indexed lookups stay available as long as the process is up.
+    Moderate and expensive tools shed aggressively while a writer-heavy
+    sync stage is active so a serving box does not spend its remaining
+    headroom on work we already expect to be slow or likely to timeout.
+    """
+    if cost_class == "cheap":
+        return False, None
+
+    sync = read_sync_state(data_dir)
+    if sync and sync.get("active"):
+        stage = str(sync.get("stage") or "").strip()
+        if stage in _SYNC_SHED_STAGES:
+            return True, f"sync stage `{stage}` is reserving capacity"
+
+    return False, None
 
 
 def _coerce_int(value: object) -> int | None:

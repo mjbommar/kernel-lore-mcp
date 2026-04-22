@@ -110,13 +110,26 @@ async def test_coverage_stats_resource_renders_corpus_facts(
     assert "blind-spots://coverage" in text
 
 
-def test_status_route_reports_generation_and_per_list(http_client: TestClient) -> None:
+def test_status_route_defaults_to_lightweight_shape(http_client: TestClient) -> None:
     r = http_client.get("/status")
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "kernel-lore-mcp"
     assert body["generation"] >= 1
+    assert body["per_list_omitted"] is True
+    assert "per_list" not in body
+
+
+def test_status_route_reports_generation_and_per_list_when_requested(
+    http_client: TestClient,
+) -> None:
+    r = http_client.get("/status?per_list=1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "kernel-lore-mcp"
+    assert body["generation"] >= 1
     assert body["last_ingest_utc"] is not None
+    assert body["per_list_omitted"] is False
     assert "linux-cifs" in body["per_list"]
     shards = body["per_list"]["linux-cifs"]
     assert len(shards) == 1

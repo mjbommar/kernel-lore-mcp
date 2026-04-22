@@ -398,20 +398,24 @@ pub fn dispatch(
     // DeadlineGuard::install so scan() checks within the tier honor
     // the same budget.
     let deadline = crate::timeout::current_deadline();
+    let cancel = crate::timeout::current_cancel_token();
     let mut meta_out: TierOut = Ok((None, None));
     let mut trigram_out: TierOut = Ok((None, None));
     let mut bm25_out: TierOut = Ok((None, None));
     rayon::scope(|s| {
         s.spawn(|_| {
             let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+            let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
             meta_out = run_metadata();
         });
         s.spawn(|_| {
             let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+            let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
             trigram_out = run_trigram();
         });
         s.spawn(|_| {
             let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+            let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
             bm25_out = run_bm25();
         });
     });

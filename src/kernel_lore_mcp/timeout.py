@@ -24,6 +24,7 @@ from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
 from kernel_lore_mcp.health import suggest_retry_after_seconds
 from kernel_lore_mcp.logging_ import profiling_thresholds
+from kernel_lore_mcp import _core
 
 log = structlog.get_logger(__name__)
 
@@ -45,9 +46,18 @@ async def run_with_timeout[T](
     ms = timeout_ms or settings.query_wall_clock_ms
     tool_name = getattr(fn, "__name__", str(fn))
     started = time.monotonic()
+    token = _core._RequestCancelToken()
+
+    def _invoke_with_cancel() -> T:
+        guard = token.install()
+        try:
+            return fn(*args)
+        finally:
+            guard.close()
+
     try:
         result = await asyncio.wait_for(
-            asyncio.to_thread(fn, *args),
+            asyncio.to_thread(_invoke_with_cancel),
             timeout=ms / 1000.0,
         )
         elapsed = time.monotonic() - started
@@ -85,10 +95,24 @@ async def run_with_timeout[T](
             echoed_input=echoed_input or {},
             retry_after_seconds=retry_after_seconds,
         ) from None
+    except asyncio.CancelledError:
+        elapsed = time.monotonic() - started
+        record_tool_runtime(tool_name, elapsed, "cancelled")
+        log.warning(
+            "tool runtime cancelled",
+            operation=tool_name,
+            mode=settings.mode,
+            runtime_ms=round(elapsed * 1000, 3),
+            timeout_ms=ms,
+        )
+        raise
     except LoreError as exc:
         elapsed = time.monotonic() - started
         record_tool_runtime(tool_name, elapsed, exc.code)
-        if exc.code != "query_timeout" and elapsed >= profiling_thresholds(settings.mode).tool_seconds:
+        if (
+            exc.code != "query_timeout"
+            and elapsed >= profiling_thresholds(settings.mode).tool_seconds
+        ):
             log.info(
                 "tool runtime completed",
                 operation=tool_name,
@@ -109,6 +133,8 @@ async def run_with_timeout[T](
             timeout_ms=ms,
         )
         raise
+    finally:
+        token.cancel()
 
 
 __all__ = ["run_with_timeout"]

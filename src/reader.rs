@@ -2571,6 +2571,7 @@ fn parallel_confirm_substring(
 
     const CHUNK: usize = 256;
     let deadline = crate::timeout::current_deadline();
+    let cancel = crate::timeout::current_cancel_token();
     let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
     for chunk in date_sorted_hits.chunks(CHUNK) {
         crate::timeout::check_request_deadline()?;
@@ -2584,6 +2585,7 @@ fn parallel_confirm_substring(
             .par_iter()
             .map(|row| -> Result<Option<MessageRow>> {
                 let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+                let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
                 crate::timeout::check_request_deadline()?;
                 let store = reader.store_for(&row.list)?;
                 let body = store.read_at(row.body_segment_id, row.body_offset)?;
@@ -2653,9 +2655,11 @@ fn collect_trigram_candidates(
         Mutex::new(std::collections::HashSet::new());
     let overflowed = AtomicBool::new(false);
     let deadline = crate::timeout::current_deadline();
+    let cancel = crate::timeout::current_cancel_token();
 
     all_segs.par_iter().try_for_each(|seg_dir| -> Result<()> {
         let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+        let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
         crate::timeout::check_request_deadline()?;
         if overflowed.load(Ordering::Relaxed) {
             return Ok(());
@@ -2710,6 +2714,7 @@ fn parallel_confirm_fuzzy(
 
     const CHUNK: usize = 256;
     let deadline = crate::timeout::current_deadline();
+    let cancel = crate::timeout::current_cancel_token();
     let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
     for chunk in date_sorted_hits.chunks(CHUNK) {
         crate::timeout::check_request_deadline()?;
@@ -2720,6 +2725,7 @@ fn parallel_confirm_fuzzy(
             .par_iter()
             .map(|row| -> Result<Option<MessageRow>> {
                 let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+                let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
                 crate::timeout::check_request_deadline()?;
                 let store = reader.store_for(&row.list)?;
                 let body = store.read_at(row.body_segment_id, row.body_offset)?;

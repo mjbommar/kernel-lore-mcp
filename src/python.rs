@@ -24,7 +24,53 @@ use crate::ingest;
 use crate::reader::{DiffMode, EqField, MessageRow, Reader as CoreReader, RegexField};
 use crate::router;
 use crate::tid;
-use crate::timeout::DeadlineGuard;
+use crate::timeout::{CancelGuard, CancelToken, DeadlineGuard};
+
+#[pyclass(
+    module = "kernel_lore_mcp._core",
+    name = "_RequestCancelToken",
+    skip_from_py_object
+)]
+#[derive(Clone)]
+pub struct PyRequestCancelToken {
+    inner: CancelToken,
+}
+
+#[pymethods]
+impl PyRequestCancelToken {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: CancelToken::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    fn install(&self) -> PyRequestCancelGuard {
+        PyRequestCancelGuard {
+            guard: Some(CancelGuard::install(self.inner.clone())),
+        }
+    }
+}
+
+#[pyclass(
+    module = "kernel_lore_mcp._core",
+    name = "_RequestCancelGuard",
+    skip_from_py_object
+)]
+pub struct PyRequestCancelGuard {
+    guard: Option<CancelGuard>,
+}
+
+#[pymethods]
+impl PyRequestCancelGuard {
+    fn close(&mut self) {
+        self.guard.take();
+    }
+}
 
 /// Install a thread-local deadline for the duration of one reader
 /// query, matching the router-layer wall-clock cap. Cheap — ~one

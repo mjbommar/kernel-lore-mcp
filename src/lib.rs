@@ -113,6 +113,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(crate::python::py_embedding_meta, m)?)?;
     m.add_class::<crate::python::PyReader>()?;
     m.add_class::<crate::python::PyEmbeddingBuilder>()?;
+    m.add_class::<crate::python::PyRequestCancelToken>()?;
+    m.add_class::<crate::python::PyRequestCancelGuard>()?;
     Ok(())
 }
 

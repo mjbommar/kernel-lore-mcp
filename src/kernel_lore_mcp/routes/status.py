@@ -66,10 +66,9 @@ def _per_list_shards(data_dir: Path) -> dict[str, list[dict[str, str]]]:
     return out
 
 
-def _build_status(settings: Settings) -> dict[str, Any]:
+def _build_status(settings: Settings, *, include_per_list: bool) -> dict[str, Any]:
     data_dir = settings.data_dir
     generation, last_ingest = _read_generation(data_dir)
-    per_list = _per_list_shards(data_dir)
     writer_lock = writer_lock_present(data_dir)
     sync = read_sync_state(data_dir)
 
@@ -85,7 +84,7 @@ def _build_status(settings: Settings) -> dict[str, Any]:
         # that pairs with the Prometheus gauge.
         freshness_ok = last_ingest_age_seconds < 3 * interval
 
-    return {
+    body = {
         "service": "kernel-lore-mcp",
         "version": _native_version(),
         "generation": generation,
@@ -96,10 +95,13 @@ def _build_status(settings: Settings) -> dict[str, Any]:
         "writer_lock_present": writer_lock,
         "sync_active": bool(sync and sync.get("active")),
         "sync": sync,
-        "per_list": per_list,
+        "per_list_omitted": not include_per_list,
         "capabilities": capabilities(data_dir),
         "blind_spots_ref": "blind-spots://coverage",
     }
+    if include_per_list:
+        body["per_list"] = _per_list_shards(data_dir)
+    return body
 
 
 def capabilities(data_dir: Path) -> dict[str, bool]:
@@ -158,7 +160,11 @@ def _native_version() -> str:
         return "unknown"
 
 
-def get_status(settings: Settings | None = None) -> dict[str, Any]:
+def get_status(
+    settings: Settings | None = None,
+    *,
+    include_per_list: bool = False,
+) -> dict[str, Any]:
     """Cached status builder. Used by both the MCP route and tests.
 
     Cache is keyed by `data_dir` so multiple in-process servers (or
@@ -169,7 +175,7 @@ def get_status(settings: Settings | None = None) -> dict[str, Any]:
         from kernel_lore_mcp.config import get_settings
 
         settings = get_settings()
-    cache_key = str(settings.data_dir)
+    cache_key = f"{settings.data_dir}|per_list={int(include_per_list)}"
     ttl = settings.freshness_cache_ttl_seconds
     now = time.monotonic()
     live_writer = writer_lock_present(settings.data_dir)
@@ -178,7 +184,7 @@ def get_status(settings: Settings | None = None) -> dict[str, Any]:
         cached_at, body = _cache[cache_key]
         if now - cached_at < effective_ttl:
             return body
-    body = _build_status(settings)
+    body = _build_status(settings, include_per_list=include_per_list)
     _cache[cache_key] = (now, body)
     return body
 
@@ -190,4 +196,6 @@ def clear_cache() -> None:
 
 async def status_endpoint(request: Request) -> JSONResponse:
     """Starlette/FastMCP custom-route handler."""
-    return JSONResponse(get_status())
+    raw = (request.query_params.get("per_list") or "").strip().lower()
+    include_per_list = raw in {"1", "true", "yes", "on"}
+    return JSONResponse(get_status(include_per_list=include_per_list))
