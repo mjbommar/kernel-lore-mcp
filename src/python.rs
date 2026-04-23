@@ -585,6 +585,7 @@ impl PyReader {
     }
 
     #[pyo3(signature = (file=None, function=None, since_unix_ns=None, until_unix_ns=None, list=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
     fn activity<'py>(
         &self,
         py: Python<'py>,
@@ -733,6 +734,7 @@ impl PyReader {
     /// signed_off_by, reviewed_by, acked_by, tested_by,
     /// co_developed_by, reported_by, fixes, link, closes, cc_stable}.
     #[pyo3(signature = (field, value, since_unix_ns=None, until_unix_ns=None, list=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
     fn eq<'py>(
         &self,
         py: Python<'py>,
@@ -761,6 +763,7 @@ impl PyReader {
 
     /// `WHERE field IN (values)`. Same field set as `eq`.
     #[pyo3(signature = (field, values, since_unix_ns=None, until_unix_ns=None, list=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
     fn in_list<'py>(
         &self,
         py: Python<'py>,
@@ -828,6 +831,7 @@ impl PyReader {
         include_mentions=false,
         mention_limit=2_000,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn author_profile<'py>(
         &self,
         py: Python<'py>,
@@ -991,6 +995,7 @@ impl PyReader {
     /// {fixes, link, closes, cc-stable, signed-off-by, reviewed-by,
     /// acked-by, tested-by, co-developed-by, reported-by}.
     #[pyo3(signature = (name, value_substring, list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
     fn substr_trailers<'py>(
         &self,
         py: Python<'py>,
@@ -1181,6 +1186,7 @@ impl PyReader {
     /// `match_mode`: "exact" | "basename" | "prefix".
     /// Returns a list of row-dicts (same shape as `fetch_message`).
     #[pyo3(signature = (path, match_mode="exact", list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
     fn path_mentions<'py>(
         &self,
         py: Python<'py>,
@@ -1275,6 +1281,7 @@ impl PyReader {
     /// `name`: one of {reported_by, fixes, link, closes}
     /// `ref_kind`: one of {raw_lc, email, sha_prefix, syzbot_hash, lore_mid, url_lc}
     #[pyo3(signature = (name, ref_kind, ref_value, list=None, since_unix_ns=None, until_unix_ns=None, limit=100))]
+    #[allow(clippy::too_many_arguments)]
     fn trailer_ref_lookup<'py>(
         &self,
         py: Python<'py>,

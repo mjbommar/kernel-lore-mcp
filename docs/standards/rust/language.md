@@ -2,7 +2,7 @@
 
 Rust counterpart to [`../python/language.md`](../python/language.md).
 
-kernel-lore-mcp is pinned to **Rust stable 1.85** (edition 2024) in
+kernel-lore-mcp is pinned to **Rust stable 1.88** (edition 2024) in
 [`rust-toolchain.toml`](../../../rust-toolchain.toml). Any bump is a
 project decision, logged in the commit message — not a casual
 `rustup update`.
@@ -13,8 +13,8 @@ project decision, logged in the commit message — not a casual
 
 | Knob | Value | Notes |
 |------|-------|-------|
-| toolchain | `stable 1.85` | edition 2024 |
-| MSRV | `1.85` | `rust-version = "1.85"` in `Cargo.toml` |
+| toolchain | `stable 1.88` | edition 2024 |
+| MSRV | `1.88` | `rust-version = "1.88"` in `Cargo.toml` |
 | Edition | `2024` | `edition = "2024"` |
 
 MSRV is enforced by `cargo check --locked` in CI. Raising it is a

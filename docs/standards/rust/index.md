@@ -23,7 +23,7 @@ of the PyO3 boundary.
 
 ## Stack pins (authoritative: `../../CLAUDE.md`)
 
-- Rust **stable 1.85** (edition 2024).
+- Rust **stable 1.88** (edition 2024).
   Pinned in `rust-toolchain.toml`.
 - `pyo3` 0.28.3 — uses `Python::detach` / `Python::attach`, NOT the
   renamed-from names (`allow_threads` / `with_gil`).

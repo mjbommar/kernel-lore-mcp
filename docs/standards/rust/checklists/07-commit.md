@@ -116,7 +116,7 @@ Atomic commits. Build on every commit. No mixing concerns.
 
 - [ ] **`git status` clean.** No stray modified files.
 
-- [ ] **CI runs:** `cargo fmt`, `clippy`, `test`, `doc`, MSRV (1.85), abi3-off build. Wait for green before opening the PR.
+- [ ] **CI runs:** `cargo fmt`, `clippy`, `test`, `doc`, MSRV (1.88), abi3-off build. Wait for green before opening the PR.
 
 ### PR body (when applicable)
 

@@ -1239,10 +1239,7 @@ impl OverDb {
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
                 .join(",");
-            let sql = format!(
-                "{base} WHERE message_id IN ({placeholders})",
-                base = SELECT_COLS_BASE
-            );
+            let sql = format!("{SELECT_COLS_BASE} WHERE message_id IN ({placeholders})");
             let mut stmt = self.conn.prepare(&sql)?;
             let mut rows = stmt.query(params_from_iter(chunk.iter()))?;
             while let Some(r) = rows.next()? {
@@ -1367,11 +1364,7 @@ impl OverDb {
             }
         };
 
-        let mut sql = format!(
-            "{base} WHERE {where_clause}",
-            base = SELECT_COLS_BASE,
-            where_clause = where_clause
-        );
+        let mut sql = format!("{SELECT_COLS_BASE} WHERE {where_clause}");
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(primary)];
         let mut next_idx = 2_usize;
         if let Some(since) = since_unix_ns {
@@ -1520,6 +1513,7 @@ impl OverDb {
         Ok(out)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn scan_trailer_ref(
         &self,
         kind: &str,
@@ -1589,6 +1583,7 @@ impl OverDb {
     /// column plus `(message_id, list, date_unix_ns)`. `table` and
     /// `value_column` are hard-coded internal identifiers, never
     /// user input.
+    #[allow(clippy::too_many_arguments)]
     fn scan_eq_via_list_value_side_table(
         &self,
         table: &str,
@@ -2463,7 +2458,7 @@ mod tests {
         ];
         for (field, email) in cases {
             let hits = db.scan_eq(field, email, None, None, None, 10).unwrap();
-            assert_eq!(hits.len(), 1, "{:?} lookup failed for {}", field, email);
+            assert_eq!(hits.len(), 1, "{field:?} lookup failed for {email}");
             assert_eq!(hits[0].message_id, "<m@x>");
         }
     }

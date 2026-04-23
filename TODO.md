@@ -92,24 +92,24 @@ after the same-box hosted soak and sync-under-load hardening on
   (not hand-written). Layout is `src/lib.rs` + `src/kernel_lore_mcp/`.
   Native module name is `_core` per maturin default.
 - [x] Restore design content (CLAUDE.md, docs/, LICENSE, .gitignore).
-- [ ] Merge design dependencies into generated Cargo.toml.
-- [ ] Merge design dependencies into generated pyproject.toml.
-- [ ] Add `rust-toolchain.toml` pinning stable 1.85 (required by
-  edition 2024 + tantivy 0.26).
-- [ ] Add missing Rust modules: `store`, `schema`, `state`, `error`,
+- [x] Merge design dependencies into generated Cargo.toml.
+- [x] Merge design dependencies into generated pyproject.toml.
+- [x] Add `rust-toolchain.toml` pinning stable 1.88 (required by the
+  current locked dependency graph).
+- [x] Add missing Rust modules: `store`, `schema`, `state`, `error`,
   plus existing `ingest`/`metadata`/`trigram`/`bm25`/`router`.
   `src/bin/reindex.rs` binary target.
-- [ ] Fix pyo3 doc claim: `Python::detach` / `Python::attach` IS in
+- [x] Fix pyo3 doc claim: `Python::detach` / `Python::attach` IS in
   0.28.3 stable (renamed from `allow_threads` / `with_gil` in PRs
   #5209, #5221). Rust reviewer was wrong about 0.29.
-- [ ] arrow + parquet bump to 58.x (was 54 — mismatched ecosystem).
-- [ ] gix features: drop `blocking-network-client`; add `parallel`;
+- [x] arrow + parquet bump to 58.x (was 54 — mismatched ecosystem).
+- [x] gix features: drop `blocking-network-client`; add `parallel`;
   keep `revision`, `max-performance-safe`.
-- [ ] Release profile: `lto = "thin"`, `codegen-units = 1`,
+- [x] Release profile: `lto = "thin"`, `codegen-units = 1`,
   `panic = "abort"`, `strip = "symbols"`.
-- [ ] Python package under `src/kernel_lore_mcp/` (per uv convention),
+- [x] Python package under `src/kernel_lore_mcp/` (per uv convention),
   NOT `python/` (our initial guess).
-- [ ] Smoke test: `cargo check`, `uv sync`, `uv run maturin develop`,
+- [x] Smoke test: `cargo check`, `uv sync`, `uv run maturin develop`,
   `uv run pytest`.
 
 ## Phase 1 — correctness fixes from Rust reviewer
@@ -167,7 +167,7 @@ after the same-box hosted soak and sync-under-load hardening on
 - [ ] Lazy `_core` import in `__init__.py` (so tests/tooling don't
   hard-require a built wheel).
 - [ ] Dev deps: `pytest`, `pytest-asyncio`, `respx`, `freezegun`,
-  `ruff`, `mypy`, `maturin`.
+  `ruff`, `ty`, `maturin`.
 - [ ] `tests/python/conftest.py` with in-process
   `fastmcp.Client(build_server())` fixture.
 - [ ] Error-mapping middleware: pydantic validation / router

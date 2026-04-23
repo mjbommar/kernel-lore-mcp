@@ -55,7 +55,7 @@ Before touching Rust code, understand the existing invariants, the relevant arch
 
 - [ ] **Sketch the benchmark.** If this is a hot path, plan the `criterion` bench now. What inputs, what budget, what regression threshold?
 
-- [ ] **Check MSRV.** Your change must compile on `cargo +1.85 build`. Don't pull in an API that requires 1.86+ without moving the toolchain pin (which is a separate, justified commit).
+- [ ] **Check MSRV.** Your change must compile on `cargo +1.88 build`. Don't pull in an API that requires a newer compiler without moving the toolchain pin (which is a separate, justified commit).
 
 ---
 

@@ -22,7 +22,7 @@ These are never optional, regardless of the task:
 
 | Rule | Source |
 |------|--------|
-| Rust stable 1.85, edition 2024 (pinned in `rust-toolchain.toml`) | [index.md](../index.md) |
+| Rust stable 1.88, edition 2024 (pinned in `rust-toolchain.toml`) | [index.md](../index.md) |
 | PyO3 0.28.3: use `Python::detach` / `Python::attach`. NEVER `allow_threads` / `with_gil` in new code | CLAUDE.md |
 | `tantivy` stemmer feature is OFF. Never enable. | CLAUDE.md |
 | `gix` 0.81, NOT `git2-rs` (not `Sync`) | CLAUDE.md |
@@ -89,7 +89,7 @@ Every change passes the full Rust QA pipeline.
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
 - [ ] `cargo doc --no-deps`
-- [ ] MSRV: `cargo +1.85 build`
+- [ ] MSRV: `cargo +1.88 build`
 
 ### 6. [Self-Review](06-review.md)
 

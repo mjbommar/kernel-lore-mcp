@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -23,7 +23,7 @@ jobs:
       - run: cargo test --lib
 
   python:
-    name: python (ruff + mypy)
+    name: python (ruff + ty)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
       - run: uv sync
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
-      # mypy requires a built _core module; run after build job.
+      - run: uv run ty check src/kernel_lore_mcp tests/python
 
   build:
     name: maturin build + pytest (smoke)
@@ -45,7 +45,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: uv sync
       - run: uv run maturin develop --release
@@ -59,7 +59,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       - run: uv sync
       - run: uv run maturin develop --release

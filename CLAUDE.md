@@ -66,13 +66,13 @@ lives in `docs/architecture/`. Execution contract in `TODO.md`.
 
 | Component | Version | Notes |
 |---|---|---|
-| Rust toolchain | stable 1.85 (edition 2024) | pinned in `rust-toolchain.toml` |
-| PyO3 | 0.28.3 | `Python::detach` / `Python::attach` are the CURRENT names (renamed from `allow_threads` / `with_gil` in PRs #5209 #5221, shipped in 0.28). Do not write `allow_threads` in new code. |
+| Rust toolchain | stable 1.88 (edition 2024) | pinned in `rust-toolchain.toml` |
+| PyO3 | 0.28.x (currently 0.28.3) | `Python::detach` / `Python::attach` are the CURRENT names (renamed from `allow_threads` / `with_gil` in PRs #5209 #5221, shipped in 0.28). Do not write `allow_threads` in new code. |
 | maturin | 1.13.1 | build backend |
 | Python | 3.12 minimum (abi3 floor), 3.14 preferred. Free-threaded `python3.14t` requires `--no-default-features` (abi3 incompatible until PEP 803 "abi3t" lands). |
 | tantivy | 0.26.0 | stemming gated behind `stemmer` feature — NEVER enabled |
 | tantivy-py | NOT USED | we bind tantivy ourselves in the PyO3 module |
-| gix (gitoxide) | 0.81.0 | features: `max-performance-safe`, `revision`, `parallel`, `sha1`, `blocking-http-transport-reqwest-rust-tls` (the last enables the smart-HTTP fetch path used by `kernel-lore-sync`). |
+| gix (gitoxide) | 0.81.x | features: `max-performance-safe`, `revision`, `parallel`, `sha1`, `blocking-http-transport-reqwest-rust-tls` (the last enables the smart-HTTP fetch path used by `kernel-lore-sync`). |
 | mail-parser | 0.11 | `full_encoding` feature (legacy charsets) |
 | roaring | 0.11 | posting lists (trigram tier) |
 | fst | 0.4 | term dictionary (trigram tier) |
@@ -80,7 +80,7 @@ lives in `docs/architecture/`. Execution contract in `TODO.md`.
 | zstd | 0.13 | compressed raw store (dictionary-trained per list) |
 | arrow | 58 | metadata tier (Parquet on disk) |
 | parquet | 58 | ditto; `zstd` + `arrow` + `async` features |
-| fastmcp | 3.2.4 | MCP framework. Streamable HTTP only; NOT SSE. |
+| fastmcp | 3.2.x (currently 3.2.4) | MCP framework. Streamable HTTP only; NOT SSE. |
 | mcp (low-level SDK) | 1.27 (explicit dep) | types only; serving via FastMCP |
 
 Any bump to these pins is a project decision, not a casual

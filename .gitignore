@@ -26,6 +26,11 @@ htmlcov/
 # uv
 .uv/
 
+# Stray local npm/Codex experiments are not part of this repo.
+/node_modules/
+/package.json
+/package-lock.json
+
 # maturin
 target/wheels/
 

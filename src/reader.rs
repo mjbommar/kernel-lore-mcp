@@ -134,6 +134,7 @@ pub struct MessageRow {
 /// Resolve a MAINTAINERS snapshot from either:
 ///   1. `$KLMCP_MAINTAINERS_FILE` (explicit absolute path)
 ///   2. `<data_dir>/MAINTAINERS` (convention: operator drops a snapshot here)
+///
 /// Returns `None` when neither exists or parsing fails (logged).
 fn load_maintainers(data_dir: &Path) -> Option<Arc<MaintainersIndex>> {
     let env_path = std::env::var_os("KLMCP_MAINTAINERS_FILE").map(std::path::PathBuf::from);
@@ -1265,6 +1266,7 @@ impl Reader {
     /// ...) on someone else's patch. The expanded view matches what
     /// a full-text search on lore would show; the cost is one extra
     /// Parquet scan bounded by `mention_limit`.
+    #[allow(clippy::too_many_arguments)]
     pub fn author_profile_extended(
         &self,
         addr: &str,
@@ -1286,6 +1288,7 @@ impl Reader {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn author_profile_inner(
         &self,
         addr: &str,
@@ -1439,7 +1442,7 @@ impl Reader {
                     return false;
                 }
                 if let Some(t) = until_unix_ns
-                    && !r.date_unix_ns.is_some_and(|d| d < t)
+                    && r.date_unix_ns.is_none_or(|d| d >= t)
                 {
                     return false;
                 }
@@ -1519,10 +1522,10 @@ impl Reader {
                 ..Default::default()
             });
             match kind {
-                TrailerKind::ReviewedBy => entry.reviewed_by += 1,
-                TrailerKind::AckedBy => entry.acked_by += 1,
-                TrailerKind::TestedBy => entry.tested_by += 1,
-                TrailerKind::SignedOffBy => entry.signed_off_by += 1,
+                TrailerKind::Reviewed => entry.reviewed_by += 1,
+                TrailerKind::Acked => entry.acked_by += 1,
+                TrailerKind::Tested => entry.tested_by += 1,
+                TrailerKind::SignedOff => entry.signed_off_by += 1,
             }
             if let Some(d) = date_ns {
                 entry.last_seen_unix_ns = Some(entry.last_seen_unix_ns.map_or(d, |e| e.max(d)));
@@ -1530,16 +1533,16 @@ impl Reader {
         };
         for row in &rows {
             for r in &row.reviewed_by {
-                record(&mut observed, r, TrailerKind::ReviewedBy, row.date_unix_ns);
+                record(&mut observed, r, TrailerKind::Reviewed, row.date_unix_ns);
             }
             for a in &row.acked_by {
-                record(&mut observed, a, TrailerKind::AckedBy, row.date_unix_ns);
+                record(&mut observed, a, TrailerKind::Acked, row.date_unix_ns);
             }
             for t in &row.tested_by {
-                record(&mut observed, t, TrailerKind::TestedBy, row.date_unix_ns);
+                record(&mut observed, t, TrailerKind::Tested, row.date_unix_ns);
             }
             for s in &row.signed_off_by {
-                record(&mut observed, s, TrailerKind::SignedOffBy, row.date_unix_ns);
+                record(&mut observed, s, TrailerKind::SignedOff, row.date_unix_ns);
             }
         }
 
@@ -1688,6 +1691,7 @@ impl Reader {
     /// Used by bug-centric workflows (`lore_fix_status`) that need
     /// to hop across threads via `Reported-by:`, `Link:`, `Closes:`,
     /// or `Fixes:` without paying a full-corpus substring scan.
+    #[allow(clippy::too_many_arguments)]
     pub fn trailer_ref_lookup(
         &self,
         name: &str,
@@ -1736,7 +1740,7 @@ impl Reader {
                     return false;
                 }
                 if let Some(t) = until_unix_ns
-                    && !r.date_unix_ns.is_some_and(|d| d < t)
+                    && r.date_unix_ns.is_none_or(|d| d >= t)
                 {
                     return false;
                 }
@@ -1772,6 +1776,7 @@ impl Reader {
     /// `anchor_required=true` rejects patterns starting with `.*` —
     /// keeps the trigram filter (when we add it) honest. v0.5 fully
     /// scans, so anchoring is policy not performance.
+    #[allow(clippy::too_many_arguments)]
     pub fn regex(
         &self,
         field: RegexField,
@@ -2467,10 +2472,10 @@ pub struct ReceivedTrailerStats {
 /// `maintainer_profile` when aggregating declared-vs-observed.
 #[derive(Copy, Clone, Debug)]
 enum TrailerKind {
-    ReviewedBy,
-    AckedBy,
-    TestedBy,
-    SignedOffBy,
+    Reviewed,
+    Acked,
+    Tested,
+    SignedOff,
 }
 
 #[derive(Debug, Default, Clone)]

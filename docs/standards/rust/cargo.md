@@ -50,7 +50,7 @@ why each section exists so reviewers can spot unjustified additions.
 name = "kernel_lore_mcp"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"     # MSRV — enforced by CI
+rust-version = "1.88"     # MSRV — enforced by CI
 ```
 
 - `name` uses `snake_case` — see [`naming.md`](naming.md). The
@@ -375,7 +375,7 @@ set -euo pipefail
 cargo check --locked --all-targets
 
 # MSRV check with the exact pinned toolchain.
-cargo +1.85 check --locked
+cargo +1.88 check --locked
 
 # Full QA (see code-quality.md)
 cargo fmt --all -- --check

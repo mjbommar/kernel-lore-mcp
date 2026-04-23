@@ -2,7 +2,7 @@
 name = "kernel_lore_mcp"
 version = "0.3.5"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Michael Bommarito <michael@bommaritollc.com>"]
 license = "MIT"
 description = "Rust core for kernel-lore-mcp: ingestion, three-tier indexing, and query routing for lore.kernel.org."

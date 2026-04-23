@@ -5,7 +5,7 @@ Engineering standards for `kernel-lore-mcp`. Two parallel trees:
 - [`python/`](./python/) — Python 3.12+ standards covering the MCP
   surface, pydantic models, FastMCP server, and the Python side of
   the PyO3 boundary.
-- [`rust/`](./rust/) — Rust 1.85+ standards covering the native core
+- [`rust/`](./rust/) — Rust 1.88+ standards covering the native core
   (ingestion, indexing, query routing) and the Rust side of the
   PyO3 boundary.
 

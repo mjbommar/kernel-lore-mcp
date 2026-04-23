@@ -25,12 +25,12 @@
 //!   - Blank line = section break.
 //!   - `#` lines are comments.
 //!   - F:/X: use glob → regex:
-//!       `*`  -> `[^/]*`
-//!       `**` -> `.*`    (our choice: full path across segments)
-//!       `?`  -> `.`
-//!       trailing `/` matches the subtree under that prefix.
-//!       leading `!` is NOT a kernel convention (that's `.gitignore`
-//!       syntax); X: is the exclusion mechanism.
+//!     `*`  -> `[^/]*`
+//!     `**` -> `.*`    (our choice: full path across segments)
+//!     `?`  -> `.`
+//!     trailing `/` matches the subtree under that prefix.
+//!     leading `!` is NOT a kernel convention (that's `.gitignore`
+//!     syntax); X: is the exclusion mechanism.
 //!   - N: is raw regex applied to the full relative path.
 //!   - Depth priority = count of `/` in the pattern. More specific
 //!     (deeper) patterns win over shallower ones. N: counts as

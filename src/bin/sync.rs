@@ -158,6 +158,7 @@ struct SyncStateCleaner {
 }
 
 impl SyncStateReporter {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         data_dir: &Path,
         run_id: &str,

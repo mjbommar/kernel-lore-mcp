@@ -1,6 +1,7 @@
 [toolchain]
-# Edition 2024 requires Rust 1.85+. tantivy 0.26 requires 1.81+.
-# Pin stable 1.85 so ingest/serving builds the same everywhere.
-channel = "stable"
+# Edition 2024 requires Rust 1.85+, but the current locked graph
+# requires Rust 1.88.0 (`time` 0.3.47). Pin the real floor so local
+# builds and CI stay aligned.
+channel = "1.88.0"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

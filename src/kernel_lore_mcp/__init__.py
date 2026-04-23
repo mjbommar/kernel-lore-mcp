@@ -5,7 +5,7 @@ in the Rust extension module `kernel_lore_mcp._core` (built by
 maturin). This package is the MCP surface.
 
 `_core` is imported lazily so that tooling (pytest collection, ruff,
-mypy on source) does not require a built wheel.
+ty on source) does not require a built wheel.
 """
 
 from __future__ import annotations

@@ -216,10 +216,10 @@ cargo audit
 
 ```bash
 # With the exact pinned toolchain
-cargo +1.85 check --locked --all-targets
+cargo +1.88 check --locked --all-targets
 ```
 
-CI runs this on every PR. MSRV is `1.85` — bumping it is a project
+CI runs this on every PR. MSRV is `1.88` — bumping it is a project
 decision (see [`cargo.md`](cargo.md)).
 
 ### cargo-hack (feature matrix)
@@ -295,9 +295,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.88.0
         with:
-          toolchain: "1.85"
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -310,9 +309,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.85"
+      - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo install cargo-deny --locked
       - run: cargo deny check
 ```

@@ -237,15 +237,23 @@ impl EmbeddingBuilder {
 /// NaN is sorted as less than every finite value (safe: cosine of
 /// L2-normalized vectors in [-1, 1] never produces NaN from finite
 /// inputs; guard anyway).
-#[derive(Copy, Clone, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, PartialEq)]
 struct OrdF32(f32);
 
 impl Eq for OrdF32 {}
+impl PartialOrd for OrdF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
 impl Ord for OrdF32 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        match (self.0.is_nan(), other.0.is_nan()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => self.0.partial_cmp(&other.0).expect("finite f32 comparison"),
+        }
     }
 }
 
@@ -427,10 +435,9 @@ impl EmbeddingReader {
             let off = i * row_bytes;
             let slice = &self.vectors_mmap[off..off + row_bytes];
             let mut dot = 0.0_f32;
-            for j in 0..dim {
-                let p = j * 4;
-                let v = f32::from_le_bytes([slice[p], slice[p + 1], slice[p + 2], slice[p + 3]]);
-                dot += v * query[j];
+            for (query_value, bytes) in query.iter().zip(slice.chunks_exact(4)) {
+                let v = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                dot += v * *query_value;
             }
             let cos = OrdF32(dot);
             if heap.len() < k {

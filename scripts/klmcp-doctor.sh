@@ -28,9 +28,9 @@ meh()  { echo "[doctor] WARN: $*"; warn=$((warn + 1)); }
 # ---------------------------------------------------------------- toolchain
 if command -v rustc >/dev/null 2>&1; then
     ver="$(rustc --version | awk '{print $2}')"
-    # Require 1.85+ per rust-toolchain.toml. Sort ascending: if the
+    # Require 1.88+ per rust-toolchain.toml. Sort ascending: if the
     # minimum comes first, the installed version is >= minimum.
-    min=1.85.0
+    min=1.88.0
     smallest="$(printf '%s\n%s\n' "$ver" "$min" | sort -V | head -1)"
     if [[ "$smallest" == "$min" ]]; then
         ok "rustc $ver (>= $min)"

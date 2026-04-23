@@ -12,7 +12,7 @@ Every change passes the full Rust QA pipeline. No shortcuts, no `#[allow(clippy:
 - [ ] `cargo clippy --all-targets -- -D warnings` — zero warnings.
 - [ ] `cargo test` — all tests pass.
 - [ ] `cargo doc --no-deps` — no warnings (broken rustdoc links fail here).
-- [ ] MSRV: `cargo +1.85 build` — builds on the pinned toolchain.
+- [ ] MSRV: `cargo +1.88 build` — builds on the pinned toolchain.
 
 > Source: [`../code-quality.md`](../code-quality.md), [`../index.md`](../index.md).
 
@@ -62,11 +62,11 @@ Run these in order. Fix each before moving on.
 
 ### 5. MSRV check
 
-- [ ] **`cargo +1.85 build --all-targets`** — the pinned toolchain must compile everything.
+- [ ] **`cargo +1.88 build --all-targets`** — the pinned toolchain must compile everything.
   ```bash
-  cargo +1.85 build --all-targets --all-features
+  cargo +1.88 build --all-targets --all-features
   ```
-  If a new API requires 1.86+, the toolchain bump is a separate, justified commit.
+  If a new API requires a newer compiler, the toolchain bump is a separate, justified commit.
 
 ### 6. Cross-layer check
 
