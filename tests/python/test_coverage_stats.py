@@ -3,8 +3,8 @@ in-process cache that backs both the tool and the resource."""
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -23,6 +23,7 @@ def _fixture_stats(generation: int = 5) -> dict:
             "bm25": generation - 1,
             "trigram": generation,
             "tid": None,
+            "path_vocab": generation - 2,
         },
         "per_list": [
             {
@@ -66,6 +67,7 @@ def test_renderer_handles_empty_corpus_gracefully() -> None:
             "bm25": None,
             "trigram": None,
             "tid": None,
+            "path_vocab": None,
         },
         "per_list": [],
     }

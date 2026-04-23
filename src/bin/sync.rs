@@ -12,8 +12,9 @@
 //!   3. For each changed shard, gix clone-or-fetch in parallel.
 //!   4. For each fetched shard, ingest via the existing
 //!      `ingest_shard_with_bm25` under a single writer lock.
-//!   5. Rebuild tid side-table once at the end, bump generation once.
-//!   6. Persist the fresh manifest cache (only on full success, so a
+//!   5. Optionally rebuild derived tiers (tid / path vocab) at the end.
+//!   6. Bump generation once iff the raw corpus changed.
+//!   7. Persist the fresh manifest cache (only on full success, so a
 //!      partial-failure rerun re-fetches the same shards).
 //!
 //! Exit codes:
@@ -28,7 +29,8 @@
 //!   kernel-lore-sync --dry-run  # manifest fetch + diff only
 //!
 //! Stays single-process: the writer lock taken here covers manifest
-//! fetch, gix fetch, ingest, tid rebuild, and the generation bump,
+//! fetch, gix fetch, ingest, optional derived rebuilds, and the
+//! generation bump,
 //! so a concurrent sync invocation fails the flock and exits cleanly
 //! without touching state.
 
@@ -127,6 +129,8 @@ struct SyncStatusRecord {
     stage: String,
     with_bm25: bool,
     with_over: bool,
+    rebuild_tid: bool,
+    rebuild_path_vocab: bool,
     workers: usize,
     total_shards: usize,
     started_shards: usize,
@@ -159,6 +163,8 @@ impl SyncStateReporter {
         run_id: &str,
         with_bm25: bool,
         with_over: bool,
+        rebuild_tid: bool,
+        rebuild_path_vocab: bool,
         workers: usize,
         total_shards: usize,
     ) -> Result<Self> {
@@ -173,6 +179,8 @@ impl SyncStateReporter {
                 stage: "starting".to_string(),
                 with_bm25,
                 with_over,
+                rebuild_tid,
+                rebuild_path_vocab,
                 workers,
                 total_shards,
                 started_shards: 0,
@@ -521,6 +529,13 @@ fn main() -> Result<()> {
         (false, true) => false,
         (false, false) => over_path.exists(),
     };
+    let rebuild_tid = args.with_derived_rebuilds || args.with_tid_rebuild;
+    let rebuild_path_vocab = args.with_derived_rebuilds || args.with_path_vocab_rebuild;
+    if !rebuild_tid && !rebuild_path_vocab {
+        tracing::info!(
+            "derived rebuilds deferred (live-safe default). Run `kernel-lore-reindex` or pass explicit --with-*-rebuild flags when you want tid/path vocab refreshed inline."
+        );
+    }
 
     // Resolve manifest paths to ChangedShard descriptors.
     let changed: Vec<ChangedShard> = changed_paths
@@ -538,6 +553,8 @@ fn main() -> Result<()> {
         &run_id,
         !skip_bm25,
         with_over,
+        rebuild_tid,
+        rebuild_path_vocab,
         workers,
         changed.len(),
     )
@@ -674,6 +691,8 @@ fn main() -> Result<()> {
         lists = stores.len(),
         with_over,
         with_bm25 = !skip_bm25,
+        rebuild_tid,
+        rebuild_path_vocab,
         workers = workers,
         "ingest phase starting"
     );
@@ -782,33 +801,46 @@ fn main() -> Result<()> {
         drop(stage_guard);
     }
 
-    // tid rebuild: reasonable to do every sync tick; touches only the
-    // subset of rows whose tid changed. Cheap at steady state.
-    sync_state
-        .set_stage("tid_rebuild", None)
-        .context("update sync status to tid_rebuild")?;
-    let tid_stage_guard = stage_heartbeat(sync_state.clone(), "tid_rebuild", None, start);
-    tracing::info!("tid rebuild starting");
-    let tid_result = _core::rebuild_tid(&data_dir).context("rebuild tid side-table")?;
-    tracing::info!(
-        rows = tid_result.1,
-        path = %tid_result.0.display(),
-        "tid rebuild done"
-    );
-    drop(tid_stage_guard);
-    sync_state
-        .set_stage("path_vocab_rebuild", None)
-        .context("update sync status to path_vocab_rebuild")?;
-    let path_stage_guard = stage_heartbeat(sync_state.clone(), "path_vocab_rebuild", None, start);
-    tracing::info!("path vocab rebuild starting");
-    if let Some(path_count) = rebuild_path_vocab_after_sync(&data_dir)? {
+    let mut tid_rebuilt = false;
+    let mut path_vocab_rebuilt = false;
+    if rebuild_tid {
+        sync_state
+            .set_stage("tid_rebuild", None)
+            .context("update sync status to tid_rebuild")?;
+        let tid_stage_guard = stage_heartbeat(sync_state.clone(), "tid_rebuild", None, start);
+        tracing::info!("tid rebuild starting");
+        let tid_result = _core::rebuild_tid(&data_dir).context("rebuild tid side-table")?;
         tracing::info!(
-            paths = path_count,
-            path = %data_dir.join("paths").join("vocab.txt").display(),
-            "path vocab rebuild done"
+            rows = tid_result.1,
+            path = %tid_result.0.display(),
+            "tid rebuild done"
         );
+        tid_rebuilt = true;
+        drop(tid_stage_guard);
+    } else {
+        tracing::info!("tid rebuild skipped (live-safe default)");
     }
-    drop(path_stage_guard);
+    if rebuild_path_vocab {
+        sync_state
+            .set_stage("path_vocab_rebuild", None)
+            .context("update sync status to path_vocab_rebuild")?;
+        let path_stage_guard =
+            stage_heartbeat(sync_state.clone(), "path_vocab_rebuild", None, start);
+        tracing::info!("path vocab rebuild starting");
+        if let Some(path_count) = rebuild_path_vocab_after_sync(&data_dir)? {
+            tracing::info!(
+                paths = path_count,
+                path = %data_dir.join("paths").join("vocab.txt").display(),
+                "path vocab rebuild done"
+            );
+            path_vocab_rebuilt = true;
+        } else {
+            tracing::info!("path vocab rebuild skipped by environment");
+        }
+        drop(path_stage_guard);
+    } else {
+        tracing::info!("path vocab rebuild skipped (live-safe default)");
+    }
 
     // Tally.
     let mut total_ingested: u64 = 0;
@@ -851,36 +883,73 @@ fn main() -> Result<()> {
         }
     }
 
-    sync_state
-        .set_stage("generation_bump", None)
-        .context("update sync status to generation_bump")?;
-    tracing::info!("generation bump starting");
-    let new_gen = state.bump_generation().context("bump generation")?;
-    tracing::info!(generation = new_gen, "generation bumped");
+    let corpus_changed = total_ingested > 0;
+    let current_gen = state.generation().context("read generation")?;
+    let new_gen = if corpus_changed {
+        sync_state
+            .set_stage("generation_bump", None)
+            .context("update sync status to generation_bump")?;
+        tracing::info!("generation bump starting");
+        let bumped = state.bump_generation().context("bump generation")?;
+        tracing::info!(generation = bumped, "generation bumped");
+        bumped
+    } else {
+        tracing::info!(
+            generation = current_gen,
+            "generation not bumped (no new messages ingested)"
+        );
+        current_gen
+    };
 
     // Per-tier markers. Same discipline as bin/ingest.rs: only
     // advance the `over` marker on full success so readers bypass
     // over.db on drift.
-    if with_over && total_over_failed == 0 {
+    if corpus_changed && with_over && total_over_failed == 0 {
         state
             .set_tier_generation("over", new_gen)
             .context("set over.generation marker")?;
-    } else if with_over {
+    } else if corpus_changed && with_over {
         tracing::warn!(
             over_failed_shards = total_over_failed,
             corpus_gen = new_gen,
             "over.generation marker NOT advanced"
         );
     }
-    state
-        .set_tier_generation("bm25", new_gen)
-        .context("set bm25.generation marker")?;
-    state
-        .set_tier_generation("trigram", new_gen)
-        .context("set trigram.generation marker")?;
-    state
-        .set_tier_generation("tid", new_gen)
-        .context("set tid.generation marker")?;
+    if corpus_changed && !skip_bm25 {
+        state
+            .set_tier_generation("bm25", new_gen)
+            .context("set bm25.generation marker")?;
+    } else if corpus_changed && skip_bm25 {
+        tracing::warn!(
+            corpus_gen = new_gen,
+            "bm25.generation marker NOT advanced: BM25 was deferred for this sync"
+        );
+    }
+    if corpus_changed {
+        state
+            .set_tier_generation("trigram", new_gen)
+            .context("set trigram.generation marker")?;
+    }
+    if tid_rebuilt {
+        state
+            .set_tier_generation("tid", new_gen)
+            .context("set tid.generation marker")?;
+    } else if corpus_changed {
+        tracing::warn!(
+            corpus_gen = new_gen,
+            "tid.generation marker NOT advanced: tid rebuild was deferred for this sync"
+        );
+    }
+    if path_vocab_rebuilt {
+        state
+            .set_tier_generation("path_vocab", new_gen)
+            .context("set path_vocab.generation marker")?;
+    } else if corpus_changed {
+        tracing::warn!(
+            corpus_gen = new_gen,
+            "path_vocab.generation marker NOT advanced: path vocab rebuild was deferred for this sync"
+        );
+    }
 
     // Persist manifest cache — start from the existing local entries
     // (so filtered-out shards keep their history) and overwrite only
@@ -974,6 +1043,9 @@ struct Args {
     with_bm25: bool,
     with_over: bool,
     no_over: bool,
+    with_tid_rebuild: bool,
+    with_path_vocab_rebuild: bool,
+    with_derived_rebuilds: bool,
     max_retries: u32,
     dry_run: bool,
 }
@@ -1005,6 +1077,9 @@ fn parse_args() -> Result<Args> {
             "--with-bm25" => args.with_bm25 = true,
             "--with-over" => args.with_over = true,
             "--no-over" => args.no_over = true,
+            "--with-tid-rebuild" => args.with_tid_rebuild = true,
+            "--with-path-vocab-rebuild" => args.with_path_vocab_rebuild = true,
+            "--with-derived-rebuilds" => args.with_derived_rebuilds = true,
             "--max-retries" => {
                 args.max_retries = it.next().and_then(|s| s.parse().ok()).unwrap_or(3);
             }
@@ -1031,6 +1106,14 @@ fn parse_args() -> Result<Args> {
                      --with-over           force on over.db writes\n\
                      --no-over             force off over.db writes\n\
                                            (default: on iff <data_dir>/over.db exists)\n\
+                     --with-tid-rebuild    rebuild tid side-table inline\n\
+                                           after ingest (heavier)\n\
+                     --with-path-vocab-rebuild\n\
+                                           rebuild paths/vocab.txt inline\n\
+                                           after ingest (heavier)\n\
+                     --with-derived-rebuilds\n\
+                                           rebuild both tid + path vocab\n\
+                                           inline after ingest\n\
                      --max-retries N       per-shard ingest retry count (default: 3)\n\
                      --dry-run             fetch manifest + diff, don't touch shards\n\
                      \n\
@@ -1043,7 +1126,7 @@ fn parse_args() -> Result<Args> {
                                                   (default: 1)\n\
                      KLMCP_BM25_WRITER_MEMORY_MB BM25 total writer memory budget\n\
                                                   in MiB (default: 128)\n\
-                     KLMCP_SKIP_PATH_VOCAB=1     skip automatic paths/vocab.txt rebuild\n"
+                     KLMCP_SKIP_PATH_VOCAB=1     skip requested path vocab rebuild\n"
                 );
                 std::process::exit(0);
             }

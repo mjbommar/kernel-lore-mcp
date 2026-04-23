@@ -20,8 +20,10 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from kernel_lore_mcp import _core
+from kernel_lore_mcp.routes import status as status_mod
 from kernel_lore_mcp.server import build_server
 from tests.python.fixtures import make_synthetic_shard
 
@@ -156,8 +158,6 @@ async def test_path_mentions_surfaces_setup_required_without_vocab(
     """Without `paths/vocab.txt`, the tool used to return `[]` —
     indistinguishable from "no matches". Post-#72 it raises a
     structured `setup_required` that names the build command."""
-    from fastmcp.exceptions import ToolError
-
     with pytest.raises(ToolError) as exc:
         await client_without_vocab.call_tool(
             "lore_path_mentions",
@@ -165,7 +165,34 @@ async def test_path_mentions_surfaces_setup_required_without_vocab(
         )
     msg = str(exc.value)
     assert "setup_required" in msg
-    assert "rebuild_path_vocab" in msg
+    assert "kernel-lore-reindex" in msg
+    assert "--tier path_vocab" in msg
+
+
+@pytest.mark.asyncio
+async def test_path_mentions_surfaces_setup_required_when_vocab_marker_is_behind(
+    tmp_path: Path,
+) -> None:
+    data_dir = _setup_with_vocab(tmp_path)
+    state_dir = data_dir / "state"
+    (state_dir / "path_vocab.generation").write_text("0\n")
+
+    os.environ["KLMCP_DATA_DIR"] = str(data_dir)
+    status_mod.clear_cache()
+    try:
+        async with Client(build_server()) as client:
+            with pytest.raises(ToolError) as exc:
+                await client.call_tool(
+                    "lore_path_mentions",
+                    {"path": "fs/smb/server/smbacl.c", "match": "exact"},
+                )
+        msg = str(exc.value)
+        assert "setup_required" in msg
+        assert "kernel-lore-reindex" in msg
+        assert "--tier path_vocab" in msg
+    finally:
+        os.environ.pop("KLMCP_DATA_DIR", None)
+        status_mod.clear_cache()
 
 
 def test_rebuild_path_vocab_empty_data_dir_returns_zero(tmp_path: Path) -> None:

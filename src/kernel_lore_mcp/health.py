@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 _ACTIVE_SYNC_STALE_AFTER_SECONDS = 30
+DEFAULT_TIER_NAMES = ("over", "bm25", "trigram", "tid", "path_vocab")
 _SYNC_SHED_STAGES = {
     "ingest",
     "bm25_commit",
@@ -37,6 +38,84 @@ def writer_lock_present(data_dir: Path) -> bool:
         return False
     finally:
         os.close(fd)
+
+
+def read_generation(data_dir: Path) -> tuple[int, datetime | None]:
+    """Read the corpus generation counter + its mtime.
+
+    `generation` is the raw-corpus freshness signal used by `/status`
+    and tool freshness envelopes. A missing file means no ingest has
+    committed against this data_dir yet.
+    """
+    path = data_dir / "state" / "generation"
+    if not path.exists():
+        return (0, None)
+    try:
+        generation = int(path.read_text().strip())
+    except (OSError, ValueError):
+        generation = 0
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+    except OSError:
+        mtime = None
+    return (generation, mtime)
+
+
+def read_tier_generations(
+    data_dir: Path,
+    tier_names: tuple[str, ...] = DEFAULT_TIER_NAMES,
+) -> dict[str, int | None]:
+    """Read per-tier generation markers from `<data_dir>/state/`.
+
+    Missing or unreadable markers collapse to `None`, which callers
+    interpret as the legacy / not-yet-written state rather than as a
+    hard error.
+    """
+    state_dir = data_dir / "state"
+    out: dict[str, int | None] = {}
+    for tier in tier_names:
+        path = state_dir / f"{tier}.generation"
+        if not path.exists():
+            out[tier] = None
+            continue
+        try:
+            out[tier] = int(path.read_text().strip())
+        except (OSError, ValueError):
+            out[tier] = None
+    return out
+
+
+def tier_status(marker_generation: int | None, corpus_generation: int) -> str:
+    if marker_generation is None:
+        return "marker absent"
+    if marker_generation == corpus_generation:
+        return "in sync"
+    if marker_generation < corpus_generation:
+        return f"behind by {corpus_generation - marker_generation}"
+    return f"ahead by {marker_generation - corpus_generation}"
+
+
+def read_tier_statuses(
+    data_dir: Path,
+    tier_names: tuple[str, ...] = DEFAULT_TIER_NAMES,
+) -> dict[str, str]:
+    corpus_generation, _ = read_generation(data_dir)
+    tiers = read_tier_generations(data_dir, tier_names)
+    return {tier: tier_status(tiers[tier], corpus_generation) for tier in tier_names}
+
+
+def tier_generation_in_sync(data_dir: Path, tier: str) -> bool | None:
+    """Return whether one tier marker is current against the corpus.
+
+    `None` means the marker file is absent, which we preserve as a
+    distinct legacy / unknown state instead of conflating it with a
+    hard stale result.
+    """
+    corpus_generation, _ = read_generation(data_dir)
+    marker_generation = read_tier_generations(data_dir, (tier,)).get(tier)
+    if marker_generation is None:
+        return None
+    return marker_generation >= corpus_generation
 
 
 def read_sync_state(data_dir: Path) -> dict[str, Any] | None:

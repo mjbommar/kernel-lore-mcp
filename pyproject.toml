@@ -1,6 +1,6 @@
 [project]
 name = "kernel-lore-mcp"
-version = "0.3.3"
+version = "0.3.4"
 description = "MCP server exposing fast, structured search over lore.kernel.org to LLM developer tools."
 readme = "README.md"
 license = { text = "MIT" }
@@ -59,6 +59,9 @@ kernel-lore-ingest = "kernel_lore_mcp.cli.ingest:main"
 # generation bump). This thin Python entry point exec's the Rust
 # binary so `uv tool install`d users get it without hunting PATH.
 kernel-lore-sync = "kernel_lore_mcp.cli.sync:main"
+# kernel-lore-reindex rebuilds slower derived tiers from the local
+# corpus without refetching lore. Complements the live-safe sync path.
+kernel-lore-reindex = "kernel_lore_mcp.cli.reindex:main"
 # Health / repair probe for local shard mirrors and tier files.
 kernel-lore-doctor = "kernel_lore_mcp.cli.doctor:main"
 

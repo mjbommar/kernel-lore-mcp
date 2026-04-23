@@ -63,7 +63,7 @@ def render_coverage_stats(stats: dict) -> str:
     lines.append("")
     lines.append("| tier | generation | status |")
     lines.append("|---|---|---|")
-    for name in ("over", "bm25", "trigram", "tid"):
+    for name in ("over", "bm25", "trigram", "tid", "path_vocab"):
         val = tiers.get(name)
         if val is None:
             status = "marker absent (legacy / not yet written)"

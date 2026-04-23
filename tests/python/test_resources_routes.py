@@ -116,6 +116,8 @@ def test_status_route_defaults_to_lightweight_shape(http_client: TestClient) -> 
     body = r.json()
     assert body["service"] == "kernel-lore-mcp"
     assert body["generation"] >= 1
+    assert body["tier_generations"]["path_vocab"] is None
+    assert body["tier_status"]["path_vocab"] == "marker absent"
     assert body["per_list_omitted"] is True
     assert "per_list" not in body
 
@@ -129,6 +131,7 @@ def test_status_route_reports_generation_and_per_list_when_requested(
     assert body["service"] == "kernel-lore-mcp"
     assert body["generation"] >= 1
     assert body["last_ingest_utc"] is not None
+    assert body["tier_status"]["trigram"] == "in sync"
     assert body["per_list_omitted"] is False
     assert "linux-cifs" in body["per_list"]
     shards = body["per_list"]["linux-cifs"]
@@ -198,6 +201,23 @@ def test_status_route_reports_freshness_false_on_stale_data(
     body = http_client.get("/status").json()
     assert body["freshness_ok"] is False
     assert body["last_ingest_age_seconds"] > 3 * 300
+
+
+def test_status_route_reports_path_vocab_drift(http_client: TestClient) -> None:
+    from kernel_lore_mcp.config import Settings
+
+    data_dir = Settings().data_dir
+    state_dir = data_dir / "state"
+    (data_dir / "paths").mkdir(exist_ok=True)
+    (data_dir / "paths" / "vocab.txt").write_text("fs/smb/server/smbacl.c\n")
+    (state_dir / "path_vocab.generation").write_text("0\n")
+    status_mod.clear_cache()
+
+    body = http_client.get("/status").json()
+    assert body["tier_generations"]["path_vocab"] == 0
+    assert body["tier_status"]["path_vocab"].startswith("behind by ")
+    assert body["capabilities"]["path_vocab_ready"] is True
+    assert body["capabilities"]["path_vocab_generation_ready"] is True
 
 
 def test_status_route_reports_live_sync_state(http_client: TestClient) -> None:

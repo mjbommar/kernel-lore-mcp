@@ -25,6 +25,7 @@ from pydantic import Field
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import setup_required
 from kernel_lore_mcp.freshness import build_freshness
+from kernel_lore_mcp.health import tier_generation_in_sync
 from kernel_lore_mcp.mapping import row_to_search_hit
 from kernel_lore_mcp.models import RowsResponse
 from kernel_lore_mcp.reader_cache import get_reader
@@ -86,6 +87,8 @@ async def lore_path_mentions(
     from kernel_lore_mcp import _core
 
     settings = get_settings()
+    rebuild_cmd = f"kernel-lore-reindex --data-dir {settings.data_dir} --tier path_vocab"
+
     # Setup check: without paths/vocab.txt the Rust reader returns an
     # empty list instead of an error, which looks identical to "no
     # matches" from the caller's point of view. Fail loudly with an
@@ -95,10 +98,18 @@ async def lore_path_mentions(
         raise setup_required(
             feature="lore_path_mentions",
             missing=f"{settings.data_dir}/paths/vocab.txt",
-            build_cmd=(
-                "python -c 'from kernel_lore_mcp import _core; "
-                f'print(_core.rebuild_path_vocab("{settings.data_dir}"))\''
-            ),
+            build_cmd=rebuild_cmd,
+        )
+
+    # Live-safe sync intentionally leaves derived tiers behind. Treat a
+    # present-but-behind path vocab as a setup issue rather than
+    # serving silently stale path-mention results. Legacy deployments
+    # with no marker remain allowed for backward compatibility.
+    if tier_generation_in_sync(settings.data_dir, "path_vocab") is False:
+        raise setup_required(
+            feature="lore_path_mentions",
+            missing=f"{settings.data_dir}/state/path_vocab.generation",
+            build_cmd=rebuild_cmd,
         )
     reader = get_reader()
     resolved_since, resolved_until = resolve_time_bounds(

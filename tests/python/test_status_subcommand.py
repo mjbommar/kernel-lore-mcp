@@ -43,6 +43,8 @@ def test_status_on_empty_data_dir(tmp_path: Path) -> None:
     assert out["last_ingest_utc"] is None
     assert out["last_ingest_age_seconds"] is None
     assert out["freshness_ok"] is None
+    assert out["tier_generations"]["path_vocab"] is None
+    assert out["tier_status"]["path_vocab"] == "marker absent"
     assert out["writer_lock_present"] is False
     assert out["sync_active"] is False
     assert out["sync"] is None
@@ -70,6 +72,10 @@ def test_status_after_real_ingest(tmp_path: Path) -> None:
     assert out["last_ingest_age_seconds"] >= 0
     assert out["last_ingest_age_seconds"] < 120
     assert out["freshness_ok"] is True
+    assert out["tier_generations"]["trigram"] == out["generation"]
+    assert out["tier_status"]["trigram"] == "in sync"
+    assert out["tier_generations"]["path_vocab"] is None
+    assert out["tier_status"]["path_vocab"] == "marker absent"
     assert out["writer_lock_present"] is False
     assert out["sync_active"] is False
 
@@ -96,3 +102,27 @@ def test_status_reports_stale_after_backdated_mtime(tmp_path: Path) -> None:
     out = _run(["status", "--data-dir", str(data)])
     assert out["freshness_ok"] is False
     assert out["last_ingest_age_seconds"] > 3 * 300
+
+
+def test_status_reports_behind_path_vocab_marker(tmp_path: Path) -> None:
+    shard_dir = tmp_path / "shards" / "0.git"
+    shard_dir.parent.mkdir(parents=True)
+    make_synthetic_shard(shard_dir)
+    data = tmp_path / "data"
+    data.mkdir()
+    _core.ingest_shard(
+        data_dir=data,
+        shard_path=shard_dir,
+        list="linux-cifs",
+        shard="0",
+        run_id="status-path-vocab",
+    )
+
+    state_dir = data / "state"
+    (data / "paths").mkdir()
+    (data / "paths" / "vocab.txt").write_text("fs/smb/server/smbacl.c\n")
+    (state_dir / "path_vocab.generation").write_text("0\n")
+
+    out = _run(["status", "--data-dir", str(data)])
+    assert out["tier_generations"]["path_vocab"] == 0
+    assert out["tier_status"]["path_vocab"].startswith("behind by ")

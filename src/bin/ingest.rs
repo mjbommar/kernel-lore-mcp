@@ -265,9 +265,16 @@ fn main() -> Result<()> {
             "over.generation marker NOT advanced: readers will bypass over.db until reconciled"
         );
     }
-    state
-        .set_tier_generation("bm25", new_gen)
-        .context("set bm25.generation marker")?;
+    if !skip_bm25 {
+        state
+            .set_tier_generation("bm25", new_gen)
+            .context("set bm25.generation marker")?;
+    } else {
+        tracing::warn!(
+            corpus_gen = new_gen,
+            "bm25.generation marker NOT advanced: BM25 was deferred for this ingest"
+        );
+    }
     state
         .set_tier_generation("trigram", new_gen)
         .context("set trigram.generation marker")?;

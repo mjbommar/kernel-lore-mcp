@@ -10,6 +10,33 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-04-23
+
+### Added
+
+- Added `kernel-lore-reindex`, a dedicated derived-tier rebuild command
+  for BM25, TID parquet, and path vocabulary refreshes after live sync.
+- Added tier generation and freshness reporting to `/status`,
+  `kernel-lore-mcp status`, coverage resources, and corpus stats so
+  operators can tell exactly which derived indexes are stale.
+
+### Changed
+
+- `kernel-lore-sync` is now live-safe by default: it fetches and
+  ingests lore shards without automatically rebuilding expensive
+  derived tiers on the serving box.
+- Derived rebuilds are now explicit via `kernel-lore-reindex` or the
+  opt-in sync flags `--with-tid-rebuild`, `--with-path-vocab-rebuild`,
+  and `--with-derived-rebuilds`.
+
+### Fixed
+
+- Sync no longer bumps the corpus generation, BM25 marker, TID marker,
+  or path-vocabulary marker when no corresponding content was actually
+  ingested or rebuilt.
+- BM25 and path-mention readers now reject stale derived indexes instead
+  of silently serving results from a previous corpus generation.
+
 ## [0.3.2] — 2026-04-22
 
 ### Added

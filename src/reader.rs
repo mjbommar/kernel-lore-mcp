@@ -273,6 +273,12 @@ impl Reader {
     /// triggers a `maybe_reload` so the reader picks up new segments
     /// whenever the generation file has advanced since the last query.
     fn bm25(&self) -> Result<Arc<crate::bm25::BmReader>> {
+        if !Self::bm25_is_current(&self.data_dir) {
+            return Err(Error::State(
+                "bm25 generation behind corpus; rebuild BM25 or run sync with --with-bm25"
+                    .to_owned(),
+            ));
+        }
         if let Ok(guard) = self.bm25.read()
             && let Some(ref r) = *guard
         {
@@ -352,60 +358,68 @@ impl Reader {
         Ok(store)
     }
 
-    /// Check whether over.db's per-tier generation marker matches the
-    /// corpus generation. If ingest wrote Parquet successfully but the
-    /// over.db insert_batch failed, the main generation advances while
-    /// the over.db marker stays behind — readers MUST bypass over.db
-    /// in that window or they'll return silently-incomplete results.
-    ///
-    /// Returns `true` when it's safe to use over.db:
-    ///   * marker exists AND matches (or exceeds) the corpus generation;
-    ///   * marker file does NOT exist — a legacy deployment ingested
-    ///     before per-tier markers shipped. We honor backward-compat
-    ///     and trust over.db; the next ingest with the new code will
-    ///     start writing markers and kick in strict checking;
-    ///   * the corpus generation is 0 (fresh data_dir, nothing to
-    ///     be stale against).
-    ///
-    /// Returns `false` only when the marker is PRESENT and behind.
-    /// That's a positive signal of drift, not a missing/unknown
-    /// state. Any read error also returns `false` (fail safe).
-    fn over_db_is_current(data_dir: &Path) -> bool {
+    /// Check whether one tier's generation marker matches the corpus
+    /// generation. Missing markers are treated as "legacy / unknown"
+    /// and allowed for backward compatibility; a PRESENT-but-behind
+    /// marker disables that tier.
+    fn tier_marker_is_current(data_dir: &Path, tier: &str, label: &str) -> bool {
         let Ok(state) = State::new(data_dir) else {
             return false;
         };
         let corpus_gen = match state.generation() {
             Ok(g) => g,
             Err(e) => {
-                tracing::warn!(error = %e, "Reader: cannot read corpus generation; disabling over.db");
+                tracing::warn!(
+                    error = %e,
+                    tier = label,
+                    "Reader: cannot read corpus generation; disabling tier"
+                );
                 return false;
             }
         };
         if corpus_gen == 0 {
             return true;
         }
-        match state.tier_generation("over") {
+        match state.tier_generation(tier) {
             Ok(None) => {
-                // Legacy deployment — no marker file. Trust over.db;
+                // Legacy deployment — no marker file. Trust the tier;
                 // operators running the new ingest will get strict
                 // marker-based coherence once the first post-upgrade
                 // ingest completes.
                 true
             }
-            Ok(Some(over_gen)) if over_gen >= corpus_gen => true,
-            Ok(Some(over_gen)) => {
+            Ok(Some(tier_gen)) if tier_gen >= corpus_gen => true,
+            Ok(Some(tier_gen)) => {
                 tracing::warn!(
-                    over_gen,
+                    tier = label,
+                    tier_gen,
                     corpus_gen,
-                    "Reader: over.db generation behind corpus; disabling over.db until next ingest reconciles"
+                    "Reader: tier generation behind corpus; disabling tier until next ingest reconciles"
                 );
                 false
             }
             Err(e) => {
-                tracing::warn!(error = %e, "Reader: cannot read over.generation; disabling over.db");
+                tracing::warn!(
+                    error = %e,
+                    tier = label,
+                    "Reader: cannot read tier generation; disabling tier"
+                );
                 false
             }
         }
+    }
+
+    /// Check whether over.db's generation marker matches the corpus
+    /// generation. See `tier_marker_is_current` for the contract.
+    fn over_db_is_current(data_dir: &Path) -> bool {
+        Self::tier_marker_is_current(data_dir, "over", "over.db")
+    }
+
+    /// Check whether the BM25 tier marker matches the corpus
+    /// generation. A behind marker means prose search would be
+    /// silently incomplete, so the reader refuses the tier.
+    fn bm25_is_current(data_dir: &Path) -> bool {
+        Self::tier_marker_is_current(data_dir, "bm25", "bm25")
     }
 
     /// Borrow the optional over.db handle. `None` when the data dir
@@ -460,7 +474,7 @@ impl Reader {
         let state = crate::state::State::new(&self.data_dir)?;
         let generation = state.generation().unwrap_or(0);
         let generation_mtime_ns = self.generation_mtime_ns()?;
-        let tier_names = ["over", "bm25", "trigram", "tid"];
+        let tier_names = ["over", "bm25", "trigram", "tid", "path_vocab"];
         let mut tier_generations = Vec::with_capacity(tier_names.len());
         for name in &tier_names {
             let g = state.tier_generation(name).ok().flatten();
@@ -4088,6 +4102,27 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         assert!(
             reader.over_db().is_none(),
             "Reader opened stale over.db; marker=3 vs corpus=5"
+        );
+    }
+
+    /// Prose search must refuse a BM25 tier whose marker is behind
+    /// the corpus generation; otherwise free-text results go silently
+    /// stale after a deferred-BM25 sync.
+    #[test]
+    fn reader_disables_bm25_when_marker_behind() {
+        use crate::state::State;
+
+        let dir = tempdir().unwrap();
+        let state = State::new(dir.path()).unwrap();
+
+        std::fs::write(dir.path().join("state").join("generation"), "5\n").unwrap();
+        state.set_tier_generation("bm25", 3).unwrap();
+
+        let reader = Reader::new(dir.path());
+        let err = reader.prose_search("ksmbd", 10).unwrap_err();
+        assert!(
+            err.to_string().contains("bm25 generation behind corpus"),
+            "unexpected error: {err}"
         );
     }
 

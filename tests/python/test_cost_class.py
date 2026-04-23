@@ -5,8 +5,8 @@ cap + structured rate_limited rejection.
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,8 +139,6 @@ async def test_cost_limited_retry_after_rises_during_active_sync(
 ) -> None:
     state = tmp_path / "state"
     state.mkdir(parents=True)
-    lock_file = (state / "writer.lock").open("w+")
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     (state / "sync.json").write_text(
         json.dumps(
             {
@@ -152,6 +150,12 @@ async def test_cost_limited_retry_after_rises_during_active_sync(
         )
     )
     monkeypatch.setenv("KLMCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        cost_class,
+        "get_settings",
+        lambda: SimpleNamespace(data_dir=tmp_path, mode="local"),
+    )
+    monkeypatch.setattr("kernel_lore_mcp.health.writer_lock_present", lambda _: True)
     monkeypatch.setitem(cost_class._LIMITS, "moderate", 1)
     monkeypatch.setitem(cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(1))
 
@@ -168,9 +172,6 @@ async def test_cost_limited_retry_after_rises_during_active_sync(
     assert "bm25_commit" in str(exc_info.value)
     assert "Retry after 20s." in str(exc_info.value)
 
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    lock_file.close()
-
 
 @pytest.mark.asyncio
 async def test_cost_limited_sheds_moderate_work_during_writer_heavy_sync(
@@ -179,8 +180,6 @@ async def test_cost_limited_sheds_moderate_work_during_writer_heavy_sync(
 ) -> None:
     state = tmp_path / "state"
     state.mkdir(parents=True)
-    lock_file = (state / "writer.lock").open("w+")
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     (state / "sync.json").write_text(
         json.dumps(
             {
@@ -192,6 +191,12 @@ async def test_cost_limited_sheds_moderate_work_during_writer_heavy_sync(
         )
     )
     monkeypatch.setenv("KLMCP_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        cost_class,
+        "get_settings",
+        lambda: SimpleNamespace(data_dir=tmp_path, mode="local"),
+    )
+    monkeypatch.setattr("kernel_lore_mcp.health.writer_lock_present", lambda _: True)
     monkeypatch.setitem(cost_class._LIMITS, "moderate", 8)
     monkeypatch.setitem(cost_class._SEMAPHORES, "moderate", asyncio.Semaphore(8))
 
@@ -207,6 +212,3 @@ async def test_cost_limited_sheds_moderate_work_during_writer_heavy_sync(
         await wrapped()
     assert exc_info.value.code == "rate_limited"
     assert "Retry after 10s." in str(exc_info.value)
-
-    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-    lock_file.close()

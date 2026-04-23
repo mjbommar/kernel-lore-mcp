@@ -25,6 +25,7 @@ that doubles the cost and callers who care can issue a separate
 from __future__ import annotations
 
 import threading
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
@@ -47,8 +48,8 @@ class PerListStats(BaseModel):
 
 class TierGeneration(BaseModel):
     tier: str = Field(
-        description="`over` | `bm25` | `trigram` | `tid` — the four "
-        "per-tier generation markers ingest maintains."
+        description="`over` | `bm25` | `trigram` | `tid` | `path_vocab` "
+        "— the per-tier generation markers the index pipeline maintains."
     )
     generation: int | None = Field(
         default=None,
@@ -91,7 +92,8 @@ class CorpusStatsResponse(BaseModel):
         description=(
             "Per-tier readiness booleans — `over_db_ready`, "
             "`bm25_ready`, `trigram_ready`, `tid_ready`, "
-            "`path_vocab_ready`, `embedding_ready`, `maintainers_ready`, "
+            "`path_vocab_ready`, `path_vocab_generation_ready`, "
+            "`embedding_ready`, `maintainers_ready`, "
             "`git_sidecar_ready`, `metadata_ready`. Lets callers "
             "distinguish 'no results' from 'feature not provisioned'."
         ),
@@ -160,10 +162,8 @@ def warm_corpus_stats_cache(data_dir: str | None = None) -> None:
     resolved = str(data_dir or settings.data_dir)
     reader = get_reader() if resolved == str(settings.data_dir) else _core.Reader(resolved)
     generation = 0
-    try:
+    with suppress(Exception):
         generation = reader.generation()
-    except Exception:
-        pass
     _cached_corpus_stats(reader, resolved, generation)
 
 
@@ -215,12 +215,8 @@ async def lore_corpus_stats(
     settings = get_settings()
     reader = _core.Reader(settings.data_dir)
     generation = 0
-    try:
+    with suppress(Exception):
         generation = reader.generation()
-    except Exception:
-        # Fresh data_dir with no ingest yet — the cache key stays
-        # (data_dir, 0); we'll recompute once on first real ingest.
-        pass
     stats = await run_with_timeout(
         _cached_corpus_stats, reader, str(settings.data_dir), generation
     )
@@ -233,7 +229,7 @@ async def lore_corpus_stats(
             generation=tier_dict.get(name),
             status=_status_for(tier_dict.get(name), generation),
         )
-        for name in ("over", "bm25", "trigram", "tid")
+        for name in ("over", "bm25", "trigram", "tid", "path_vocab")
     ]
 
     per_list_raw = stats.get("per_list", [])

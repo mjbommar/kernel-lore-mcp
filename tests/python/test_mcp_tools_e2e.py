@@ -330,7 +330,7 @@ async def test_lore_corpus_stats_surfaces_per_list_rows(client: Client) -> None:
 
     # Every tier marker present; status reflects the corpus gen.
     tier_names = {t.tier for t in data.tiers}
-    assert tier_names == {"over", "bm25", "trigram", "tid"}
+    assert tier_names == {"over", "bm25", "trigram", "tid", "path_vocab"}
     for tier in data.tiers:
         assert tier.status in {
             "in sync",

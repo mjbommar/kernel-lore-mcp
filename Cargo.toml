@@ -1,6 +1,6 @@
 [package]
 name = "kernel_lore_mcp"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Michael Bommarito <michael@bommaritollc.com>"]
@@ -145,7 +145,7 @@ version = "0.3"
 features = ["env-filter", "json"]
 
 [[bin]]
-name = "reindex"
+name = "kernel-lore-reindex"
 path = "src/bin/reindex.rs"
 
 [[bin]]

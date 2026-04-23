@@ -25,25 +25,17 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from kernel_lore_mcp.config import Settings
-from kernel_lore_mcp.health import read_sync_state, writer_lock_present
+from kernel_lore_mcp.health import (
+    read_generation,
+    read_sync_state,
+    read_tier_generations,
+    read_tier_statuses,
+    writer_lock_present,
+)
 
 # Cache keyed by data_dir so multi-config / test embedding doesn't
 # cross-contaminate. TTL from settings.freshness_cache_ttl_seconds.
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
-
-
-def _read_generation(data_dir: Path) -> tuple[int, datetime | None]:
-    path = data_dir / "state" / "generation"
-    if not path.exists():
-        return (0, None)
-    try:
-        gen = int(path.read_text().strip())
-    except ValueError:
-        gen = 0
-    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-    return (gen, mtime)
-
-
 def _per_list_shards(data_dir: Path) -> dict[str, list[dict[str, str]]]:
     """Enumerate `<data_dir>/state/shards/<list>/<shard>.oid` files."""
     shards_root = data_dir / "state" / "shards"
@@ -68,7 +60,9 @@ def _per_list_shards(data_dir: Path) -> dict[str, list[dict[str, str]]]:
 
 def _build_status(settings: Settings, *, include_per_list: bool) -> dict[str, Any]:
     data_dir = settings.data_dir
-    generation, last_ingest = _read_generation(data_dir)
+    generation, last_ingest = read_generation(data_dir)
+    tier_generations = read_tier_generations(data_dir)
+    tier_status = read_tier_statuses(data_dir)
     writer_lock = writer_lock_present(data_dir)
     sync = read_sync_state(data_dir)
 
@@ -92,6 +86,8 @@ def _build_status(settings: Settings, *, include_per_list: bool) -> dict[str, An
         "last_ingest_age_seconds": last_ingest_age_seconds,
         "configured_interval_seconds": interval,
         "freshness_ok": freshness_ok,
+        "tier_generations": tier_generations,
+        "tier_status": tier_status,
         "writer_lock_present": writer_lock,
         "sync_active": bool(sync and sync.get("active")),
         "sync": sync,
@@ -112,15 +108,19 @@ def capabilities(data_dir: Path) -> dict[str, bool]:
     field is a cheap filesystem probe — no index open, no SQL.
     """
     state = data_dir / "state"
+    tier_generations = read_tier_generations(data_dir)
     # Per-tier generation markers are written at the end of ingest
     # only when the tier committed cleanly; missing marker == tier
     # never written on this data_dir OR a legacy pre-marker build.
+    # `path_vocab_ready` stays a cheap "is the file provisioned?"
+    # probe; `/status.tier_status.path_vocab` carries the drift signal.
     return {
         "metadata_ready": _has_any(data_dir / "metadata"),
         "over_db_ready": (data_dir / "over.db").exists(),
         "bm25_ready": (state / "bm25.generation").exists(),
         "trigram_ready": (state / "trigram.generation").exists(),
         "tid_ready": (state / "tid.generation").exists(),
+        "path_vocab_generation_ready": tier_generations.get("path_vocab") is not None,
         "path_vocab_ready": (data_dir / "paths" / "vocab.txt").exists(),
         "embedding_ready": (data_dir / "embeddings" / "meta.json").exists(),
         "maintainers_ready": _maintainers_ready(data_dir),

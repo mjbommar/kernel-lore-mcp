@@ -22,13 +22,11 @@ import argparse
 import json
 import os
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
 
 from kernel_lore_mcp import __version__
-from kernel_lore_mcp.health import read_sync_state, writer_lock_present
 from kernel_lore_mcp.logging_ import configure as configure_logging
 from kernel_lore_mcp.logging_ import profiling_thresholds
 
@@ -151,50 +149,15 @@ def _run_serve(args: argparse.Namespace) -> int:
 def _run_status(args: argparse.Namespace) -> int:
     """Read state/generation directly — no server, no HTTP."""
     from kernel_lore_mcp.config import Settings
+    from kernel_lore_mcp.routes.status import clear_cache as clear_status_cache
+    from kernel_lore_mcp.routes.status import get_status
 
     data_dir = Path(args.data_dir) if args.data_dir else Settings().data_dir
-    gen_file = data_dir / "state" / "generation"
-    sync = read_sync_state(data_dir)
-    writer_active = writer_lock_present(data_dir)
-
-    if not gen_file.exists():
-        out = {
-            "service": "kernel-lore-mcp",
-            "data_dir": str(data_dir),
-            "generation": 0,
-            "last_ingest_utc": None,
-            "last_ingest_age_seconds": None,
-            "configured_interval_seconds": Settings().grokmirror_interval_seconds,
-            "freshness_ok": None,
-            "writer_lock_present": writer_active,
-            "sync_active": bool(sync and sync.get("active")),
-            "sync": sync,
-            "note": "no ingest has run against this data_dir yet",
-        }
-        json.dump(out, sys.stdout)
-        sys.stdout.write("\n")
-        return 0
-
-    try:
-        generation = int(gen_file.read_text().strip())
-    except ValueError:
-        generation = 0
-    mtime = datetime.fromtimestamp(gen_file.stat().st_mtime, tz=UTC)
-    now = datetime.now(tz=UTC)
-    age = max(0, int((now - mtime).total_seconds()))
-    interval = Settings().grokmirror_interval_seconds
-    out = {
-        "service": "kernel-lore-mcp",
-        "data_dir": str(data_dir),
-        "generation": generation,
-        "last_ingest_utc": mtime.isoformat(),
-        "last_ingest_age_seconds": age,
-        "configured_interval_seconds": interval,
-        "freshness_ok": age < 3 * interval,
-        "writer_lock_present": writer_active,
-        "sync_active": bool(sync and sync.get("active")),
-        "sync": sync,
-    }
+    clear_status_cache()
+    out = get_status(settings=Settings(data_dir=data_dir), include_per_list=False)
+    out["data_dir"] = str(data_dir)
+    if out["last_ingest_utc"] is None:
+        out["note"] = "no ingest has run against this data_dir yet"
     json.dump(out, sys.stdout)
     sys.stdout.write("\n")
     return 0
