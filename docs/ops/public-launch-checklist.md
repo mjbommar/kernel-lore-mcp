@@ -100,5 +100,9 @@ answer, not just the short adversarial gate.
 - The tagged release version matches:
   `pyproject.toml`, `Cargo.toml`, `src/kernel_lore_mcp/__init__.py`.
 - `CHANGELOG.md` contains a dated section for the exact version.
-- A clean install from PyPI succeeds in a throwaway venv and both
-  `kernel-lore-mcp --help` and `kernel-lore-sync --help` work.
+- A clean install from PyPI succeeds in a throwaway venv and all of
+  these work:
+  `kernel-lore-mcp --help`,
+  `kernel-lore-sync --version`,
+  `kernel-lore-reindex --version`,
+  `kernel-lore-doctor --version`.

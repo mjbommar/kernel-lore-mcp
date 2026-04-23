@@ -76,7 +76,7 @@ and not every deployment wants them:
 
 | Capability | Build | When you want it |
 |---|---|---|
-| BM25 prose search (`b:` / free text) | `kernel-lore-ingest --rebuild-bm25` | semantic-free text search over prose bodies |
+| BM25 prose search (`b:` / free text) | `kernel-lore-reindex --data-dir $KLMCP_DATA_DIR --tier bm25` | semantic-free text search over prose bodies |
 | Semantic embeddings (`lore_nearest`, `lore_similar`) | `kernel-lore-embed --data-dir $KLMCP_DATA_DIR` | "more like this" / free-text → vector ANN |
 | Git-sidecar (authoritative `merged` + `picked_up`) | `kernel-lore-build-git-sidecar --repo linux-stable --path /path/to/linux-stable.git` | upgrades `lore_stable_backport_status` + `lore_thread_state` from lore heuristic to git-history truth |
 | MAINTAINERS snapshot | drop a `MAINTAINERS` file into `$KLMCP_DATA_DIR` or point `$KLMCP_MAINTAINERS_FILE` at one | `lore_maintainer_profile` declared-vs-observed ownership |
@@ -97,8 +97,12 @@ git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
-cargo build --release --bin kernel-lore-sync --bin kernel-lore-ingest --bin kernel-lore-doctor
+cargo build --release \
+    --bin kernel-lore-sync \
+    --bin kernel-lore-reindex \
+    --bin kernel-lore-doctor
 ./target/release/kernel-lore-sync --data-dir $KLMCP_DATA_DIR --with-over
+./target/release/kernel-lore-reindex --data-dir $KLMCP_DATA_DIR
 ./target/release/kernel-lore-doctor --data-dir $KLMCP_DATA_DIR
 ```
 
@@ -108,17 +112,17 @@ Want fuller coverage? Drop `--include` flags to mirror all ~390
 lists (~100+ GB first run).
 
 Want production-grade systemd deployment (single `klmcp-sync.timer`
-replacing the pre-v0.2.0 grokmirror + ingest pair)?
+plus the long-lived MCP server)?
 [`docs/ops/runbook.md`](./docs/ops/runbook.md) §1 onwards.
 
-## Status — v0.3.2 (2026-04-22)
+## Status — v0.3.5 (2026-04-23)
 
-Current release: `v0.3.2`, the follow-on patch after the hosted
-readiness and same-box sync hardening line. The focus is better bug
-workflow ergonomics and safer query scoping: a first-class
-`lore_fix_status` tool, indexed trailer-reference correlation for
-syzbot / lore / `Fixes:` joins, and human-readable `since` / `until`
-bounds across both tools and `lore_search`.
+Current release: `v0.3.5`. The `0.3.x` line hardened hosted
+operation, made sync live-safe by default, added explicit derived-tier
+rebuilds via `kernel-lore-reindex`, and improved packaging so the
+wheel-shipped helper CLIs (`kernel-lore-sync`,
+`kernel-lore-reindex`, `kernel-lore-doctor`) work from clean
+`uv tool install` / `uvx` installs.
 
 Shipped:
 
@@ -128,8 +132,14 @@ Shipped:
 - **`kernel-lore-sync`** — one Rust binary that internalized the
   legacy `grokmirror` + separate-ingest two-process chain. HTTPS
   manifest fetch, gix smart-HTTP clone-or-fetch (rayon-fanned
-  across shards), ingest, tid rebuild, generation bump — all
-  under one writer lock so there's no trigger/debounce race.
+  across shards), ingest, and generation bump — all under one
+  writer lock so there's no trigger/debounce race.
+- **`kernel-lore-reindex`** — rebuilds slower derived tiers from the
+  already-downloaded local corpus. Defaults to `tid + path_vocab`;
+  `--tier bm25` rebuilds prose search explicitly and off the hot path.
+- **`kernel-lore-doctor`** — inspects shard + tier health and can
+  repair unborn shard HEADs or remove broken shard repos so the next
+  sync reclones them cleanly.
 - Full MCP surface: **25 tools** (search, primitives, sampling-
   backed summarize/classify/explain, authoritative `merged` /
   `picked_up` verdicts via git-sidecar, `lore_corpus_stats` for
@@ -146,14 +156,15 @@ Shipped:
   per-tier `capabilities` flags so clients distinguish "no
   results" from "feature not provisioned."
 - systemd units for hosted deploy; 5-min `klmcp-sync.timer`
-  cadence (docs/ops/update-frequency.md).
+  cadence, machine-readable sync progress, and exported
+  `writer_lock_present` / `sync_active` metrics + status fields.
 - Live-tested against real `claude --print` and `codex exec`
   every commit via `scripts/agentic_smoke.sh`.
 
-Next: see [`docs/plans/2026-04-20-v0.3.0-plan.md`](./docs/plans/2026-04-20-v0.3.0-plan.md)
-— tag close-out, `kernel-lore-sync --bootstrap`, auto-built path
-vocab, CI perf gate, `lore_maintainer_graph`, thread-state
-classifier upgrade.
+Near-term work is focused on production hardening and better
+continuous-sync ergonomics. The active execution list lives in
+[`TODO.md`](./TODO.md); dated plans under [`docs/plans/`](./docs/plans/)
+remain as design history.
 
 Deferred past v0.3: trained kernel-specific retrieval model
 ([`docs/research/training-retriever.md`](./docs/research/training-retriever.md)),
@@ -221,8 +232,7 @@ retriever on that self-supervised signal. Recipe:
 - [`docs/mcp/transport-auth.md`](./docs/mcp/transport-auth.md) —
   transport + why no auth
 - [`docs/architecture/`](./docs/architecture/) — design rationale
-- [`docs/plans/2026-04-20-v0.3.0-plan.md`](./docs/plans/2026-04-20-v0.3.0-plan.md) —
-  active release plan
+- [`TODO.md`](./TODO.md) — current execution contract
 - [`docs/plans/2026-04-14-best-in-class-kernel-mcp.md`](./docs/plans/2026-04-14-best-in-class-kernel-mcp.md) —
   6-month roadmap (north star)
 - [`docs/research/`](./docs/research/) — dated investigations that

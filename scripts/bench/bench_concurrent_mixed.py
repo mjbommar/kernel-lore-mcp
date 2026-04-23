@@ -63,11 +63,25 @@ def call_fetch_message(r) -> Any:
 
 
 def call_eq_from(r) -> Any:
-    return r.eq("from_addr", random.choice(SEED_FROMS), None, None, 50)
+    return r.eq(
+        "from_addr",
+        random.choice(SEED_FROMS),
+        None,
+        None,
+        None,
+        50,
+    )
 
 
 def call_eq_list(r) -> Any:
-    return r.eq("list", random.choice(SEED_LISTS), None, None, 50)
+    return r.eq(
+        "list",
+        random.choice(SEED_LISTS),
+        None,
+        None,
+        None,
+        50,
+    )
 
 
 def call_thread(r) -> Any:

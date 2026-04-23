@@ -10,22 +10,23 @@
 # 16000/1000). Owner: kernel-lore-mcp:kernel-lore-mcp.
 KLMCP_DATA_DIR=/var/lib/kernel-lore-mcp
 
-# Optional: override the default grokmirror config path.
-# KLMCP_GROKMIRROR_CONF=/usr/local/etc/kernel-lore-mcp/grokmirror.conf
+# Optional: keep `/status` freshness math aligned with your actual
+# timer cadence. Default 300s.
+# KLMCP_GROKMIRROR_INTERVAL_SECONDS=300
 
-# Optional: debounce floor on ingest. 30s covers the overlap between
-# consecutive grok-pull ticks in pathological cases.
-# KLMCP_INGEST_DEBOUNCE_SECONDS=30
-
-# Optional: rayon worker count for the shard walker.
-# KLMCP_INGEST_CONCURRENCY=8
+# Optional: shard fanout for fetch + ingest. If unset, sync picks a
+# memory-aware default and caps it by available RAM.
+# KLMCP_SYNC_WORKERS=2
+# KLMCP_SYNC_WORKER_MEMORY_MB=8192
+# KLMCP_SYNC_MEMORY_RESERVE_MB=4096
 
 # Optional: bind for the public MCP server. Default 127.0.0.1.
 # Set to 0.0.0.0 explicitly for the hosted instance (behind nginx).
+# KLMCP_MODE=hosted
 # KLMCP_BIND=127.0.0.1
 # KLMCP_PORT=8080
 
 # HMAC key for opaque cursor signing. Server-SIDE secret; callers
 # never see it. Rotate by restarting klmcp-mcp with a new value.
 # Generate with: openssl rand -hex 32
-KLMCP_CURSOR_SIGNING_KEY=REPLACE_WITH_openssl_rand_hex_32
+KLMCP_CURSOR_KEY=REPLACE_WITH_openssl_rand_hex_32

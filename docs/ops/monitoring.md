@@ -7,21 +7,22 @@ Single-box, so keep this simple.
 | Metric | Source | Alert at |
 |---|---|---|
 | `/status` HTTP 200 | external blackbox prober | 3 consecutive failures |
-| Last `grok-pull` UTC | filesystem mtime on manifest | > 30 min stale |
-| Last ingest UTC | `/status` | > 30 min behind grok-pull |
+| `kernel_lore_mcp_last_ingest_age_seconds` | `/metrics` | > 900 on a 5 min box |
+| `kernel_lore_mcp_freshness_ok` | `/metrics` | 0 for 10 min |
+| `kernel_lore_mcp_sync_active` | `/metrics` | stuck at 1 for unexpectedly long runs |
 | CPU 5-min avg | CloudWatch | > 80% for 15 min |
 | EBS IOPS used | CloudWatch | > 5000 for 5 min |
 | Disk free | node-exporter | < 20% |
-| 5xx rate | nginx access log | > 1% |
-| p95 tool latency | structlog → log-based metric | > 500ms |
-| Rate-limit rejections | nginx | > 100/min (abuse signal) |
+| 5xx rate | reverse-proxy or app logs | > 1% |
+| `kernel_lore_mcp_tool_latency_seconds` p95 | `/metrics` | > 500ms sustained |
+| `kernel_lore_mcp_tool_calls_total{status="rate_limited"}` | `/metrics` | unexpected sustained rise |
 
 ## Stack
 
 - **Logs:** structlog in Python, `tracing` in Rust (both emit
   JSON). Forward to CloudWatch Logs.
-- **Metrics:** CloudWatch native + a thin Prometheus exporter
-  (uvicorn middleware) for custom counters.
+- **Metrics:** built-in Prometheus exposition at `/metrics`, plus
+  whatever host-level metrics stack you already run.
 - **Uptime:** a single external prober (Better Stack / UptimeRobot
   free tier) hitting `/status`.
 - **Dashboards:** CloudWatch dashboard with the table above.
@@ -42,7 +43,7 @@ Single-box, so keep this simple.
 A [`runbook.md`](./runbook.md) lives adjacent to this doc.
 Required sections:
 - How to reset the index from the compressed store.
-- How to manually re-run ingestion with verbose logging.
+- How to manually re-run `kernel-lore-sync` with verbose logging.
 - How to roll back after a bad deploy.
 - How to rate-limit an abusive IP manually.
 - Who to contact at kernel.org if lore manifest becomes

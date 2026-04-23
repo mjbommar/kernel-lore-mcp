@@ -5,10 +5,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-# v0.2.0: `kernel-lore-sync` replaces the grokmirror + klmcp-ingest
-# two-unit chain with one atomic process. Holds the writer lock for
-# manifest fetch + gix fetch + ingest + tid rebuild + generation
-# bump, so a concurrent invocation fails the flock and exits cleanly.
+# `kernel-lore-sync` is the sole writer. It does manifest fetch +
+# gix fetch + ingest under one writer lock so concurrent invocations
+# fail the flock and exit cleanly. Slower derived rebuilds stay
+# explicit via `kernel-lore-reindex`.
 Type=oneshot
 User=kernel-lore-mcp
 Group=kernel-lore-mcp
@@ -17,7 +17,7 @@ Group=kernel-lore-mcp
 # KLMCP_MANIFEST_URL (default: lore.kernel.org/manifest.js.gz).
 EnvironmentFile=/etc/kernel-lore-mcp/env
 
-ExecStart=/usr/local/bin/kernel-lore-sync
+ExecStart=/usr/local/bin/kernel-lore-sync --with-over
 
 # Tighter budget than the old grokmirror unit because we no longer
 # shell out to git subprocesses; gix fetch runs in-process and is

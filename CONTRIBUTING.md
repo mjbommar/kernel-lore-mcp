@@ -9,7 +9,10 @@ git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
-cargo build --release --bin kernel-lore-ingest
+cargo build --release \
+    --bin kernel-lore-sync \
+    --bin kernel-lore-reindex \
+    --bin kernel-lore-doctor
 ```
 
 Quality gate every change must pass:
@@ -32,9 +35,13 @@ per run):
 
 ## Release process
 
-Releases ship to PyPI as abi3 wheels (linux-x86_64, linux-aarch64,
-macos-arm64) + sdist. Users `uv tool install kernel-lore-mcp`. The
-git repo carries scripts/, systemd/, and docs/ that are not in the
+Releases currently ship to PyPI as:
+
+- one manylinux2014 x86_64 abi3 wheel
+- one source distribution
+
+Users install with `uv tool install kernel-lore-mcp`. The git repo
+still carries scripts/, systemd/, and docs/ that are not in the
 wheel.
 
 ### 1. Pre-flight
@@ -45,31 +52,37 @@ wheel.
   features, patch on fixes.
 - Bump `version` in `pyproject.toml` AND `Cargo.toml`. Both must
   match (maturin enforces).
+- Bump `src/kernel_lore_mcp/__init__.py` too.
+- If the wheel-shipped helper binaries changed, rebuild the bundled
+  `src/kernel_lore_mcp/bin/kernel-lore-{sync,reindex,doctor}` copies
+  before packaging.
 - Commit: `release: v<version>`.
 
-### 2. TestPyPI dry-run
+### 2. Build + local validation
 
 ```sh
 rm -rf dist/
-uv run maturin build --release --out dist
-uv run maturin sdist --out dist
-uv run twine upload --repository testpypi dist/*
+cargo test --all-targets
+uv run maturin develop --release
+uv run pytest tests/python -q
+uv build --sdist --out-dir dist
+uv run --with "maturin[zig]>=1.13,<2" \
+    maturin build --release --compatibility manylinux2014 --zig -o dist
+uv run twine check dist/*
 ```
 
-Uses the existing `~/.pypirc` (TestPyPI credential scope). Then
-in a throwaway venv:
+Then validate the built artifacts in a throwaway environment:
 
 ```sh
 uv venv /tmp/klmcp-test --python 3.12
-uv pip install --python /tmp/klmcp-test/bin/python \
-    --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    kernel-lore-mcp==<version>
+uv pip install --python /tmp/klmcp-test/bin/python dist/*.whl
 /tmp/klmcp-test/bin/kernel-lore-mcp --help
-/tmp/klmcp-test/bin/kernel-lore-ingest --help
+/tmp/klmcp-test/bin/kernel-lore-sync --version
+/tmp/klmcp-test/bin/kernel-lore-reindex --version
+/tmp/klmcp-test/bin/kernel-lore-doctor --version
 ```
 
-If the help output renders and both binaries exist, the wheel is
+If the console scripts resolve and the helper CLIs run, the wheel is
 shippable.
 
 ### 3. Tag + push
@@ -80,20 +93,28 @@ git push origin main
 git push origin v<version>
 ```
 
-The `.github/workflows/release.yml` workflow (fires on tag push):
+### 4. Publish to PyPI + GitHub
 
-- builds the three abi3 wheels + sdist,
-- publishes to PyPI via OIDC trusted-publisher (no API token),
-- creates a GitHub Release with the CHANGELOG section as the
-  body and wheels attached.
+This repo uses the local `~/.pypirc` credentials and manual release
+commands:
 
-### 4. Verify
+```sh
+uv publish --publish-url https://upload.pypi.org/legacy/ dist/*
+gh release create v<version> dist/* --notes-file /tmp/klmcp-release-notes.txt
+```
+
+The GitHub release notes can be the matching `CHANGELOG.md` section.
+
+### 5. Verify from public artifacts
 
 ```sh
 uv venv /tmp/klmcp-real --python 3.12
 uv pip install --python /tmp/klmcp-real/bin/python \
     kernel-lore-mcp==<version>
 /tmp/klmcp-real/bin/kernel-lore-mcp --help
+/tmp/klmcp-real/bin/kernel-lore-sync --version
+/tmp/klmcp-real/bin/kernel-lore-reindex --version
+/tmp/klmcp-real/bin/kernel-lore-doctor --version
 ```
 
 If this works from a clean venv with no cache, the release landed.

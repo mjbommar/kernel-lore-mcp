@@ -14,7 +14,7 @@ EnvironmentFile=/etc/kernel-lore-mcp/env
 # CLAUDE.md; set KLMCP_BIND=0.0.0.0 in /etc/kernel-lore-mcp/env to
 # expose publicly. nginx in front handles TLS + per-IP rate limits
 # (docs/mcp/transport-auth.md).
-ExecStart=/usr/local/bin/kernel-lore-mcp --transport http --host ${KLMCP_BIND:-127.0.0.1} --port ${KLMCP_PORT:-8080}
+ExecStart=/usr/local/bin/kernel-lore-mcp serve --transport http --host ${KLMCP_BIND:-127.0.0.1} --port ${KLMCP_PORT:-8080}
 
 # Readers hold no writer lock; fine to reload on sight of new
 # generation without coordinating with ingest.

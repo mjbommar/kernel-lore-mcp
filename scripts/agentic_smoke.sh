@@ -76,7 +76,7 @@ print(f"[smoke] ingested {stats['ingested']} messages")
 
 # Build path vocab for lore_path_mentions (Phase 13a-file).
 reader = _core.Reader(data)
-rows = reader.eq("list", "linux-cifs", None, None, 1000)
+rows = reader.eq("list", "linux-cifs", None, None, None, 1000)
 all_paths = set()
 for r in rows:
     for f in (r.get("touched_files") or []):

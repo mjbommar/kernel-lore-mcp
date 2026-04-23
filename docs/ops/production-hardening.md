@@ -35,7 +35,7 @@ at the open internet.
 | Regex DoS | `regex-automata` DFA-only, anchor-required mode, backrefs rejected | `src/reader.rs::regex` |
 | Pathological `patch_search` needle | `MAX_PATCH_CANDIDATES=100 000` cap on trigram candidate union | `src/reader.rs` |
 | Oversized query | pydantic `max_length=2048` on `lore_search.query`; longer inputs rejected as `query_too_long` | `src/kernel_lore_mcp/tools/search.py` |
-| Forged pagination cursor | Any non-None cursor rejected as `invalid_cursor` (pagination not yet shipped) | `src/kernel_lore_mcp/tools/search.py` |
+| Forged pagination cursor | Query-scoped HMAC-signed opaque cursors; tampering or replay across a different query rejects as `invalid_argument` | `src/kernel_lore_mcp/cursor.py`, `src/kernel_lore_mcp/tools/search.py` |
 | Tantivy cold-mmap tail | One throwaway prose_search at server boot pages BM25 segments in | `src/kernel_lore_mcp/server.py::_warmup_tiers` |
 | Tier drift / partial ingest | Per-tier generation markers; Reader disables over.db on drift; per-row fallback to Parquet on miss | `src/state.rs`, `src/reader.rs` |
 
@@ -48,7 +48,7 @@ at the open internet.
 | `KLMCP_COST_CAP_MODERATE` | 32 | Larger boxes (16+ vCPUs) |
 | `KLMCP_COST_CAP_EXPENSIVE` | 4 | Rarely; expensive tools are expensive |
 | `KLMCP_MAINTAINERS_FILE` | `<data_dir>/MAINTAINERS` | Custom kernel-tree snapshot path |
-| `KLMCP_CURSOR_KEY` | (unset) | Required in http mode once pagination ships |
+| `KLMCP_CURSOR_KEY` | auto-generated locally if unset | Set explicitly on hosted/public boxes so cursor validity survives restarts |
 | `KLMCP_MODE` | `local` | `hosted` for the public-safe posture + quieter operator logs |
 | `KLMCP_LOG_LEVEL` | INFO | DEBUG when diagnosing a specific request |
 | `KLMCP_SLOW_REQUEST_MS` | mode-aware (`1000` hosted / `3000` local) | Lower for tighter slow-request profiling |
@@ -93,14 +93,13 @@ comfortable for larger BM25 working sets.
 
 ## Deployment layout
 
-**Ingest and serving are separate systemd units.** The ingest
-writer holds the per-data_dir flock; the serving reader can run
-any number of instances against the same data_dir. Recommended:
+**Sync and serving are separate systemd units.** The one-shot sync
+writer holds the per-data_dir flock; the serving reader can run any
+number of instances against the same data_dir. Recommended:
 
 ```
-klmcp-ingest.service           (one-shot, runs every N minutes)
-  ExecStart=/usr/bin/kernel-lore-ingest --with-over
-  After=klmcp-grok-pull.service
+klmcp-sync.service             (one-shot, runs every 5 minutes via timer)
+  ExecStart=/usr/bin/kernel-lore-sync --with-over
   CPUQuota=200%
 
 klmcp-mcp.service              (long-running, serving)
@@ -121,11 +120,17 @@ the Python layer.
 
 Exported at `/metrics` (Prometheus format):
 
-- `klmcp_tool_calls_total{tool,status}` — per-tool call counts.
+- `kernel_lore_mcp_tool_calls_total{tool,status}` — per-tool call counts.
   `status` ∈ `{ok, timeout, rate_limited, invalid_argument, ...}`.
-- `klmcp_tool_duration_seconds{tool}` — latency histogram.
-- `klmcp_corpus_generation` — current generation counter.
-- `klmcp_corpus_last_ingest_age_seconds` — since the last bump.
+- `kernel_lore_mcp_tool_latency_seconds{tool,status}` — end-to-end
+  tool latency histogram.
+- `kernel_lore_mcp_tool_runtime_seconds{tool,status}` — inner runtime.
+- `kernel_lore_mcp_tool_queue_wait_seconds{tool,cost_class,status}` —
+  admission delay and fast-reject pressure.
+- `kernel_lore_mcp_index_generation` — current generation counter.
+- `kernel_lore_mcp_last_ingest_age_seconds` — since the last bump.
+- `kernel_lore_mcp_writer_lock_present` /
+  `kernel_lore_mcp_sync_active` — writer pressure signals.
 
 What to alert on:
 - `rate_limited` rate > 1% of requests for more than 5 minutes —

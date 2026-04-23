@@ -14,7 +14,7 @@ All snippets assume:
   install it system-wide).
 - Your data dir lives at `/home/you/klmcp-data` (pick any path;
   matches the `KLMCP_DATA_DIR` you used when running
-  `kernel-lore-ingest`).
+  `kernel-lore-sync`).
 
 **Zero secrets to rotate, zero accounts to create.** See
 CLAUDE.md § "Non-negotiable product constraints" — `kernel-lore-mcp`
@@ -178,8 +178,10 @@ Your data_dir is behind on ingest. Check without booting HTTP:
 kernel-lore-mcp status --data-dir /home/you/klmcp-data
 ```
 
-Run `kernel-lore-ingest --data-dir /home/you/klmcp-data --lore-mirror
-/home/you/klmcp-data/shards` to force a fresh tick.
+Run `kernel-lore-sync --data-dir /home/you/klmcp-data --with-over`
+to force a fresh tick. If you need slower derived tiers rebuilt
+without refetching lore, use `kernel-lore-reindex --data-dir
+/home/you/klmcp-data`.
 
 ### Claude `-p` exits silently with HTTP transport
 

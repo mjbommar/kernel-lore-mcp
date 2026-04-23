@@ -38,14 +38,15 @@ one. This doc pins the number + the reasoning so it doesn't drift.
 
 | Signal | Value | Source |
 |---|---|---|
-| Lists tracked | ~300 | `lore.kernel.org/manifest.js.gz` |
-| Full packed corpus | ~55–60 GB | grokmirror manifest, empirical |
-| Messages in corpus | ~8M | rolling count across linux-* + subsystem lists |
+| Mailing lists tracked | 346 | `docs/ops/corpus-coverage.md` |
+| Git shards tracked | 390 | `docs/ops/corpus-coverage.md` |
+| Messages in corpus | ~29M | `docs/ops/corpus-coverage.md` |
+| Full on-disk corpus (shards + store + indices) | ~239 GB | `docs/ops/corpus-coverage.md` |
 | Daily message growth | ~5k–8k msgs/day | `lore.kernel.org/all/?x=A` rate |
 | Per-message compressed size | ~2–8 KB | public-inbox v2 avg |
 | Peak subsystem commit rate | net/mm ~1–3 commits/min | push bursts during merge windows |
 
-## What `grok-pull` actually does every tick
+## What `kernel-lore-sync` actually does every tick
 
 Per the [grokmirror protocol docs](https://korg.docs.kernel.org/grokmirror.html):
 
@@ -53,9 +54,11 @@ Per the [grokmirror protocol docs](https://korg.docs.kernel.org/grokmirror.html)
    (~2 MB gzipped). Standard HTTP cache-friendly.
 2. **Diff against local state.** Each shard carries a `fingerprint`
    in the manifest. Unchanged fingerprints → skip entirely (no git
-   fetch). Typical tick: 0–5 changed shards out of 300.
-3. **For changed shards only**, `git fetch` over `git://lore.kernel.org/...`.
-   Smart protocol + packfiles means each fetch is a tiny delta.
+   fetch). Typical tick: only a handful of changed shards out of 390.
+3. **For changed shards only**, `kernel-lore-sync` performs smart-HTTP
+   fetches via `gix`; each fetch is a tiny delta packfile.
+4. **Ingest only new commits** in those changed shards under the same
+   writer lock, then bump the generation marker.
 
 This is **pull-only, delta-only, push-compatible with kernel.org infra**.
 It is the exact protocol Konstantin Ryabitsev (kernel.org infra lead)
@@ -101,8 +104,8 @@ Lag chain:
 | Hop | Contribution |
 |---|---|
 | vger → lore | 1–5 min (fixed, kernel.org infra) |
-| lore → our grok-pull | 0–5 min (tick jitter) |
-| grok-pull → indexed + visible to readers | ≤1 min (ingest pipeline + reader reload) |
+| lore → our sync tick | 0–5 min (timer jitter) |
+| sync tick → indexed + visible to readers | ≤1 min (ingest pipeline + reader reload) |
 
 - **p50 end-to-end: ~5 min.** (3 vger + 2 tick + <1 process.)
 - **p95 end-to-end: ~11 min.**
@@ -115,17 +118,18 @@ reflect the new number.
 
 | Cadence / protocol | Our cost / tick | Freshness p95 | Verdict |
 |---|---|---|---|
-| **grokmirror 5 min** | ~3 MB, ~0.5 s CPU | ~11 min | **ship** |
-| grokmirror 1 min | ~3 MB × 5 | ~7 min | reject — 5× TCP sessions, no product win |
-| grokmirror 15 min | ~3 MB / 3 | ~25 min | reject — freshness hurts security workflows |
+| **sync every 5 min** | ~3 MB, ~0.5 s CPU | ~11 min | **ship** |
+| sync every 1 min | ~3 MB × 5 | ~7 min | reject — 5× more fetch pressure, no product win |
+| sync every 15 min | ~3 MB / 3 | ~25 min | reject — freshness hurts security workflows |
 | HTML scrape `/?x=A` every 5 min | ~hundreds of MB | ~11 min | reject — hits lore's web surface |
 | NNTP pull | comparable | ~11 min | acceptable alt, no win over git protocol |
 | pubsub (grokmirror v3) | ~0 idle, ~KB on event | ~30 s | future — not a Sprint-0 dep |
 
 ## Why 5 minutes is the defensible default
 
-1. **Kernel.org's own recommendation.** grokmirror's default cron
-   interval, as shipped by Konstantin, is 5-min-class.
+1. **Kernel.org's own recommendation.** grokmirror's default mirror
+   cadence is 5-min-class, and our sync client speaks the same
+   manifest + fingerprint + delta-fetch protocol.
 2. **Fingerprint cache hit rate is maximal at this cadence.** Most
    ticks have 0 changed shards → pure manifest fetch → a single 2 MB
    transfer that's HTTP-cacheable.
@@ -134,7 +138,7 @@ reflect the new number.
 4. **Fanout math is wildly positive.** A single agent integration
    doing novelty-check workflows typically makes 50–500 lore HTTP
    requests/hour that would otherwise hit the web surface. At 5-min
-   grokmirror cadence, our total daily lore cost is ~800 MB. **One
+   sync cadence, our total daily lore cost is ~800 MB. **One
    agent workload replaces our entire daily cost many times over.**
 5. **Below 5 min is a shared-resource politeness problem** without a
    corresponding product win. The 3 min p50 vs 5 min p50 delta does
@@ -145,7 +149,7 @@ reflect the new number.
 This is the key number to keep front of mind:
 
 > Every agent pointed at kernel-lore-mcp is one fewer agent scraping
-> `lore.kernel.org` directly. Our 5-min grokmirror pull is a **fixed
+> `lore.kernel.org` directly. Our 5-min sync tick is a **fixed
 > cost that amortizes over every query we answer**.
 
 A back-of-envelope model:
@@ -155,14 +159,14 @@ A back-of-envelope model:
 - Typical agent doing a kernel-research workflow: 50–500 HTTP hits to
   `lore.kernel.org/<list>/?q=...` per hour of active use.
 - Break-even: **one agent running at ~4 hr/week on kernel-lore-mcp
-  replaces our entire monthly grokmirror cost**.
+  replaces our entire monthly sync cost**.
 - At 10 active agent integrations, we're a net **~10× reduction** in
   lore web-surface traffic versus the no-MCP counterfactual.
 - At 100 integrations (hosted-instance scale), we're a net
   **~100× reduction**.
 
 This inverts the standard "mirroring adds load" intuition. Because
-grokmirror is delta-only and HTTP-free, and because the queries we
+our sync path is delta-only and HTTP-light, and because the queries we
 answer are the ones agents would otherwise send to lore's HTTP
 surface one-by-one, adoption of kernel-lore-mcp is
 **monotonically-decreasing lore traffic**.
@@ -176,12 +180,15 @@ surface one-by-one, adoption of kernel-lore-mcp is
 - `KLMCP_MANIFEST_URL` — upstream manifest location (default
   `https://lore.kernel.org/manifest.js.gz`). Override to point at
   a mirror or a different public-inbox instance.
+- `KLMCP_GROKMIRROR_INTERVAL_SECONDS` — freshness/SLO interval used by
+  `/status` and `/metrics`. Keep it aligned with the actual timer.
 - **`writer.lock` flock** replaces the old `KLMCP_INGEST_DEBOUNCE_
   SECONDS` knob. `kernel-lore-sync` tries to acquire the lock at
   start; overlapping invocations fail the flock and exit cleanly
   without touching state — no debounce math required.
-- `KLMCP_INGEST_CONCURRENCY` — rayon worker count for the shard
-  walker (default `min(8, num_cores)`). Tune down on small boxes.
+- `KLMCP_SYNC_WORKERS` — shard fanout for fetch + ingest. The binary
+  also applies a memory-aware cap via `KLMCP_SYNC_WORKER_MEMORY_MB`
+  and `KLMCP_SYNC_MEMORY_RESERVE_MB`.
 
 None of these affect the caller-facing MCP surface.
 

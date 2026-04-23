@@ -3,7 +3,7 @@
 Two mode­s documented here:
 
 - **§0A — Local dev on one laptop.** No systemd, no nginx, no
-  service user. ~10 minutes from clone to "my agent just cited a
+  service user. ~10-30 minutes from clone to "my agent just cited a
   lore Message-ID." This is where you start.
 - **§1 onwards — Hosted / multi-user deployment.** Full systemd,
   sandboxing, rate-limiting, Prometheus alerting. Use this when
@@ -12,7 +12,7 @@ Two mode­s documented here:
 For cadence background read
 [`update-frequency.md`](./update-frequency.md).
 
-## 0A. Local dev — run it on your laptop (10 minutes)
+## 0A. Local dev — run it on your laptop
 
 You want to: point Claude Code / Codex / Cursor at `kernel-lore-mcp`
 running locally against a slice of lore, and start asking it
@@ -30,7 +30,10 @@ git clone https://github.com/mjbommar/kernel-lore-mcp.git
 cd kernel-lore-mcp
 uv sync
 uv run maturin develop --release
-cargo build --release --bin kernel-lore-sync
+cargo build --release \
+    --bin kernel-lore-sync \
+    --bin kernel-lore-reindex \
+    --bin kernel-lore-doctor
 
 # 0A.3 — pick a data dir (any path)
 export KLMCP_DATA_DIR=~/klmcp-data
@@ -50,13 +53,17 @@ mkdir -p "$KLMCP_DATA_DIR"
 # and ~100+ GB of disk on the first run).
 # Keep BM25 deferred on a serving box unless you have measured that the
 # overlap is acceptable. Inline `--with-bm25` is the heavier path;
-# prefer `kernel-lore-ingest --rebuild-bm25` off-peak if prose freshness
-# matters.
+# prefer `kernel-lore-reindex --tier bm25` off-peak if prose freshness
+# matters and you can restart long-lived readers afterward.
+
+# 0A.5 — optional: rebuild slower derived tiers from the local corpus
+# without refetching lore.
+./target/release/kernel-lore-reindex --data-dir "$KLMCP_DATA_DIR"
 
 # 0A.5b — over.db has already been written incrementally by the
 # sync in 0A.4 (because we passed --with-over). If you skipped that
-# flag or want to rebuild from scratch from the metadata Parquet,
-# use kernel-lore-build-over:
+# flag or need to rebuild over.db from metadata Parquet, the
+# source-only `kernel-lore-build-over` helper still exists:
 #
 #   cargo build --release --bin kernel-lore-build-over
 #   ./target/release/kernel-lore-build-over --data-dir "$KLMCP_DATA_DIR"
@@ -112,25 +119,26 @@ Two approaches for personal dev:
 If you ever want the full systemd treatment (multi-user box,
 monitoring, alerts), proceed to §1.
 
-### 0Z. Legacy grokmirror path (still supported)
+### 0Z. Legacy grokmirror path (archival only)
 
 The pre-v0.2.0 shape (external grokmirror + separate ingest) is
 kept documented in
 [`docs/plans/2026-04-15-internalize-grokmirror.md`](../plans/2026-04-15-internalize-grokmirror.md)
 and the `scripts/klmcp-grok-pull.sh` / `scripts/post-pull-hook.sh`
-helpers still work. Prefer `kernel-lore-sync` for new deployments;
-the legacy path will be removed in v0.3.0.
+helpers still work for historical reference. Prefer
+`kernel-lore-sync` for every new deployment.
 
 ## 0. What you are deploying
 
 Two systemd units that together keep a local `lore.kernel.org`
-mirror + four-tier index + MCP server running (v0.2.0 shape —
-replaces the pre-v0.2.0 three-unit chain):
+mirror + index + MCP server running:
 
 - `klmcp-sync.timer` → `klmcp-sync.service` — one binary that
   fetches the lore manifest, diffs against local fingerprints,
-  gix-fetches changed shards, ingests them, and bumps the
-  generation marker under one writer lock. Default cadence 5 min.
+  gix-fetches changed shards, ingests them, writes `over.db`, and
+  bumps the generation marker under one writer lock. Default cadence
+  5 min. Slower derived rebuilds such as BM25 stay explicit via
+  `kernel-lore-reindex`.
 - `klmcp-mcp.service` — serves MCP over stdio or Streamable HTTP.
 
 Everything is anonymous read-only. No API keys, no OAuth, no login.
@@ -159,13 +167,16 @@ uv sync
 uv run maturin develop --release
 cargo build --release \
     --bin kernel-lore-sync \
-    --bin kernel-lore-ingest
+    --bin kernel-lore-reindex \
+    --bin kernel-lore-doctor
 sudo install -o root -g root -m 0755 \
     .venv/bin/kernel-lore-mcp /usr/local/bin/
 sudo install -o root -g root -m 0755 \
     target/release/kernel-lore-sync /usr/local/bin/
 sudo install -o root -g root -m 0755 \
-    target/release/kernel-lore-ingest /usr/local/bin/
+    target/release/kernel-lore-reindex /usr/local/bin/
+sudo install -o root -g root -m 0755 \
+    target/release/kernel-lore-doctor /usr/local/bin/
 ```
 
 ## 3. Drop the scripts + systemd units
@@ -182,7 +193,7 @@ sudo install -o root -g root -m 0644 \
 sudo install -o root -g kernel-lore-mcp -m 0640 \
     scripts/systemd/etc-kernel-lore-mcp-env.sample \
     /etc/kernel-lore-mcp/env
-sudoedit /etc/kernel-lore-mcp/env  # set KLMCP_CURSOR_SIGNING_KEY at minimum
+sudoedit /etc/kernel-lore-mcp/env
 ```
 
 Generate the cursor HMAC key (server-side secret; callers never see
@@ -190,7 +201,7 @@ it — see [`../mcp/transport-auth.md`](../mcp/transport-auth.md)):
 
 ```sh
 openssl rand -hex 32
-# paste into /etc/kernel-lore-mcp/env:KLMCP_CURSOR_SIGNING_KEY
+# paste into /etc/kernel-lore-mcp/env as KLMCP_CURSOR_KEY=...
 ```
 
 ## 4. Enable + start
@@ -202,7 +213,9 @@ sudo systemctl enable --now klmcp-mcp.service
 ```
 
 First sync fires 60 s after service start. Cold-start takes
-~30–60 min depending on network + disk. The timer keeps firing
+~30–60 min depending on network + disk. Set `KLMCP_MODE=hosted`,
+`KLMCP_BIND`, and `KLMCP_PORT` in `/etc/kernel-lore-mcp/env` before
+you expose the HTTP service. The timer keeps firing
 during cold-start but the `flock` in
 `state.rs::acquire_writer_lock` guarantees single-writer safety —
 any overlapping invocation fails the lock and exits cleanly
@@ -253,12 +266,13 @@ Likely causes, in order of frequency:
 
 1. **Disk full.** `df -h /var/lib/kernel-lore-mcp`. Snapshot-bundle
    restore if under 10 GB free.
-2. **grokmirror network-blocked.** Check
-   `journalctl -u klmcp-grokmirror.service --since "30 min ago"`.
-3. **Ingest stuck on a poison shard.** Check
-   `journalctl -u klmcp-ingest.service --since "1 hour ago"` for
-   stack traces. Manually retry via
-   `sudo touch /var/lib/kernel-lore-mcp/state/grokpull.trigger`.
+2. **Manifest fetch or shard fetch failing.** Check
+   `journalctl -u klmcp-sync.service --since "30 min ago"` for
+   upstream/network errors.
+3. **Poisoned local shard repo.** Run
+   `sudo -u kernel-lore-mcp /usr/local/bin/kernel-lore-doctor --data-dir /var/lib/kernel-lore-mcp`
+   and, if needed, rerun with `--heal`, then start
+   `klmcp-sync.service` again.
 4. **Clock skew on the box.** `timedatectl status`. Freshness math
    uses `datetime.now(UTC)`; a clock drifted >15 min will
    falsely alert.
@@ -266,10 +280,7 @@ Likely causes, in order of frequency:
 ## 8. Rotate the cursor HMAC key
 
 ```sh
-openssl rand -hex 32 | sudo -u kernel-lore-mcp tee \
-    /etc/kernel-lore-mcp/env.new >/dev/null
-sudo install -o root -g kernel-lore-mcp -m 0640 \
-    /etc/kernel-lore-mcp/env.new /etc/kernel-lore-mcp/env
+sudoedit /etc/kernel-lore-mcp/env
 sudo systemctl restart klmcp-mcp.service
 ```
 
@@ -288,7 +299,7 @@ curl -o /tmp/klmcp-snapshot.tar.zst \
 sudo -u kernel-lore-mcp tar -xf /tmp/klmcp-snapshot.tar.zst \
     -C /var/lib/kernel-lore-mcp/
 sudo systemctl restart klmcp-mcp.service
-# The next grokmirror pull tops up the delta.
+# The next sync tops up the delta.
 ```
 
 ## 10. Graceful shutdown + restart
@@ -296,12 +307,10 @@ sudo systemctl restart klmcp-mcp.service
 ```sh
 # Drain MCP, stop the timer, let ingest finish.
 sudo systemctl stop klmcp-mcp.service
-sudo systemctl stop klmcp-ingest.path
-sudo systemctl stop klmcp-grokmirror.timer
-while pgrep -u kernel-lore-mcp kernel-lore-ingest >/dev/null; do
+sudo systemctl stop klmcp-sync.timer
+while pgrep -u kernel-lore-mcp kernel-lore-sync >/dev/null; do
     sleep 1
 done
-sudo systemctl stop klmcp-grokmirror.service
 ```
 
 Reverse for restart.
@@ -342,11 +351,11 @@ sudo -u kernel-lore-mcp /usr/local/bin/kernel-lore-build-over \
    the corpus (e.g. re-ingested with a fresh schema), a clean
    rebuild reclaims space that incremental writes leave fragmented.
 
-**Incremental ingest writes to over.db automatically when
-`--with-over` is set on `kernel-lore-ingest`** (auto-detected if
-`over.db` exists at the data dir root). No separate cron entry
-required for the steady-state — the rebuild step above is only
-needed for the cases listed.
+**Incremental sync writes to over.db automatically when
+`kernel-lore-sync --with-over` is used** (or when `over.db` already
+exists and auto-detection keeps the tier on). No separate cron or
+timer entry is required for steady-state metadata freshness — the
+rebuild step above is only needed for the cases listed.
 
 ## 11. Recover from a mid-ingest crash
 
@@ -362,7 +371,7 @@ Verify after a crash:
 cat /var/lib/kernel-lore-mcp/state/generation       # parses as u64
 ls  /var/lib/kernel-lore-mcp/state/shards/*/*.oid   # every file is
                                                     # 40 hex chars
-sudo systemctl start klmcp-grokmirror.service       # kick a fresh tick
+sudo systemctl start klmcp-sync.service             # kick a fresh tick
 ```
 
 If a shard was repacked upstream and our recorded OID has gone

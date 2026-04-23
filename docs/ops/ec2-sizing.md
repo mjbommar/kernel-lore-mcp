@@ -10,7 +10,7 @@ thrashes on cold BM25. Corrected:
 |---|---|---|
 | Instance | **`r7g.xlarge`** Graviton (4 vCPU, 32 GB) **or** `r7i.xlarge` Intel (4 vCPU, 32 GB) | `c7g.4xlarge` / `c7i.4xlarge`, spun up on-demand for full reindex |
 | EBS | **500–750 GB gp3, 16000 IOPS, 1000 MB/s** | borrow same volume (stop/start serving unit briefly) |
-| Network | Standard | Bursty (lore grok-pull ~1–5 GB/day steady, 50–120 GB initial) |
+| Network | Standard | Bursty (lore sync traffic ~1–5 GB/day steady, 50–120 GB initial) |
 | Cost (us-east-1 on-demand, Apr 2026) | ~$145/mo (Graviton) or ~$184/mo (Intel) compute + ~$140/mo EBS | ~$0.70/hr × a few hrs/week = pennies |
 
 Why IOPS jumped from 6000 to 16000: the original budget came from
@@ -48,9 +48,9 @@ smaller instances; warm latency improves.
 
 ## Networking
 
-- Outbound: `grok-pull` against `erol.kernel.org` (authoritative
-  mirror) or any tier-1 lore mirror. Bursty; pick a mirror close
-  to region.
+- Outbound: `kernel-lore-sync` against `erol.kernel.org`
+  (authoritative mirror) or any tier-1 lore mirror. Bursty; pick a
+  mirror close to region.
 - Inbound: public HTTP/HTTPS. Behind ALB or nginx with rate
   limiting. CloudFront for GET cacheability (most MCP tool calls
   are idempotent).

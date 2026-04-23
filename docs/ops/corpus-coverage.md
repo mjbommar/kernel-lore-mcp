@@ -10,8 +10,9 @@ kernel-lore-mcp indexes the complete lore.kernel.org archive:
 This covers every public-inbox v2 shard published in the
 lore.kernel.org grokmirror manifest. No list is excluded. The
 corpus spans from the earliest archived messages (~2000 for some
-lists) through the present, with incremental sync via grokmirror
-keeping the index within 10 minutes of upstream.
+lists) through the present, with incremental sync via
+`kernel-lore-sync` typically keeping the index within roughly
+5-11 minutes of upstream.
 
 ## Disk footprint
 
@@ -30,7 +31,8 @@ are needed for incremental sync but can be discarded after a full
 ingest if no further sync is planned.
 
 BM25 (tantivy) is not included in the above — it is built as a
-separate pass via `--rebuild-bm25` and adds ~10-15 GB.
+separate pass via `kernel-lore-reindex --tier bm25` and adds
+~10-15 GB.
 
 ## List inventory
 
@@ -81,8 +83,8 @@ to a Synology NAS over NFS (1 GbE).
 
 | Step | Wall clock | Notes |
 |------|------------|-------|
-| grokmirror pull (all 390 shards) | ~2 hours | Bandwidth-limited by kernel.org |
-| Ingest (metadata + store + trigram) | ~3 hours | CPU-bound; 4 cores saturated |
+| `kernel-lore-sync` fetch phase (all 390 shards) | ~2 hours | Bandwidth-limited by kernel.org |
+| `kernel-lore-sync` ingest phase (metadata + store + trigram + over.db) | ~3 hours | CPU-bound; 4 cores saturated |
 | Retry failed shards | ~2 hours | 17 shards failed on first pass due to malformed Message-IDs; all succeeded on retry |
 | **Total cold start** | **~7 hours** | One-time; incremental sync is seconds |
 
@@ -92,13 +94,13 @@ bandwidth-limited.
 
 ## Incremental sync
 
-After the initial ingest, the grokmirror + ingest pipeline runs on
-a 10-minute timer (configurable). Each tick:
+After the initial ingest, `kernel-lore-sync` typically runs on a
+5-minute timer (configurable). Each tick:
 
-1. `grok-pull` fetches delta packfiles from lore.kernel.org
-   (~seconds for a quiet period, ~minutes after a merge window).
-2. `kernel-lore-ingest` walks only new commits in updated shards
-   and appends to the existing index.
+1. Fetches `manifest.js.gz` and diffs shard fingerprints.
+2. Fetches only changed shards from lore.kernel.org.
+3. Walks only new commits in updated shards and appends to the
+   existing index.
 
 Cost per tick is negligible for storage and CPU.
 
@@ -111,7 +113,8 @@ These are inherent to lore.kernel.org, not to our indexing:
 - **Distro backport lists** — vendor-internal.
 - **Off-list discussion** — IRC, private email, video calls.
 - **Lore propagation delay** — lore trails vger by 1–5 minutes;
-  our sync adds another 10 minutes.
+  our sync adds another ~0–5 minutes of scheduler jitter plus
+  ingest time.
 
 See the `blind_spots://coverage` MCP resource for the full list.
 
@@ -140,5 +143,6 @@ for diagnosis.
 ### Re-ingest
 
 If the index becomes corrupt or a schema migration requires it, the
-compressed store is the source of truth. The `reindex` binary
-rebuilds all tiers from the store without refetching from lore.
+compressed store is the source of truth. `kernel-lore-reindex`
+rebuilds slower derived tiers from local data without refetching
+from lore.

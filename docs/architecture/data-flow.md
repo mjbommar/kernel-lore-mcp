@@ -23,33 +23,32 @@
    `next_cursor`, returns. FastMCP emits structured content with
    `outputSchema` derived from the model.
 
-## Write path (ingest)
+## Write path (sync / ingest)
 
-Ingestion runs in a **separate systemd unit** (`klmcp-ingest.service`),
-not in-process with the MCP server. The ingest process holds the sole
-`tantivy::IndexWriter` (via a flocked `<data_dir>/state/writer.lock`);
-MCP workers see it and refuse to open another writer.
+Writes run in a **separate one-shot process** (`kernel-lore-sync`,
+typically from `klmcp-sync.service`), not in-process with the MCP
+server. The sync process holds the sole writer lock on
+`<data_dir>/state/writer.lock`; MCP workers see it and refuse to
+open another writer.
 
-1. `grok-pull` cron pulls shard updates.
-2. The ingest unit calls `_core.ingest.run_once(lore_mirror_dir)`
-   (GIL released via `Python::detach` for the whole run).
-3. Rust ingestor:
-   - For each shard, opens `gix::ThreadSafeRepository`.
-   - `rev_walk([new_head]).with_hidden([last_indexed_oid])` to get
-     new commits.
-   - rayon fanout across shards (not within a shard — packfile
-     locality wins).
-   - Per commit: read `m` blob, `mail-parser` it, split prose/patch,
-     extract touched files+functions, emit append rows to:
-     - compressed zstd store (mmap-appended, tracked by offset)
-     - metadata Arrow batch (flushed to Parquet at segment boundary)
-     - trigram builder (accumulates in RAM per shard, flushed to
-       disk as one merge unit)
-     - tantivy `IndexWriter` (one shared writer, segment merges
-       automatic)
-   - After all shards complete: commit `last_indexed_oid` state.
-4. Atomic swap of new index files into place; query threads
-   reopen next request.
+1. `kernel-lore-sync` fetches `manifest.js.gz` and diffs shard
+   fingerprints against local state.
+2. For changed shards, it fetches delta packfiles via `gix`.
+3. Rust ingest then:
+   - Opens each changed shard as a `gix::ThreadSafeRepository`.
+   - Uses `rev_walk([new_head]).with_hidden([last_indexed_oid])` to
+     enumerate only new commits.
+   - Fans out across shards with rayon (not within a shard —
+     packfile locality wins).
+   - For each commit: reads the `m` blob, parses it, splits
+     prose/patch, extracts touched files+functions, and appends rows
+     to the compressed store, metadata Parquet, trigram tier, and
+     optionally `over.db`.
+4. At the end of the run, sync commits shard OIDs, bumps the
+   generation marker, and optionally performs explicit inline
+   rebuilds (`--with-bm25`, `--with-tid-rebuild`,
+   `--with-path-vocab-rebuild`).
+5. Long-lived readers reopen on the next request boundary.
 
 ## Failure semantics
 

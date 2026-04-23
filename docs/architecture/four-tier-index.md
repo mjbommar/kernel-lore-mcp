@@ -90,8 +90,8 @@ refetching anything. The dependency chain:
    bytes, addressable by `(segment_id, offset, length, sha256)`.
    Rebuilds from `grokmirror` in ~2 hours.
 2. **Metadata Parquet** + **trigram** + **BM25** — all rebuild
-   from the store via `cargo run --bin reindex` (~3 hours on a
-   workstation; ~1.5 hours on `r7g.xlarge`).
+   from the store via `kernel-lore-reindex` (~3 hours on a
+   workstation; ~1.5 hours on `r7g.xlarge` for the heavier tiers).
 3. **over.db** — rebuilds from metadata Parquet via
    `kernel-lore-build-over` in ~30 minutes for 17.6M rows. No
    re-walk of the store needed; over.db is a downstream
