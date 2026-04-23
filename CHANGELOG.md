@@ -10,6 +10,18 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-04-23
+
+### Fixed
+
+- Packaged manylinux-compatible Rust helper binaries inside the PyPI
+  wheel so `kernel-lore-sync`, `kernel-lore-reindex`, and
+  `kernel-lore-doctor` work from `uvx` / wheel installs instead of
+  requiring a source checkout or manual `cargo build`.
+- Python CLI wrappers now prefer wheel-packaged helper binaries before
+  falling back to source-checkout `target/release` binaries or explicit
+  `KLMCP_*_BINARY` overrides.
+
 ## [0.3.4] - 2026-04-23
 
 ### Added

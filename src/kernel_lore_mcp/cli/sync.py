@@ -136,9 +136,11 @@ def _find_rust_binary() -> str:
          trees where the binary lives under ``target/release``).
       2. A nearby `target/release/kernel-lore-sync` in the current
          working tree or one of its ancestors.
-      3. The first executable ``kernel-lore-sync`` on ``$PATH`` that
+      3. A wheel-packaged helper binary under ``kernel_lore_mcp/bin``
+         when not running from a source checkout.
+      4. The first executable ``kernel-lore-sync`` on ``$PATH`` that
          is NOT this console-script wrapper.
-      4. Fail loudly with a message pointing at the install docs.
+      5. Fail loudly with a message pointing at the install docs.
     """
     current_wrapper = _current_wrapper_path()
     override = os.environ.get("KLMCP_SYNC_BINARY")
@@ -152,7 +154,7 @@ def _find_rust_binary() -> str:
                 "KLMCP_SYNC_BINARY points at the Python console-script wrapper, "
                 "not the Rust binary. Point it at the built binary instead "
                 "(e.g. target/release/kernel-lore-sync)."
-            )
+        )
         return override
 
     for cand in _dev_binary_candidates():
@@ -162,8 +164,16 @@ def _find_rust_binary() -> str:
                     f"{cand} is older than the source checkout. "
                     "Rebuild it with `cargo build --release --bin kernel-lore-sync` "
                     "or point KLMCP_SYNC_BINARY at a freshly built binary."
-                )
+            )
             return cand
+
+    packaged = Path(__file__).resolve().parent.parent / "bin" / _BIN_NAME
+    if (
+        _source_checkout_root(Path(__file__)) is None
+        and _is_executable_file(packaged)
+        and not _same_path(packaged, current_wrapper)
+    ):
+        return str(packaged)
 
     for cand in _path_binary_candidates():
         if _is_executable_file(cand) and not _same_path(cand, current_wrapper):

@@ -1,6 +1,6 @@
 [project]
 name = "kernel-lore-mcp"
-version = "0.3.4"
+version = "0.3.5"
 description = "MCP server exposing fast, structured search over lore.kernel.org to LLM developer tools."
 readme = "README.md"
 license = { text = "MIT" }
@@ -81,6 +81,11 @@ module-name = "kernel_lore_mcp._core"
 python-packages = ["kernel_lore_mcp"]
 python-source = "src"
 features = ["pyo3/extension-module"]
+include = [
+    { path = "src/kernel_lore_mcp/bin/kernel-lore-doctor", format = "wheel" },
+    { path = "src/kernel_lore_mcp/bin/kernel-lore-reindex", format = "wheel" },
+    { path = "src/kernel_lore_mcp/bin/kernel-lore-sync", format = "wheel" },
+]
 
 [tool.uv]
 cache-keys = [
