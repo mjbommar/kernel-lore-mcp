@@ -44,6 +44,16 @@ Users install with `uv tool install kernel-lore-mcp`. The git repo
 still carries scripts/, systemd/, and docs/ that are not in the
 wheel.
 
+### When to release
+
+- Do not cut a PyPI / GitHub release just because a doc-only, CI-only,
+  or repo-hygiene change landed in `main`.
+- For that class of change, the minimum bar is the local smoke path
+  (`cargo check --locked`, `uv sync`, `uv run maturin develop --release`,
+  `uv run pytest tests/python -q`) plus green GitHub CI.
+- Run the full artifact build below only when you intend to ship a new
+  versioned release.
+
 ### 1. Pre-flight
 
 - Land everything that's going into the release in `main`.
