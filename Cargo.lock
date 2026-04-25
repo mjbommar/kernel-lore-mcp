@@ -2661,6 +2661,7 @@ dependencies = [
  "pyo3",
  "rayon",
  "regex-automata",
+ "regex-syntax",
  "rmp-serde",
  "roaring",
  "rusqlite",

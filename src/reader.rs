@@ -1808,6 +1808,36 @@ impl Reader {
                 ))
             })?;
 
+        if matches!(field, RegexField::Patch)
+            && let Some(needles) = extract_regex_trigram_prefixes(pattern)
+        {
+            let lists = match list_filter {
+                Some(l) => vec![l.to_owned()],
+                None => list_trigram_lists(&self.data_dir)?,
+            };
+            let candidates = collect_trigram_candidates_any(self, &lists, &needles)?;
+            if candidates.is_empty() {
+                return Ok(Vec::new());
+            }
+            let list_owned = list_filter.map(str::to_owned);
+            let mut hits = self.hydrate_candidates(&candidates, list_owned.as_deref())?;
+            hits.retain(|r| {
+                if let Some(t) = since_unix_ns
+                    && r.date_unix_ns.is_none_or(|d| d < t)
+                {
+                    return false;
+                }
+                if let Some(t) = until_unix_ns
+                    && r.date_unix_ns.is_none_or(|d| d >= t)
+                {
+                    return false;
+                }
+                true
+            });
+            hits.sort_by_key(|r| std::cmp::Reverse(r.date_unix_ns.unwrap_or(i64::MIN)));
+            return parallel_confirm_patch_regex(self, &dfa, hits, limit);
+        }
+
         let list_owned = list_filter.map(str::to_owned);
         let mut out = Vec::new();
         self.scan(
@@ -2719,6 +2749,136 @@ fn collect_trigram_candidates(
     Ok(out.into_inner().unwrap())
 }
 
+/// Like `collect_trigram_candidates`, but unions candidates for any
+/// one of the given exact substring needles. Used by patch-regex
+/// prefiltering, where literal extraction yields a small set of
+/// prefixes that every regex match must start with.
+fn collect_trigram_candidates_any(
+    reader: &Reader,
+    lists: &[String],
+    needles: &[Vec<u8>],
+) -> Result<std::collections::HashSet<String>> {
+    use rayon::prelude::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    crate::timeout::check_request_deadline()?;
+    if needles.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    let mut all_segs: Vec<PathBuf> = Vec::new();
+    for lst in lists {
+        for seg_dir in crate::trigram::list_segments(&reader.data_dir, lst)? {
+            all_segs.push(seg_dir);
+        }
+    }
+    if all_segs.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    let out: Mutex<std::collections::HashSet<String>> =
+        Mutex::new(std::collections::HashSet::new());
+    let overflowed = AtomicBool::new(false);
+    let deadline = crate::timeout::current_deadline();
+    let cancel = crate::timeout::current_cancel_token();
+
+    all_segs.par_iter().try_for_each(|seg_dir| -> Result<()> {
+        let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+        let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
+        crate::timeout::check_request_deadline()?;
+        if overflowed.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let seg = reader.trigram_segment_for(seg_dir)?;
+        let mut local: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for needle in needles {
+            crate::timeout::check_request_deadline()?;
+            for mid in seg.candidates_for_substring(needle)? {
+                local.insert(mid.to_owned());
+                if local.len() >= MAX_PATCH_CANDIDATES {
+                    break;
+                }
+            }
+            if local.len() >= MAX_PATCH_CANDIDATES {
+                break;
+            }
+        }
+        if local.is_empty() {
+            return Ok(());
+        }
+        let mut guard = out.lock().unwrap();
+        for mid in local {
+            guard.insert(mid);
+            if guard.len() >= MAX_PATCH_CANDIDATES {
+                overflowed.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+        Ok(())
+    })?;
+
+    if overflowed.load(Ordering::Relaxed) {
+        return Err(Error::QueryParse(format!(
+            "patch regex prefilter matches too many candidates \
+             (>{MAX_PATCH_CANDIDATES}); narrow with list:, since:, or a more specific regex"
+        )));
+    }
+    Ok(out.into_inner().unwrap())
+}
+
+/// Confirm a regex over patch-only bytes on a date-DESC-sorted list
+/// of hydrated candidates. This keeps the current regex engine and
+/// only swaps the candidate source from "scan everything" to
+/// "trigram-prefiltered."
+fn parallel_confirm_patch_regex(
+    reader: &Reader,
+    dfa: &regex_automata::dfa::dense::DFA<Vec<u32>>,
+    date_sorted_hits: Vec<MessageRow>,
+    limit: usize,
+) -> Result<Vec<MessageRow>> {
+    use rayon::prelude::*;
+
+    const CHUNK: usize = 256;
+    let deadline = crate::timeout::current_deadline();
+    let cancel = crate::timeout::current_cancel_token();
+    let mut confirmed: Vec<MessageRow> = Vec::with_capacity(limit);
+    for chunk in date_sorted_hits.chunks(CHUNK) {
+        crate::timeout::check_request_deadline()?;
+        if confirmed.len() >= limit {
+            break;
+        }
+        let results: Vec<Result<Option<MessageRow>>> = chunk
+            .par_iter()
+            .map(|row| -> Result<Option<MessageRow>> {
+                let _g = deadline.map(crate::timeout::DeadlineGuard::install);
+                let _c = cancel.clone().map(crate::timeout::CancelGuard::install);
+                crate::timeout::check_request_deadline()?;
+                let store = reader.store_for(&row.list)?;
+                let body = store.read_at(row.body_segment_id, row.body_offset)?;
+                let Some(patch) = extract_patch_bytes(&body) else {
+                    return Ok(None);
+                };
+                crate::timeout::check_request_deadline()?;
+                if dfa_search(dfa, &patch) {
+                    Ok(Some(row.clone()))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect();
+        for r in results {
+            if let Some(row) = r? {
+                confirmed.push(row);
+                if confirmed.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(confirmed)
+}
+
 /// Parallel confirm path for the fuzzy variant. Fuzzy-edits-0 falls
 /// back to the cheaper `memmem` literal match; fuzzy-edits > 0 runs
 /// SIMD Levenshtein search via `triple_accel`.
@@ -2900,6 +3060,39 @@ fn list_trigram_lists(data_dir: &Path) -> Result<Vec<String>> {
     }
     out.sort();
     Ok(out)
+}
+
+/// Try to extract a finite set of ASCII prefix literals such that
+/// every regex match must start with one of them. When extraction is
+/// too broad, non-ASCII, or too short for trigrams, return `None` and
+/// let the caller fall back to the legacy scan path.
+fn extract_regex_trigram_prefixes(pattern: &str) -> Option<Vec<Vec<u8>>> {
+    use regex_syntax::ParserBuilder;
+    use regex_syntax::hir::literal::Extractor;
+
+    let hir = ParserBuilder::new()
+        .utf8(false)
+        .build()
+        .parse(pattern)
+        .ok()?;
+    let mut prefixes = Extractor::new().extract(&hir);
+    prefixes.optimize_for_prefix_by_preference();
+    let lits = prefixes.literals()?;
+    if lits.is_empty() || lits.len() > 16 {
+        return None;
+    }
+
+    let mut needles = Vec::with_capacity(lits.len());
+    for lit in lits {
+        let bytes = lit.as_bytes();
+        if bytes.len() < 3 || !bytes.iter().all(|b| *b < 0x80) {
+            return None;
+        }
+        needles.push(bytes.to_vec());
+    }
+    needles.sort();
+    needles.dedup();
+    Some(needles)
 }
 
 // ---- internals ----
@@ -3914,6 +4107,15 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].message_id, "m1@x");
+    }
+
+    #[test]
+    fn extract_regex_trigram_prefixes_handles_alternation() {
+        let got = extract_regex_trigram_prefixes(r"smb_check_perm_dacl\(|smb2_create").unwrap();
+        assert_eq!(
+            got,
+            vec![b"smb2_create".to_vec(), b"smb_check_perm_dacl(".to_vec()]
+        );
     }
 
     #[test]
