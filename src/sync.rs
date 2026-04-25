@@ -330,23 +330,19 @@ fn remove_path(path: &Path) -> Result<()> {
 }
 
 fn fetch_existing_shard(url: &str, local: &Path) -> Result<()> {
-    let repo =
-        gix::open(local).map_err(|e| Error::Sync(format!("open repo {}: {e}", local.display())))?;
-    let should_interrupt = &std::sync::atomic::AtomicBool::new(false);
-    let remote = repo
-        .remote_at(url)
-        .map_err(|e| Error::Sync(format!("remote_at {url}: {e}")))?
-        .with_refspecs(["+refs/*:refs/*"], gix::remote::Direction::Fetch)
-        .map_err(|e| Error::Sync(format!("refspecs {url}: {e}")))?;
-    let connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(|e| Error::Sync(format!("connect {url}: {e}")))?;
-    let prepare = connection
-        .prepare_fetch(gix::progress::Discard, Default::default())
-        .map_err(|e| Error::Sync(format!("prepare_fetch {url}: {e}")))?;
-    prepare
-        .receive(gix::progress::Discard, should_interrupt)
-        .map_err(|e| Error::Sync(format!("receive {url}: {e}")))?;
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(local)
+        .arg("fetch")
+        .arg(url)
+        .arg("+refs/*:refs/*")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| Error::Sync(format!("spawn git fetch {url}: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::Sync(format!("fetch {url}: {stderr}")));
+    }
     Ok(())
 }
 
@@ -552,6 +548,44 @@ mod tests {
 
         let remote_head = git_stdout(&["rev-parse", "refs/heads/master"], &remote);
         let local_head = git_stdout(&["rev-parse", "refs/heads/master"], &local);
+        assert_eq!(local_head.trim(), remote_head.trim());
+    }
+
+    #[test]
+    fn fetch_shard_advances_existing_repo_refs() {
+        let upstream_root = tempfile::tempdir().unwrap();
+        let remote = upstream_root.path().join("list.git");
+        git(&["init", "-q", "--bare", "list.git"], upstream_root.path());
+
+        let work = tempfile::tempdir().unwrap();
+        git(&["init", "-q", "-b", "master", "."], work.path());
+        fs::write(work.path().join("m"), "hello\n").unwrap();
+        git(&["add", "m"], work.path());
+        git(&["commit", "-q", "-m", "c1"], work.path());
+        git(
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+            work.path(),
+        );
+        git(&["push", "-q", "origin", "master"], work.path());
+
+        let data = tempfile::tempdir().unwrap();
+        let manifest_url = format!("{}/manifest.js.gz", upstream_root.path().display());
+        let local = shard_local_path(data.path(), "/list.git");
+        let first = fetch_shard(data.path(), "/list.git", &manifest_url).unwrap();
+        assert!(matches!(first, FetchOutcome::Cloned));
+        let first_head = git_stdout(&["rev-parse", "refs/heads/master"], &local);
+
+        fs::write(work.path().join("m"), "second\n").unwrap();
+        git(&["add", "m"], work.path());
+        git(&["commit", "-q", "-m", "c2"], work.path());
+        git(&["push", "-q", "origin", "master"], work.path());
+
+        let second = fetch_shard(data.path(), "/list.git", &manifest_url).unwrap();
+        assert!(matches!(second, FetchOutcome::Fetched));
+
+        let remote_head = git_stdout(&["rev-parse", "refs/heads/master"], &remote);
+        let local_head = git_stdout(&["rev-parse", "refs/heads/master"], &local);
+        assert_ne!(local_head.trim(), first_head.trim());
         assert_eq!(local_head.trim(), remote_head.trim());
     }
 }

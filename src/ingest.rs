@@ -20,6 +20,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use git2::Oid;
 use git2::Repository as Git2Repository;
 use gix::ObjectId;
 
@@ -138,22 +139,9 @@ pub fn ingest_shard_with_bm25(
     let head_id = resolve_walk_head_id(&repo, shard_path)?;
     let head_hex = head_id.to_string();
 
-    // Build the walk; use incremental when we have a last-indexed oid
-    // and that oid is still reachable.
-    let mut platform = repo.rev_walk([head_id]);
-    let last = state.last_indexed_oid(list, shard)?;
-    if let Some(ref oid_hex) = last {
-        if let Ok(parsed) = oid_hex.parse::<ObjectId>() {
-            if repo.find_object(parsed).is_ok() {
-                platform = platform.with_hidden([parsed]);
-            }
-            // else: dangling (shard was repacked upstream); full walk.
-        }
-    }
-
-    let walk = platform
-        .all()
-        .map_err(|e| Error::Gix(format!("rev_walk: {e}")))?;
+    // Build the walk; use git2 revwalk for the incremental range.
+    // This matches `git rev-list <last>..HEAD` on bare mirror repos.
+    let walk_ids = walk_commit_ids(shard_path, head_id, state.last_indexed_oid(list, shard)?)?;
 
     let mut batch = MetadataBatch::new();
     let mut trigram = TrigramBuilder::new();
@@ -176,11 +164,11 @@ pub fn ingest_shard_with_bm25(
     };
     let mut stats = IngestStats::default();
 
-    for info in walk {
-        let info = info.map_err(|e| Error::Gix(format!("walk step: {e}")))?;
-        let commit = info
-            .object()
-            .map_err(|e| Error::Gix(format!("commit object: {e}")))?;
+    for info_id in walk_ids {
+        let commit = repo
+            .find_object(info_id)
+            .map_err(|e| Error::Gix(format!("commit object: {e}")))?
+            .into_commit();
         let tree = commit
             .tree()
             .map_err(|e| Error::Gix(format!("commit tree: {e}")))?;
@@ -258,13 +246,13 @@ pub fn ingest_shard_with_bm25(
                 appended.body_length,
                 &body_sha256_hex,
                 shard,
-                &info.id.to_string(),
+                &info_id.to_string(),
             ));
         }
         let row = MetadataRow {
             list,
             shard,
-            commit_oid: &info.id.to_string(),
+            commit_oid: &info_id.to_string(),
             offset: appended.ptr,
             body_sha256_hex,
             body_length: appended.body_length,
@@ -370,6 +358,41 @@ pub fn ingest_shard_with_bm25(
     }
 
     Ok(stats)
+}
+
+fn walk_commit_ids(
+    shard_path: &Path,
+    head_id: ObjectId,
+    last_oid_hex: Option<String>,
+) -> Result<Vec<ObjectId>> {
+    let repo = Git2Repository::open_bare(shard_path)
+        .or_else(|_| Git2Repository::open(shard_path))
+        .map_err(|e| Error::Gix(format!("open {}: {e}", shard_path.display())))?;
+    let head = Oid::from_str(&head_id.to_string())
+        .map_err(|e| Error::Gix(format!("head oid parse: {e}")))?;
+
+    let mut walk = repo
+        .revwalk()
+        .map_err(|e| Error::Gix(format!("revwalk: {e}")))?;
+    walk.push(head)
+        .map_err(|e| Error::Gix(format!("revwalk push: {e}")))?;
+    walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+        .map_err(|e| Error::Gix(format!("revwalk sorting: {e}")))?;
+
+    if let Some(oid_hex) = last_oid_hex
+        && let Ok(last_oid) = Oid::from_str(&oid_hex)
+        && repo.find_object(last_oid, None).is_ok()
+    {
+        walk.hide(last_oid)
+            .map_err(|e| Error::Gix(format!("revwalk hide {oid_hex}: {e}")))?;
+    }
+
+    walk.map(|oid| {
+        oid.map(|id| id.to_string().parse::<ObjectId>())
+            .map_err(|e| Error::Gix(format!("revwalk step: {e}")))?
+            .map_err(|e| Error::Gix(format!("object id parse: {e}")))
+    })
+    .collect()
 }
 
 fn resolve_walk_head_id(repo: &gix::Repository, shard_path: &Path) -> Result<ObjectId> {
@@ -1025,6 +1048,60 @@ Prose.\r\n"
                 "reader missing {mid:?} after incremental ingest"
             );
         }
+    }
+
+    #[test]
+    fn incremental_ingest_after_git_fetch_advances() {
+        let upstream_root = tempdir().unwrap();
+        let remote = upstream_root.path().join("0.git");
+        let initial = sample_messages();
+        let initial_refs: Vec<&[u8]> = initial.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&remote, &initial_refs);
+
+        let local_parent = tempdir().unwrap();
+        let local = local_parent.path().join("0.git");
+        run_git(
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                remote.to_str().unwrap(),
+                local.to_str().unwrap(),
+            ],
+            Path::new("/"),
+        );
+
+        let data = tempdir().unwrap();
+        let first = ingest_shard(data.path(), &local, "linux-cifs", "0", "r1").unwrap();
+        assert_eq!(first.ingested, 2);
+
+        let extra = vec![
+            b"From: Carol <carol@example.com>\r\n\
+Subject: [PATCH] ksmbd: third patch\r\n\
+Date: Mon, 14 Apr 2026 13:00:00 +0000\r\n\
+Message-ID: <m3@x>\r\n\
+\r\n\
+Prose.\r\n"
+                .to_vec(),
+            b"From: Dave <dave@example.com>\r\n\
+Subject: [PATCH] ksmbd: fourth patch\r\n\
+Date: Mon, 14 Apr 2026 14:00:00 +0000\r\n\
+Message-ID: <m4@x>\r\n\
+\r\n\
+Prose.\r\n"
+                .to_vec(),
+        ];
+        append_messages_to_bare(&remote, &extra);
+        run_git(
+            &["fetch", remote.to_str().unwrap(), "+refs/*:refs/*"],
+            &local,
+        );
+
+        let second = ingest_shard(data.path(), &local, "linux-cifs", "0", "r2").unwrap();
+        assert_eq!(
+            second.ingested, 2,
+            "git-fetch delta must ingest new commits"
+        );
     }
 
     /// If the recorded last-indexed OID is missing from the shard
