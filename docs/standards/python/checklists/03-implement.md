@@ -1,7 +1,5 @@
 # Checklist: Implementation
 
-Adapted from `.../kaos-modules/docs/python/checklists/03-implement.md`.
-
 Write clean, typed, tested code that follows `docs/standards/python/`
 and CLAUDE.md proscriptions.
 

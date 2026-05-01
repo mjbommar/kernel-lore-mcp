@@ -1,7 +1,7 @@
 # Boundaries and Interfaces
 
-> Adapted from KAOS `docs/python/design/boundaries.md`. Reshaped
-> around the three boundaries that actually exist in this project.
+> Shaped around the three boundaries that actually exist in this
+> project.
 >
 > See also: [`../index.md`](../index.md), [`modules.md`](modules.md),
 > [`errors.md`](errors.md),

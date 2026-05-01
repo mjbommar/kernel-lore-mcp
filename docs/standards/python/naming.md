@@ -1,7 +1,5 @@
 # Naming Conventions
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/naming.md`.
-
 Clear, consistent naming is the cheapest form of documentation. A
 well-chosen name eliminates the need for a comment; a poorly-chosen
 name creates ambiguity that propagates through every call site.

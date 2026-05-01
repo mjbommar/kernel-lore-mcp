@@ -1,7 +1,5 @@
 # Data Structures and Data Philosophy
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/data-structures.md`.
-
 Choosing the right data structure is the highest-leverage design
 decision in any module. The wrong choice creates friction at every
 call site; the right choice makes the code obvious.

@@ -1,7 +1,5 @@
 # Checklist: Design and Architecture
 
-Adapted from `.../kaos-modules/docs/python/checklists/02-design.md`.
-
 Sketch the wire shape and module placement before writing code.
 The data model is the contract; everything else follows.
 

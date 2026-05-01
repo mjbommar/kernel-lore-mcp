@@ -1,7 +1,5 @@
 # Checklist: Documentation
 
-Adapted from `.../kaos-modules/docs/python/checklists/10-document.md`.
-
 Document decisions and interfaces, not obvious code. Docs ship in
 the same commit as the code.
 

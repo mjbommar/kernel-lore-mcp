@@ -1,7 +1,5 @@
 # Checklist: Debugging
 
-Adapted from `.../kaos-modules/docs/python/checklists/08-debug.md`.
-
 Observe first. Hypothesize second. Verify the fix with a test.
 
 ---

@@ -1,8 +1,7 @@
 # Dependency and Import Discipline
 
-> Adapted from KAOS `docs/python/design/dependencies.md`. Trimmed
-> because we have one package instead of 15; the import-DAG rules
-> apply within the tree.
+> Trimmed because we have one package; the import-DAG rules apply
+> within the tree.
 >
 > See also: [`../index.md`](../index.md), [`modules.md`](modules.md),
 > [`boundaries.md`](boundaries.md).

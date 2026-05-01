@@ -463,9 +463,9 @@ once the tiers are real. See
 - [ ] Prefer tier-1 mirror (`erol.kernel.org`) over lore
   direct in the default grokmirror config under `scripts/`.
 
-## Phase 0+ additions after review of KAOS standards
+## Phase 0+ additions after standards review
 
-- [x] Adopt KAOS Python standards as `docs/standards/python/` (index,
+- [x] Adopt Python standards as `docs/standards/python/` (index,
   language, uv, code-quality, testing, naming, pyo3-maturin,
   data-structures, git + design/*/libraries/*/checklists/*).
 - [x] Create parallel `docs/standards/rust/` (index, language,

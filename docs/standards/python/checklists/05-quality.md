@@ -1,7 +1,5 @@
 # Checklist: Code Quality
 
-Adapted from `.../kaos-modules/docs/python/checklists/05-quality.md`.
-
 Every change must pass the full pipeline before committing. No
 shortcuts. No `--no-verify`.
 

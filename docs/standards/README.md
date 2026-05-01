@@ -9,11 +9,10 @@ Engineering standards for `kernel-lore-mcp`. Two parallel trees:
   (ingestion, indexing, query routing) and the Rust side of the
   PyO3 boundary.
 
-These are adapted from the KAOS module standards at
-`273v/kaos-modules/docs/python/` and reshaped for the
-kernel-lore-mcp context (MCP server, tantivy, gix, lore archives).
-Where a KAOS rule carries unchanged, we cite it. Where it diverges,
-we say why.
+These are adapted from a private set of internal Python standards
+and reshaped for the kernel-lore-mcp context (MCP server, tantivy,
+gix, lore archives). Where the source rule carries unchanged, we
+keep it. Where it diverges, we say why.
 
 ## How to use
 

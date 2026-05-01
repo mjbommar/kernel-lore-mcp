@@ -1,7 +1,5 @@
 # Checklist: Optimization
 
-Adapted from `.../kaos-modules/docs/python/checklists/09-optimize.md`.
-
 Measure, change, measure. Never ship a perf claim without
 before/after numbers in the commit body.
 

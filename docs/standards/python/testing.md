@@ -1,7 +1,5 @@
 # Testing, Debugging, and Benchmarking
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/testing.md`.
-
 Development in kernel-lore-mcp runs on three feedback loops:
 **introspection** (understand the code), **testing** (prove it works),
 and **benchmarking** (prove it's fast enough). All three are
@@ -385,9 +383,9 @@ For kernel-lore-mcp, the live mandate is:
 5. **Never declare a bug "fixed" without a regression test that
    reproduces it against the fixture set.**
 
-The distinction from KAOS: we do **not** hit
-`https://lore.kernel.org/` from the test suite. That is a public
-service and we are not going to DoS it with CI runs. The "live" tier
+One non-negotiable: we do **not** hit `https://lore.kernel.org/`
+from the test suite. That is a public service and we are not going
+to DoS it with CI runs. The "live" tier
 means real Rust code + real tantivy + real fst+roaring + real gix +
 real mbox parsing against a known local shard.
 

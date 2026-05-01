@@ -1,7 +1,5 @@
 # SDLC Checklists — kernel-lore-mcp
 
-Adapted from `.../kaos-modules/docs/python/checklists/index.md`.
-
 Progressive checklists for every stage of work on `kernel-lore-mcp`.
 Each stage has 10-15 actionable items pointing at the detailed
 guides in [../](../index.md) and the authoritative proscriptions in

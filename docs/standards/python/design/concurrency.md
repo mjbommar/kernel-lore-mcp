@@ -1,8 +1,7 @@
 # Concurrency Patterns
 
-> Adapted from KAOS `docs/python/design/concurrency.md`. Our runtime
-> is FastMCP on asyncio; the CPU work lives in Rust. The rules reflect
-> that.
+> Our runtime is FastMCP on asyncio; the CPU work lives in Rust.
+> The rules reflect that.
 >
 > See also: [`../index.md`](../index.md), [`boundaries.md`](boundaries.md),
 > [`errors.md`](errors.md).
@@ -292,7 +291,7 @@ helper.
 ## The sync-in-async trap
 
 The most common asyncio bug: calling blocking code from an `async def`
-function. KAOS-level rules apply here unchanged.
+function. The general async hygiene rules apply here unchanged.
 
 | Blocking call | Async replacement |
 |---|---|

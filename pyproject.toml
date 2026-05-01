@@ -130,7 +130,7 @@ ignore = [
 testpaths = ["tests/python"]
 asyncio_mode = "auto"
 
-# KAOS standard: `ty` (Astral) instead of mypy. See
+# Project standard: `ty` (Astral) instead of mypy. See
 # docs/standards/python/code-quality.md for rationale (10-60x faster,
 # checks all code by default, same-vendor alignment with ruff/uv).
 [tool.ty.src]

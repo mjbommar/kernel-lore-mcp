@@ -1,7 +1,5 @@
 # Git Workflow and Commit Standards
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/git.md`.
-
 Consistent, frequent commits with clear messages create a readable
 project history. Every commit is atomic, buildable, and descriptive.
 

@@ -1,7 +1,5 @@
 # Checklist: Commit and Push
 
-Adapted from `.../kaos-modules/docs/python/checklists/07-commit.md`.
-
 Atomic commits. Conventional-ish messages. Nothing generated in
 the index.
 

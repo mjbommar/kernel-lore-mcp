@@ -1,7 +1,5 @@
 # Checklist: Research and Planning
 
-Adapted from `.../kaos-modules/docs/python/checklists/01-research.md`.
-
 Read before you touch code. The fastest way to break this project is
 to start coding before you have read the proscriptions that govern
 the area you are changing.

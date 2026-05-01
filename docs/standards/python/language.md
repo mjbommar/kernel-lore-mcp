@@ -1,7 +1,5 @@
 # Python Language Features — kernel-lore-mcp
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/language.md`.
-
 The project targets **Python 3.12 as the floor** (abi3-py312 for the PyO3
 extension), with **3.14 preferred at runtime**. 3.13 works; we do not
 block on it. This guide lists the language and typing features we rely

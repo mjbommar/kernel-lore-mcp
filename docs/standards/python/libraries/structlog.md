@@ -1,7 +1,5 @@
 # structlog
 
-> No KAOS source; project-specific.
->
 > See also: [`../index.md`](../index.md),
 > [`fastmcp.md`](fastmcp.md) (stdout rule),
 > [`../design/errors.md`](../design/errors.md).

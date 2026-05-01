@@ -1,7 +1,5 @@
 # Code Quality — ruff, ty, and the Pre-Commit Pipeline
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/code-quality.md`.
-
 Every change to `kernel-lore-mcp` runs a strict QA pipeline before it
 hits a commit: **format → lint → type check → test**. All four steps
 must pass. No exceptions, no `--no-verify`.

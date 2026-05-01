@@ -1,7 +1,5 @@
 # Checklist: Self-Review
 
-Adapted from `.../kaos-modules/docs/python/checklists/06-review.md`.
-
 Re-read your own code before staging. Tools catch syntax; you
 catch intent.
 

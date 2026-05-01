@@ -1,7 +1,5 @@
 # Checklist: Testing
 
-Adapted from `.../kaos-modules/docs/python/checklists/04-test.md`.
-
 Prove correctness with real data. The acceptance gate for any
 non-trivial change is `uv run pytest -v` passing — unit tier on
 synthetic fixtures, integration tier on a real lore shard.

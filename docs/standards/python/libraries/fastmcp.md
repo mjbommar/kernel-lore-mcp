@@ -1,7 +1,5 @@
 # FastMCP
 
-> No KAOS source; project-specific.
->
 > See also: [`../index.md`](../index.md),
 > [`../design/boundaries.md`](../design/boundaries.md),
 > [`../design/errors.md`](../design/errors.md),

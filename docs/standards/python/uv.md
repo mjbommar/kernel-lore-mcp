@@ -1,8 +1,7 @@
 # uv and uvx — The Python Toolchain
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/uv.md`.
-Single-package project; monorepo sections dropped. Maturin integration
-section kept and tuned to our actual pins.
+Single-package project; monorepo sections do not apply. The maturin
+integration section is tuned to our actual pins.
 
 See also: [Rust counterpart](../rust/cargo.md) for `cargo` discipline.
 

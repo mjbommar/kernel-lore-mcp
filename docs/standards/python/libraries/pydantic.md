@@ -1,8 +1,7 @@
 # Pydantic v2
 
-> Adapted from KAOS `docs/python/libraries/pydantic.md`. Pared to the
-> surface we actually use: MCP request/response models, settings,
-> cursor validators.
+> Pared to the surface we actually use: MCP request/response models,
+> settings, cursor validators.
 >
 > See also: [`../index.md`](../index.md),
 > [`../design/boundaries.md`](../design/boundaries.md),

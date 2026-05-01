@@ -1,8 +1,7 @@
 # httpx
 
-> Adapted from KAOS `docs/python/libraries/httpx.md`. Aggressively
-> trimmed: we don't have a KAOS-style `HttpClient` wrapper and the
-> v1 use cases are minimal.
+> Aggressively trimmed: we don't have an `HttpClient` wrapper and
+> the v1 use cases are minimal.
 >
 > See also: [`../index.md`](../index.md),
 > [`../design/concurrency.md`](../design/concurrency.md),

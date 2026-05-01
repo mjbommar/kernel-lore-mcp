@@ -1,10 +1,8 @@
 # PyO3 and Maturin — Where Python Meets Rust
 
-Adapted from `../../../../../273v/kaos-modules/docs/python/pyo3-maturin.md`.
-
-**CRUCIAL VERSION DELTA:** KAOS targets PyO3 `0.23+`. kernel-lore-mcp is
-on **PyO3 `0.28.3`**. Two consequences dominate everything in this
-guide:
+**CRUCIAL VERSION PIN:** kernel-lore-mcp is on **PyO3 `0.28.3`**. Most
+existing PyO3 material online still describes the `0.23` API; that
+matters because two consequences dominate everything in this guide:
 
 1. **`Python::detach()` and `Python::attach()` are the current names.**
    They replaced `allow_threads()` and `with_gil()` in PRs #5209 and

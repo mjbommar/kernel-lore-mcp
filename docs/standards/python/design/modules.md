@@ -1,7 +1,6 @@
 # Module and Package Design
 
-> Adapted from KAOS `docs/python/design/modules.md`. Trimmed to the
-> single-package reality of `kernel-lore-mcp`.
+> Tuned to the single-package reality of `kernel-lore-mcp`.
 >
 > See also: [`../index.md`](../index.md), [`boundaries.md`](boundaries.md),
 > [`dependencies.md`](dependencies.md).
@@ -35,9 +34,9 @@ crate lives alongside at `src/*.rs`; maturin handles the mixed layout.
 
 ### Why one package
 
-KAOS has 15 packages. We have one. The project's domain is narrow (an
-MCP server over one data source) and the architectural split is
-vertical: Python at the edge, Rust for the indices. Splitting into
+We have one package. The project's domain is narrow (an MCP server
+over one data source) and the architectural split is vertical:
+Python at the edge, Rust for the indices. Splitting into
 `kernel-lore-server`, `kernel-lore-ingest`, `kernel-lore-router`
 buys nothing — they'd all depend on `_core` anyway. The `reindex`
 binary lives in Rust (`src/bin/reindex.rs`); it is not a separate

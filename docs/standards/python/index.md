@@ -1,6 +1,5 @@
 # Python Standards — kernel-lore-mcp
 
-Adapted from KAOS Python standards (`273v/kaos-modules/docs/python/`).
 Kept tight to what this project actually needs.
 
 ## Philosophy (five principles)
@@ -59,7 +58,7 @@ Kept tight to what this project actually needs.
 
 ### Libraries (`libraries/`)
 
-Only the ones we use (KAOS has more we don't need):
+Only the ones we use:
 
 | Guide | Description |
 |-------|-------------|

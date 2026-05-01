@@ -1,9 +1,8 @@
 # Error Design and Handling
 
-> Adapted from KAOS `docs/python/design/errors.md`. The hierarchy
-> here is simpler: FastMCP owns the MCP-wire error shape, and
-> Rust-side errors come through the `impl From<Error> for PyErr` in
-> `src/error.rs`.
+> The hierarchy here is simple: FastMCP owns the MCP-wire error
+> shape, and Rust-side errors come through the
+> `impl From<Error> for PyErr` in `src/error.rs`.
 >
 > See also: [`../index.md`](../index.md), [`boundaries.md`](boundaries.md),
 > [`../libraries/fastmcp.md`](../libraries/fastmcp.md).
