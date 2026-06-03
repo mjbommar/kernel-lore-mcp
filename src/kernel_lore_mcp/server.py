@@ -70,7 +70,9 @@ def build_server(settings: Settings | None = None) -> FastMCP:
     from kernel_lore_mcp.tools.expand_citation import lore_expand_citation
     from kernel_lore_mcp.tools.explain_patch import lore_explain_patch
     from kernel_lore_mcp.tools.file_timeline import lore_file_timeline
+    from kernel_lore_mcp.tools.find import lore_find
     from kernel_lore_mcp.tools.fix_status import lore_fix_status
+    from kernel_lore_mcp.tools.header_search import lore_header_search
     from kernel_lore_mcp.tools.maintainer_profile import lore_maintainer_profile
     from kernel_lore_mcp.tools.message import lore_message
     from kernel_lore_mcp.tools.nearest import lore_nearest, lore_similar
@@ -125,6 +127,8 @@ def build_server(settings: Settings | None = None) -> FastMCP:
         mcp.tool(cost_limited(fn), annotations=ann(title))
 
     # Higher-level / orchestrating tools.
+    _reg(lore_find, "Universal search (like lore's ?q=)")
+    _reg(lore_header_search, "Indexed search on header / trailer fields")
     _reg(lore_search, "Search lore (fused tiers)")
     _reg(lore_activity, "File / function activity over lore")
     _reg(lore_message, "Fetch one message (prose + patch split)")
