@@ -10,6 +10,40 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-03
+
+### Added
+
+- `lore_find` MCP tool — a `?q=`-style universal search. Auto-routes
+  by query shape (email → exact From: match, commit SHA / CVE →
+  citation expand, anything else → trigram patch-body substring).
+  Defaults to the last 30 days to keep common-term queries fast.
+  Surfaces `from_substring_not_indexed_pass_email_instead` on bare
+  name queries so the caller knows to retry with an email.
+- `lore_header_search` MCP tool — indexed header / trailer search
+  via the existing `over_trailer_email`, `over_trailer_ref`, and
+  over.db `from_addr` btree indexes. Sub-second on the full corpus
+  for both `match=prefix` (index seek) and `match=contains` (keyed
+  prefix scan). Covers nine email-bearing trailers, four ref-bearing
+  trailers, and the `from` RFC822 header.
+- Index `suggested_by`, `helped_by`, and `assisted_by` trailers in
+  `over_trailer_email` (the parser already extracted them, but they
+  weren't registered in `trailer_email_sources`). Adds the matching
+  `EqField` variants so they're queryable via `lore_eq` and the
+  router. `assisted_by` aliases `co_authored_by` per the existing
+  parser arm. After running `backfill_trailer_emails` once, the
+  historical corpus gains roughly 245k `suggested_by`, 8.5k
+  `assisted_by`, and 6.7k `helped_by` indexed rows.
+
+### Fixed
+
+- `lore_search` no longer hard-fails when the BM25 tier marker is
+  behind the corpus generation. The router now catches that specific
+  staleness error in the BM25 leg, surfaces it to the caller via
+  `default_applied = ["bm25_unavailable_stale_index"]`, and returns
+  whatever metadata + trigram tiers produced. Previously a single
+  stale tier poisoned the entire tool.
+
 ## [0.3.5] - 2026-04-23
 
 ### Fixed
