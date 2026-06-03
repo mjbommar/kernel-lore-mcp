@@ -1700,7 +1700,7 @@ impl OverDb {
 /// keeps `insert_batch_in_tx` and `backfill_trailer_emails` in sync
 /// by construction — adding a new kind means appending one tuple
 /// plus a new `trailer_kind` match arm.
-fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 6] {
+fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 9] {
     [
         ("signed_off_by", &ddd.signed_off_by),
         ("reviewed_by", &ddd.reviewed_by),
@@ -1708,6 +1708,9 @@ fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 6] 
         ("tested_by", &ddd.tested_by),
         ("co_developed_by", &ddd.co_developed_by),
         ("reported_by", &ddd.reported_by),
+        ("suggested_by", &ddd.suggested_by),
+        ("helped_by", &ddd.helped_by),
+        ("assisted_by", &ddd.assisted_by),
     ]
 }
 
@@ -1731,6 +1734,9 @@ fn trailer_kind(field: EqField) -> Option<&'static str> {
         EqField::TestedBy => Some("tested_by"),
         EqField::CoDevelopedBy => Some("co_developed_by"),
         EqField::ReportedBy => Some("reported_by"),
+        EqField::SuggestedBy => Some("suggested_by"),
+        EqField::HelpedBy => Some("helped_by"),
+        EqField::AssistedBy => Some("assisted_by"),
         _ => None,
     }
 }
@@ -1794,6 +1800,9 @@ fn message_matches_field(mr: &MessageRow, field: EqField, value: &str) -> bool {
         EqField::TestedBy => mr.tested_by.iter().any(|s| s == value),
         EqField::CoDevelopedBy => mr.co_developed_by.iter().any(|s| s == value),
         EqField::ReportedBy => mr.reported_by.iter().any(|s| s == value),
+        EqField::SuggestedBy => mr.suggested_by.iter().any(|s| s == value),
+        EqField::HelpedBy => mr.helped_by.iter().any(|s| s == value),
+        EqField::AssistedBy => mr.assisted_by.iter().any(|s| s == value),
         EqField::Fixes => mr.fixes.iter().any(|s| s == value),
         EqField::Link => mr.link.iter().any(|s| s == value),
         EqField::Closes => mr.closes.iter().any(|s| s == value),
@@ -2446,6 +2455,9 @@ mod tests {
         row.ddd.tested_by = vec!["Tst <tst@example.com>".into()];
         row.ddd.co_developed_by = vec!["Co <co@example.com>".into()];
         row.ddd.reported_by = vec!["Rep <rep@example.com>".into()];
+        row.ddd.suggested_by = vec!["Sug <sug@example.com>".into()];
+        row.ddd.helped_by = vec!["Help <help@example.com>".into()];
+        row.ddd.assisted_by = vec!["Asst <asst@example.com>".into()];
         db.insert_batch(&[row]).unwrap();
 
         let cases = [
@@ -2455,6 +2467,9 @@ mod tests {
             (EqField::TestedBy, "tst@example.com"),
             (EqField::CoDevelopedBy, "co@example.com"),
             (EqField::ReportedBy, "rep@example.com"),
+            (EqField::SuggestedBy, "sug@example.com"),
+            (EqField::HelpedBy, "help@example.com"),
+            (EqField::AssistedBy, "asst@example.com"),
         ];
         for (field, email) in cases {
             let hits = db.scan_eq(field, email, None, None, None, 10).unwrap();

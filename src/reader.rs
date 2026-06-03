@@ -2320,6 +2320,9 @@ pub enum EqField {
     TestedBy,
     CoDevelopedBy,
     ReportedBy,
+    SuggestedBy,
+    HelpedBy,
+    AssistedBy,
     Fixes,
     Link,
     Closes,
@@ -2347,6 +2350,9 @@ impl EqField {
             "tested_by" => EqField::TestedBy,
             "co_developed_by" => EqField::CoDevelopedBy,
             "reported_by" => EqField::ReportedBy,
+            "suggested_by" => EqField::SuggestedBy,
+            "helped_by" => EqField::HelpedBy,
+            "assisted_by" | "co_authored_by" => EqField::AssistedBy,
             "fixes" => EqField::Fixes,
             "link" => EqField::Link,
             "closes" => EqField::Closes,
@@ -2799,6 +2805,9 @@ fn eq_field_is_over_indexed(field: EqField) -> bool {
             | EqField::TestedBy
             | EqField::CoDevelopedBy
             | EqField::ReportedBy
+            | EqField::SuggestedBy
+            | EqField::HelpedBy
+            | EqField::AssistedBy
             | EqField::TouchedFile
     )
 }
@@ -2823,6 +2832,9 @@ fn eq_field_matches(field: EqField, r: &MessageRow, value: &str) -> bool {
         EqField::TestedBy => r.tested_by.iter().any(|x| x.contains(value)),
         EqField::CoDevelopedBy => r.co_developed_by.iter().any(|x| x.contains(value)),
         EqField::ReportedBy => r.reported_by.iter().any(|x| x.contains(value)),
+        EqField::SuggestedBy => r.suggested_by.iter().any(|x| x.contains(value)),
+        EqField::HelpedBy => r.helped_by.iter().any(|x| x.contains(value)),
+        EqField::AssistedBy => r.assisted_by.iter().any(|x| x.contains(value)),
         EqField::Fixes => r.fixes.iter().any(|x| x.contains(value)),
         EqField::Link => r.link.iter().any(|x| x.contains(value)),
         EqField::Closes => r.closes.iter().any(|x| x.contains(value)),
@@ -2842,6 +2854,9 @@ fn trailer_matches(r: &MessageRow, name_lc: &str, needle_lc: &str) -> bool {
         "tested-by" | "tested_by" => &r.tested_by,
         "co-developed-by" | "co_developed_by" => &r.co_developed_by,
         "reported-by" | "reported_by" => &r.reported_by,
+        "suggested-by" | "suggested_by" => &r.suggested_by,
+        "helped-by" | "helped_by" => &r.helped_by,
+        "assisted-by" | "assisted_by" | "co-authored-by" | "co_authored_by" => &r.assisted_by,
         _ => return false,
     };
     bag.iter()
