@@ -426,11 +426,22 @@ pub fn dispatch(
     if let (Some(rows), _) = trigram_out? {
         tier_results.insert("trigram", rows);
     }
-    if let (Some(rows), hyphen) = bm25_out? {
-        tier_results.insert("bm25", rows);
-        if hyphen == Some(true) {
-            default_applied.push("hyphen-split".to_owned());
+    match bm25_out {
+        Ok((Some(rows), hyphen)) => {
+            tier_results.insert("bm25", rows);
+            if hyphen == Some(true) {
+                default_applied.push("hyphen-split".to_owned());
+            }
         }
+        Ok((None, _)) => {}
+        // BM25 staleness must not poison the whole dispatch: metadata
+        // and trigram may have valid results to return. Surface the
+        // degradation via `default_applied` so the agent knows prose
+        // retrieval was skipped, then continue with the other tiers.
+        Err(Error::State(msg)) if msg.contains("bm25 generation behind corpus") => {
+            default_applied.push("bm25_unavailable_stale_index".to_owned());
+        }
+        Err(e) => return Err(e),
     }
 
     let mut merged = rrf_merge(tier_results, limit * 2);
