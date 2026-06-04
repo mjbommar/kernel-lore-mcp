@@ -10,6 +10,40 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-04
+
+### Fixed
+
+- **Cross-process SQLite mmap reader poisoning.** The `OverDb` pool
+  set `mmap_size = 256 MB` on every reader connection. Because
+  `kernel-lore-sync` runs in a separate process and triggers
+  `wal_checkpoint(PASSIVE)` on default `wal_autocheckpoint=1000`
+  pages (~4 MB), checkpoints periodically rewrote main-DB pages at
+  offsets that long-lived MCP reader connections still had mapped.
+  SQLite's next mmap read against those offsets would detect a
+  page-header / WAL-frame metadata mismatch and raise
+  `SQLITE_CORRUPT`, which rusqlite surfaced as
+  `"database disk image is malformed"` — even though the on-disk
+  file was healthy and a fresh non-mmap reader (`sqlite3 ... PRAGMA
+  quick_check`) returned `ok`. Set `mmap_size = 0` on every reader
+  connection. The Phase 5 benchmark referenced in the original code
+  comment already showed no measurable latency cost on point
+  lookups; cache_size (200 MB SQLite page cache) handles hot working
+  set correctly and is invalidated per write, so it isn't subject
+  to the same hazard.
+- **Backfill writer-lock discipline.** The PyO3-exposed
+  `backfill_trailer_emails`, `backfill_trailer_refs`,
+  `backfill_subject_normalized`, `backfill_side_table_dates`,
+  `backfill_touched_files`, `backfill_touched_functions`,
+  `rebuild_tid`, and `rebuild_bm25` entry points all wrote to
+  over.db / derived tiers without acquiring the same exclusive
+  writer flock that `kernel-lore-sync` uses. A long backfill could
+  therefore race the 5-minute sync timer and produce torn over.db
+  writes — actual on-disk corruption, distinct from the mmap-view
+  staleness above. All eight now go through a shared
+  `with_writer_lock` helper that fails loudly if sync is mid-tick
+  rather than silently interleaving.
+
 ## [0.4.0] - 2026-06-03
 
 ### Added
