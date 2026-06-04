@@ -23,8 +23,25 @@ use crate::embedding::{EmbeddingBuilder, EmbeddingReader};
 use crate::ingest;
 use crate::reader::{DiffMode, EqField, MessageRow, Reader as CoreReader, RegexField};
 use crate::router;
+use crate::state::State;
 use crate::tid;
 use crate::timeout::{CancelGuard, CancelToken, DeadlineGuard};
+
+/// Acquire the same exclusive writer lock that `kernel-lore-sync`
+/// uses, then run `f`. Backfill / rebuild operations that mutate
+/// over.db or any derived tier MUST go through this — without it,
+/// a long-running backfill races the 5-minute sync timer, producing
+/// torn over.db writes that manifest as on-disk corruption (observed
+/// 2026-06-03 during the assisted_by/suggested_by/helped_by trailer
+/// backfill against a live sync timer).
+fn with_writer_lock<T, F>(data_dir: &std::path::Path, f: F) -> crate::error::Result<T>
+where
+    F: FnOnce() -> crate::error::Result<T>,
+{
+    let state = State::new(data_dir)?;
+    let _lock = state.acquire_writer_lock()?;
+    f()
+}
 
 #[pyclass(
     module = "kernel_lore_mcp._core",
@@ -118,7 +135,7 @@ pub fn py_ingest_shard<'py>(
 #[pyfunction]
 #[pyo3(name = "rebuild_tid")]
 pub fn py_rebuild_tid<'py>(py: Python<'py>, data_dir: PathBuf) -> PyResult<Bound<'py, PyDict>> {
-    let (path, n) = py.detach(|| tid::rebuild(&data_dir))?;
+    let (path, n) = py.detach(|| with_writer_lock(&data_dir, || tid::rebuild(&data_dir)))?;
     let d = PyDict::new(py);
     d.set_item("path", path.display().to_string())?;
     d.set_item("rows", n)?;
@@ -133,10 +150,12 @@ pub fn py_rebuild_tid<'py>(py: Python<'py>, data_dir: PathBuf) -> PyResult<Bound
 #[pyfunction]
 #[pyo3(name = "backfill_subject_normalized")]
 pub fn py_backfill_subject_normalized(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let n = py.detach(|| -> crate::error::Result<u64> {
-        let over_path = data_dir.join("over.db");
-        let mut db = crate::over::OverDb::open(&over_path)?;
-        db.backfill_subject_normalized()
+    let n = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_subject_normalized()
+        })
     })?;
     Ok(n)
 }
@@ -148,10 +167,12 @@ pub fn py_backfill_subject_normalized(py: Python<'_>, data_dir: PathBuf) -> PyRe
 #[pyfunction]
 #[pyo3(name = "backfill_trailer_emails")]
 pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let n = py.detach(|| -> crate::error::Result<u64> {
-        let over_path = data_dir.join("over.db");
-        let mut db = crate::over::OverDb::open(&over_path)?;
-        db.backfill_trailer_emails()
+    let n = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_trailer_emails()
+        })
     })?;
     Ok(n)
 }
@@ -164,10 +185,12 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
 #[pyfunction]
 #[pyo3(name = "backfill_trailer_refs")]
 pub fn py_backfill_trailer_refs(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let n = py.detach(|| -> crate::error::Result<u64> {
-        let over_path = data_dir.join("over.db");
-        let mut db = crate::over::OverDb::open(&over_path)?;
-        db.backfill_trailer_refs()
+    let n = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_trailer_refs()
+        })
     })?;
     Ok(n)
 }
@@ -181,10 +204,12 @@ pub fn py_backfill_trailer_refs(py: Python<'_>, data_dir: PathBuf) -> PyResult<u
 #[pyfunction]
 #[pyo3(name = "backfill_side_table_dates")]
 pub fn py_backfill_side_table_dates(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let n = py.detach(|| -> crate::error::Result<u64> {
-        let over_path = data_dir.join("over.db");
-        let mut db = crate::over::OverDb::open(&over_path)?;
-        db.backfill_side_table_dates()
+    let n = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_side_table_dates()
+        })
     })?;
     Ok(n)
 }
@@ -225,10 +250,12 @@ pub fn py_path_vocab_ready(py: Python<'_>, data_dir: PathBuf) -> PyResult<bool> 
 #[pyfunction]
 #[pyo3(name = "backfill_touched_files")]
 pub fn py_backfill_touched_files(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let n = py.detach(|| -> crate::error::Result<u64> {
-        let over_path = data_dir.join("over.db");
-        let mut db = crate::over::OverDb::open(&over_path)?;
-        db.backfill_touched_files()
+    let n = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_touched_files()
+        })
     })?;
     Ok(n)
 }
@@ -242,10 +269,12 @@ pub fn py_backfill_touched_files(py: Python<'_>, data_dir: PathBuf) -> PyResult<
 #[pyfunction]
 #[pyo3(name = "backfill_touched_functions")]
 pub fn py_backfill_touched_functions(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let n = py.detach(|| -> crate::error::Result<u64> {
-        let over_path = data_dir.join("over.db");
-        let mut db = crate::over::OverDb::open(&over_path)?;
-        db.backfill_touched_functions()
+    let n = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_touched_functions()
+        })
     })?;
     Ok(n)
 }
@@ -255,7 +284,7 @@ pub fn py_backfill_touched_functions(py: Python<'_>, data_dir: PathBuf) -> PyRes
 #[pyfunction]
 #[pyo3(name = "rebuild_bm25")]
 pub fn py_rebuild_bm25(py: Python<'_>, data_dir: PathBuf) -> PyResult<u64> {
-    let count = py.detach(|| ingest::rebuild_bm25(&data_dir))?;
+    let count = py.detach(|| with_writer_lock(&data_dir, || ingest::rebuild_bm25(&data_dir)))?;
     Ok(count)
 }
 

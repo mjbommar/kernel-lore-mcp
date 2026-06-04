@@ -346,17 +346,38 @@ impl OverDb {
     }
 
     fn configure(conn: &Connection) -> Result<()> {
-        // mmap_size: 256 MB. Earlier we used 4 GB but a Phase 5
-        // benchmark showed it pushed reader peak RSS to 1.75 GB
-        // (failed the <500 MB target) without measurable latency
-        // gain — point lookups touch a tiny working set. The build
-        // binary overrides this in open_for_bulk_load.
-        // cache_size: -200_000 = 200 MB (negative = absolute bytes).
+        // mmap_size: 0 (disabled). Reasoning:
+        //   * Earlier we used 4 GB (1.75 GB reader RSS, blew the
+        //     <500 MB target). Reduced to 256 MB. A Phase 5 benchmark
+        //     at the same time showed NO measurable latency gain at
+        //     either size — point lookups touch a tiny working set
+        //     that the OS page cache already serves.
+        //   * Mmap is actively dangerous in our cross-process
+        //     reader/writer split. `kernel-lore-sync` writes WAL
+        //     frames, hits autocheckpoint at ~4 MB intervals, and
+        //     rewrites main-DB pages in place. Long-lived reader
+        //     connections in `kernel-lore-mcp` whose mmap windows
+        //     covered those offsets would then see stale page
+        //     headers / WAL-frame metadata, and SQLite would raise
+        //     `SQLITE_CORRUPT` ("database disk image is malformed")
+        //     on the next mmap read — even though the on-disk file
+        //     was perfectly healthy and a fresh (non-mmap) reader
+        //     could `quick_check = ok` against it.
+        //   * Observed in production 2026-06-03 / 2026-06-04: server
+        //     ran ~15 h serving correctly, then every Rust-pool tool
+        //     started returning "malformed" while `lore_header_search`
+        //     (Python sqlite3, mmap_size=0 by default) and the
+        //     `sqlite3` CLI continued to read cleanly. A service
+        //     restart cleared it for another ~15 h.
+        //   * cache_size: -200_000 = 200 MB SQLite page cache stays
+        //     in process heap and IS invalidated on each write, so
+        //     it's not subject to the same hazard.
         // synchronous=NORMAL is safe under WAL and gives ~3x write
-        // throughput vs FULL.
+        // throughput vs FULL. The build binary overrides journal_mode
+        // and synchronous in open_for_bulk_load.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "mmap_size", 268_435_456_i64)?;
+        conn.pragma_update(None, "mmap_size", 0_i64)?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.pragma_update(None, "cache_size", -200_000_i64)?;
         Ok(())
