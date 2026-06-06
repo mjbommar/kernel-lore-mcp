@@ -10,6 +10,33 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-06
+
+### Added
+
+- **Index RFC822 envelope `To:` and `Cc:` addresses.** Previously
+  the side-table only saw body-line trailers, which miss anyone
+  the patch text didn't quote. A reply where someone CC'd you at
+  SMTP time without naming you in the body was invisible to
+  identity search even when the message was already in the
+  corpus.
+  - `parse.rs` extracts envelope addresses into new
+    `ParsedMessage.to_addrs` / `cc_addrs` (lowercased, deduped,
+    spaces-filter for malformed `Name <addr>` blobs).
+  - `over.rs` carries them as `DddPayload.to_addrs` /
+    `cc_addrs` (`#[serde(default)]` for backward-compat with
+    historical `ddd` blobs) and surfaces them via
+    `trailer_email_sources` under kinds `to_env` and `cc_env`.
+  - New PyO3 entry point `backfill_envelope_addresses(data_dir)`
+    walks every existing over.db row, re-reads message bytes
+    from the compressed store, parses envelope headers, and
+    writes side-table rows. Idempotent, writer-lock protected.
+    Run once after upgrading; new ingests pick up envelope
+    addresses automatically via `ingest.rs`.
+  - `lore_header_search` accepts `field=to_env` and
+    `field=cc_env` and documents the distinction from body-
+    trailer `to:` / `cc:` matches.
+
 ## [0.4.2] - 2026-06-06
 
 ### Added

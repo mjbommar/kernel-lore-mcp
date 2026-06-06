@@ -15,7 +15,7 @@ from typing import Any
 
 __all__ = ["__version__", "native_version"]
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 
 def __getattr__(name: str) -> Any:
