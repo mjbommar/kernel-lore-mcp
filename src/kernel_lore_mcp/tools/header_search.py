@@ -48,6 +48,18 @@ _EMAIL_KINDS = {
     "suggested_by",
     "helped_by",
     "assisted_by",
+    # Long-tail trailers indexed via the generic ddd.trailers walker
+    # added in over.rs::extra_trailer_email_kinds. Populations observed
+    # in the 29.5 M-row corpus: cc 1.8 M (patch-body Cc: lines —
+    # includes but is not limited to Cc:stable@…), reported_and_tested_by
+    # 23.7 K, originally_by 3.4 K, inspired_by 1.1 K. Any other email-
+    # bearing trailer kind written by `parse.rs::extract_trailers` lands
+    # in `over_trailer_email` automatically and is queryable with the
+    # exact `kind` string from the trailers map (e.g. `nacked_by`).
+    "cc",
+    "originally_by",
+    "inspired_by",
+    "reported_and_tested_by",
 }
 _REF_KINDS = {"fixes", "link", "closes", "reported_by_ref"}
 _FIELD_FROM = "from"
@@ -67,6 +79,10 @@ async def lore_header_search(
             "suggested_by",
             "helped_by",
             "assisted_by",
+            "cc",
+            "originally_by",
+            "inspired_by",
+            "reported_and_tested_by",
             "reported_by_ref",
             "fixes",
             "link",
@@ -78,11 +94,13 @@ async def lore_header_search(
                 "Header or trailer to search. Email-bearing trailers "
                 "(signed_off_by, reviewed_by, acked_by, tested_by, "
                 "co_developed_by, reported_by, suggested_by, helped_by, "
-                "assisted_by — assisted_by also matches Co-authored-by:) "
-                "match against the address; ref-bearing trailers (fixes, "
-                "link, closes, reported_by_ref) match against the ref "
-                "value (SHA prefix, URL substring, syzbot hash, etc.); "
-                "`from` matches the message From: address."
+                "assisted_by, cc, originally_by, inspired_by, "
+                "reported_and_tested_by — assisted_by also matches "
+                "Co-authored-by:) match against the address; ref-bearing "
+                "trailers (fixes, link, closes, reported_by_ref) match "
+                "against the ref value (SHA prefix, URL substring, "
+                "syzbot hash, etc.); `from` matches the message From: "
+                "address."
             ),
         ),
     ],

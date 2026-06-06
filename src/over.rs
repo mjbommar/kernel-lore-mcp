@@ -1003,6 +1003,16 @@ impl OverDb {
                             }
                         }
                     }
+                    for (kind, raws) in extra_trailer_email_kinds(ddd) {
+                        for raw in &raws {
+                            let email = crate::reader::extract_email(raw);
+                            if !email.is_empty() {
+                                total += ins
+                                    .execute(rusqlite::params![kind, email, mid, list, date])?
+                                    as u64;
+                            }
+                        }
+                    }
                 }
             }
             tx.commit()?;
@@ -1174,6 +1184,20 @@ impl OverDb {
             tr_del_all.execute(rusqlite::params![row.message_id, row.list])?;
             for (kind, raws) in trailer_email_sources(&row.ddd) {
                 for raw in raws {
+                    let email = crate::reader::extract_email(raw);
+                    if !email.is_empty() {
+                        tr_ins.execute(rusqlite::params![
+                            kind,
+                            email,
+                            row.message_id,
+                            row.list,
+                            row.date_unix_ns,
+                        ])?;
+                    }
+                }
+            }
+            for (kind, raws) in extra_trailer_email_kinds(&row.ddd) {
+                for raw in &raws {
                     let email = crate::reader::extract_email(raw);
                     if !email.is_empty() {
                         tr_ins.execute(rusqlite::params![
@@ -1733,6 +1757,48 @@ fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 9] 
         ("helped_by", &ddd.helped_by),
         ("assisted_by", &ddd.assisted_by),
     ]
+}
+
+/// Kinds (in hyphenated form, as `parse.rs` normalizes keys into
+/// `ddd.trailers`) already covered by `trailer_email_sources`. Used
+/// by `extra_trailer_email_kinds` to skip duplicate indexing.
+const NAMED_TRAILER_KEYS: &[&str] = &[
+    "signed-off-by",
+    "reviewed-by",
+    "acked-by",
+    "tested-by",
+    "co-developed-by",
+    "reported-by",
+    "suggested-by",
+    "helped-by",
+    "assisted-by",
+    "co-authored-by", // parse.rs already routes co-authored-by into assisted_by
+];
+
+/// Walk `ddd.trailers_json` and yield every email-bearing trailer
+/// kind NOT already covered by `trailer_email_sources`. Kernel mail
+/// uses dozens of long-tail trailers (`Originally-by`, `Inspired-by`,
+/// `Reported-and-tested-by`, body-line `Cc:`, etc.) that historically
+/// went into the trailers JSON blob but were never surfaced into the
+/// indexed `over_trailer_email` side table.
+///
+/// Returns owned `(kind_underscored, values)` tuples — values are
+/// cloned out of the parsed JSON map. Non-email-shaped values are
+/// dropped at insert time by the caller (via `extract_email`), so
+/// noisy non-trailer matches (`Compiler: gcc`, `Bug: NPE`, etc.) are
+/// harmless: they parse here, then fail the email filter.
+fn extra_trailer_email_kinds(ddd: &DddPayload) -> Vec<(String, Vec<String>)> {
+    let Some(ref js) = ddd.trailers_json else {
+        return Vec::new();
+    };
+    let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, Vec<String>>>(js)
+    else {
+        return Vec::new();
+    };
+    map.into_iter()
+        .filter(|(k, _)| !NAMED_TRAILER_KEYS.contains(&k.as_str()))
+        .map(|(k, vs)| (k.replace('-', "_"), vs))
+        .collect()
 }
 
 fn trailer_ref_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 4] {
