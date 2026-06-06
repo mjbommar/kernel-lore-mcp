@@ -81,6 +81,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_backfill_envelope_addresses,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_backfill_trailer_refs,
         m
     )?)?;

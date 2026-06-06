@@ -60,6 +60,14 @@ _EMAIL_KINDS = {
     "originally_by",
     "inspired_by",
     "reported_and_tested_by",
+    # RFC822 envelope addresses — distinct from body-trailer `to:` /
+    # `cc:` matches. Populated by `backfill_envelope_addresses` and
+    # by every new `ingest_shard` call. Use these when you want to
+    # know "was X addressed at SMTP time on this message?" — the
+    # body-trailer kinds miss anyone who was on the original list
+    # post but never quoted in the patch text.
+    "to_env",
+    "cc_env",
 }
 _REF_KINDS = {"fixes", "link", "closes", "reported_by_ref"}
 _FIELD_FROM = "from"
@@ -83,6 +91,8 @@ async def lore_header_search(
             "originally_by",
             "inspired_by",
             "reported_and_tested_by",
+            "to_env",
+            "cc_env",
             "reported_by_ref",
             "fixes",
             "link",
@@ -96,7 +106,11 @@ async def lore_header_search(
                 "co_developed_by, reported_by, suggested_by, helped_by, "
                 "assisted_by, cc, originally_by, inspired_by, "
                 "reported_and_tested_by — assisted_by also matches "
-                "Co-authored-by:) match against the address; ref-bearing "
+                "Co-authored-by:) match against the address; envelope "
+                "recipients (to_env, cc_env) match RFC822 To: / Cc: "
+                "headers (i.e. who the mail was sent to at SMTP time, "
+                "distinct from body-trailer `to:` / `cc:` lines); "
+                "ref-bearing "
                 "trailers (fixes, link, closes, reported_by_ref) match "
                 "against the ref value (SHA prefix, URL substring, "
                 "syzbot hash, etc.); `from` matches the message From: "

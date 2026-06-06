@@ -354,6 +354,14 @@ fn message_row_to_over_row(mr: MessageRow) -> OverRow {
             suggested_by,
             helped_by,
             assisted_by,
+            // `build_over` rebuilds over.db from Parquet. The Parquet
+            // schema doesn't yet carry envelope to_addrs / cc_addrs,
+            // so these stay empty here; the
+            // `backfill_envelope_addresses` PyO3 entry point fills
+            // them by re-parsing each message's raw bytes from the
+            // compressed store.
+            to_addrs: Vec::new(),
+            cc_addrs: Vec::new(),
             fixes,
             link,
             closes,

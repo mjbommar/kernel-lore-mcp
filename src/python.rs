@@ -177,6 +177,33 @@ pub fn py_backfill_trailer_emails(py: Python<'_>, data_dir: PathBuf) -> PyResult
     Ok(n)
 }
 
+/// Backfill the indexed `over_trailer_email` side table with RFC822
+/// envelope addresses (`To:` / `Cc:`) by re-reading every message's
+/// raw bytes from the compressed store and parsing its envelope.
+/// Required once after upgrading; new ingests pick up envelope
+/// addresses automatically via `ingest.rs`. Returns a dict
+/// `{"rows": <inserted>, "skipped": <unreadable messages>}`. Holds
+/// the writer lock for its duration so a concurrent
+/// `kernel-lore-sync` tick stays back.
+#[pyfunction]
+#[pyo3(name = "backfill_envelope_addresses")]
+pub fn py_backfill_envelope_addresses<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (rows, skipped) = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.backfill_envelope_addresses(&data_dir)
+        })
+    })?;
+    let d = PyDict::new(py);
+    d.set_item("rows", rows)?;
+    d.set_item("skipped", skipped)?;
+    Ok(d)
+}
+
 /// One-off backfill for the normalized trailer-reference side table.
 /// Walks every existing over.db row, decodes its ddd blob, and
 /// materializes normalized lookup keys from {reported_by, fixes,

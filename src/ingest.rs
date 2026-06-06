@@ -649,6 +649,8 @@ fn build_over_row(
             suggested_by: parsed.suggested_by.clone(),
             helped_by: parsed.helped_by.clone(),
             assisted_by: parsed.assisted_by.clone(),
+            to_addrs: parsed.to_addrs.clone(),
+            cc_addrs: parsed.cc_addrs.clone(),
             fixes: parsed.fixes.clone(),
             link: parsed.link.clone(),
             closes: parsed.closes.clone(),

@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use mail_parser::{Addr, MessageParser};
+use mail_parser::{Addr, Address, MessageParser};
 
 /// Decoded view of one kernel-list message.
 #[derive(Debug, Default, Clone)]
@@ -18,6 +18,13 @@ pub struct ParsedMessage {
     pub message_id: Option<String>,
     pub from_addr: Option<String>,
     pub from_name: Option<String>,
+    /// RFC822 To: envelope addresses (lowercased, deduped). Distinct
+    /// from any body-level `To:` trailer line.
+    pub to_addrs: Vec<String>,
+    /// RFC822 Cc: envelope addresses (lowercased, deduped). Distinct
+    /// from body-level `Cc:` trailers; people often appear in only
+    /// one or the other.
+    pub cc_addrs: Vec<String>,
     pub subject_raw: Option<String>,
     pub subject_normalized: Option<String>,
     pub subject_tags: Vec<String>,
@@ -79,6 +86,8 @@ pub fn parse_message(bytes: &[u8], commit_date_unix_ns: Option<i64>) -> ParsedMe
             out.from_name = name.as_deref().map(|s| s.trim().to_owned());
         }
     }
+    out.to_addrs = collect_envelope_addrs(msg.to());
+    out.cc_addrs = collect_envelope_addrs(msg.cc());
     if let Some(subject) = msg.subject() {
         out.subject_raw = Some(subject.to_owned());
         let (norm, tags, version, index, total, is_cover) = decompose_subject(subject);
@@ -145,6 +154,26 @@ pub fn parse_message(bytes: &[u8], commit_date_unix_ns: Option<i64>) -> ParsedMe
         parse_patch(&patch, &mut out);
     }
 
+    out
+}
+
+/// Pull every recipient address out of an RFC822 To: / Cc: header, normalize
+/// (trim + lowercase), and dedupe. Returns `Vec` rather than `HashSet` so the
+/// caller can store it in a vector field; dedup is small-N so a linear scan
+/// beats hashing.
+fn collect_envelope_addrs(addrs: Option<&Address<'_>>) -> Vec<String> {
+    let Some(group) = addrs else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for Addr { address, .. } in group.iter() {
+        if let Some(a) = address.as_deref() {
+            let norm = a.trim().to_ascii_lowercase();
+            if !norm.is_empty() && !norm.contains(' ') && !out.contains(&norm) {
+                out.push(norm);
+            }
+        }
+    }
     out
 }
 

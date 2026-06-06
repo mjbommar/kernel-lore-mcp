@@ -98,6 +98,10 @@ pub struct DddPayload {
     pub suggested_by: Vec<String>,
     pub helped_by: Vec<String>,
     pub assisted_by: Vec<String>,
+    #[serde(default)]
+    pub to_addrs: Vec<String>,
+    #[serde(default)]
+    pub cc_addrs: Vec<String>,
     pub fixes: Vec<String>,
     pub link: Vec<String>,
     pub closes: Vec<String>,
@@ -1022,6 +1026,117 @@ impl OverDb {
         Ok(total)
     }
 
+    /// Populate `over_trailer_email` rows for envelope `To:` and
+    /// `Cc:` addresses by re-reading each message's raw bytes from
+    /// the compressed store and parsing the RFC822 envelope headers.
+    ///
+    /// Why this exists separately from `backfill_trailer_emails`:
+    /// every `ddd` blob in over.db today was serialized before
+    /// `to_addrs` / `cc_addrs` existed on `DddPayload`. The ddd schema
+    /// defaults those fields to `[]` so the regular trailer backfill
+    /// would write nothing. This pass goes back to the source of
+    /// truth (compressed store), reparses envelope headers, and
+    /// writes side-table rows under kind = `to_env` / `cc_env`.
+    ///
+    /// Returns total side-table rows written. Skips messages whose
+    /// store payload can't be read (corrupted segment, missing
+    /// list-store, etc.) with a count rather than an error so a
+    /// transient store-read failure doesn't abort the whole
+    /// backfill. Idempotent: DELETEs `(kind in ('to_env','cc_env'),
+    /// message_id, list)` before INSERT.
+    pub fn backfill_envelope_addresses(
+        &mut self,
+        data_dir: &std::path::Path,
+    ) -> Result<(u64, u64)> {
+        const CHUNK: usize = 50_000;
+        let mut cursor: i64 = 0;
+        let mut total_rows: u64 = 0;
+        let mut skipped: u64 = 0;
+        let mut store_cache: std::collections::HashMap<String, crate::store::Store> =
+            std::collections::HashMap::new();
+        loop {
+            let mut pending: Vec<(String, String, Option<i64>, i64, i64)> =
+                Vec::with_capacity(CHUNK);
+            let mut last_rowid = cursor;
+            {
+                let mut stmt = self.conn.prepare(
+                    "SELECT rowid, message_id, list, date_unix_ns, \
+                            body_segment_id, body_offset \
+                       FROM over \
+                      WHERE rowid > ?1 ORDER BY rowid ASC LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(rusqlite::params![cursor, CHUNK as i64])?;
+                while let Some(r) = rows.next()? {
+                    let rowid: i64 = r.get(0)?;
+                    let mid: String = r.get(1)?;
+                    let list: String = r.get(2)?;
+                    let date: Option<i64> = r.get(3)?;
+                    let seg: i64 = r.get(4)?;
+                    let off: i64 = r.get(5)?;
+                    pending.push((mid, list, date, seg, off));
+                    last_rowid = rowid;
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            let tx = self.conn.transaction()?;
+            {
+                let mut del = tx.prepare(
+                    "DELETE FROM over_trailer_email \
+                      WHERE kind IN ('to_env','cc_env') \
+                        AND message_id = ?1 AND list = ?2",
+                )?;
+                let mut ins = tx.prepare(
+                    "INSERT OR IGNORE INTO over_trailer_email \
+                        (kind, email, message_id, list, date_unix_ns) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                )?;
+                for (mid, list, date, seg, off) in &pending {
+                    let store = match store_cache.entry(list.clone()) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            match crate::store::Store::open(data_dir, list) {
+                                Ok(s) => e.insert(s),
+                                Err(_) => {
+                                    skipped += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    let bytes = match store.read_at(*seg as u32, *off as u64) {
+                        Ok(b) => b,
+                        Err(_) => {
+                            skipped += 1;
+                            continue;
+                        }
+                    };
+                    let parsed = crate::parse::parse_message(&bytes, None);
+                    del.execute(rusqlite::params![mid, list])?;
+                    for addr in &parsed.to_addrs {
+                        if !addr.is_empty() {
+                            total_rows += ins
+                                .execute(rusqlite::params!["to_env", addr, mid, list, date])?
+                                as u64;
+                        }
+                    }
+                    for addr in &parsed.cc_addrs {
+                        if !addr.is_empty() {
+                            total_rows += ins
+                                .execute(rusqlite::params!["cc_env", addr, mid, list, date])?
+                                as u64;
+                        }
+                    }
+                }
+            }
+            tx.commit()?;
+            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            cursor = last_rowid;
+        }
+        Ok((total_rows, skipped))
+    }
+
     /// Populate `over_trailer_ref` for every existing row by decoding
     /// the `ddd` blob and extracting normalized lookup tokens from
     /// {reported_by, fixes, link, closes}. Idempotent — DELETEs before
@@ -1745,7 +1860,7 @@ impl OverDb {
 /// keeps `insert_batch_in_tx` and `backfill_trailer_emails` in sync
 /// by construction — adding a new kind means appending one tuple
 /// plus a new `trailer_kind` match arm.
-fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 9] {
+fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 11] {
     [
         ("signed_off_by", &ddd.signed_off_by),
         ("reviewed_by", &ddd.reviewed_by),
@@ -1756,6 +1871,13 @@ fn trailer_email_sources(ddd: &DddPayload) -> [(&'static str, &Vec<String>); 9] 
         ("suggested_by", &ddd.suggested_by),
         ("helped_by", &ddd.helped_by),
         ("assisted_by", &ddd.assisted_by),
+        // RFC822 envelope recipients. Distinct from body-trailer
+        // `to:` / `cc:` kinds: the envelope addresses are who the
+        // mail was sent to / cc'd to at SMTP time, not who the patch
+        // text named. A person addressed by the original poster but
+        // never quoted in the patch body is invisible without this.
+        ("to_env", &ddd.to_addrs),
+        ("cc_env", &ddd.cc_addrs),
     ]
 }
 
@@ -1773,6 +1895,9 @@ const NAMED_TRAILER_KEYS: &[&str] = &[
     "helped-by",
     "assisted-by",
     "co-authored-by", // parse.rs already routes co-authored-by into assisted_by
+    // envelope addresses are surfaced under `to_env` / `cc_env` from
+    // ddd.to_addrs / ddd.cc_addrs (NOT from ddd.trailers); the body-level
+    // `to:` / `cc:` trailers come through the generic walker as before.
 ];
 
 /// Walk `ddd.trailers_json` and yield every email-bearing trailer
@@ -2048,6 +2173,8 @@ mod tests {
                 suggested_by: vec![],
                 helped_by: vec![],
                 assisted_by: vec![],
+                to_addrs: vec![],
+                cc_addrs: vec![],
                 fixes: vec![],
                 link: vec![],
                 closes: vec![],
