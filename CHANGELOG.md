@@ -10,6 +10,43 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-06
+
+### Added
+
+- **Index every email-bearing trailer kind, not just the nine
+  named ones.** `parse.rs::extract_trailers` writes every
+  `^[A-Z][a-zA-Z0-9_-]+: …` line into `ParsedMessage.trailers`
+  and serializes the full map into `DddPayload.trailers_json`,
+  but until now only the nine canonical kinds
+  (signed_off_by, reviewed_by, acked_by, tested_by,
+  co_developed_by, reported_by, suggested_by, helped_by,
+  assisted_by) had indexed rows in `over_trailer_email`. Long-
+  tail trailers (`Originally-by`, `Inspired-by`, `Reported-and-
+  tested-by`, patch-body `Cc:`, plus any future kind without
+  code changes) now flow through a generic
+  `extra_trailer_email_kinds()` walker called from both
+  `insert_batch_in_tx` (new ingests) and `backfill_trailer_emails`
+  (historical corpus). The email-shape filter
+  (`reader::extract_email`) drops non-trailer noise like
+  `Compiler: gcc` automatically. Corpus-wide observed counts for
+  the new kinds (per a full Parquet scan of all 29.5 M messages):
+  `cc` 1,824,483, `reported_and_tested_by` 23,656,
+  `originally_by` 3,385, `inspired_by` 1,084. `lore_header_search`
+  exposes the four common new kinds in its `Literal[…]` schema.
+- Run `backfill_trailer_emails` once after upgrading to populate
+  the historical rows; new ingests pick up the new kinds
+  automatically.
+
+### Known limitations
+
+- RFC822 envelope `To:` and `Cc:` headers are still not indexed.
+  `parse.rs` only extracts `from_addr` from the message envelope;
+  adding To: / Cc: requires extending `ParsedMessage`, `DddPayload`,
+  the Parquet schema, and a full corpus reingest from the
+  compressed store. Patch-body `Cc:` lines (the kind documented in
+  Documentation/process/submitting-patches.rst) are indexed.
+
 ## [0.4.1] - 2026-06-04
 
 ### Fixed
