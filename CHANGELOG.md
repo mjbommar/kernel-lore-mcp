@@ -10,6 +10,45 @@ release tags move them into a dated section. Release process in
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-06-06
+
+### Added
+
+- **Normalized involvement schema** — one indexed query answers
+  "every message X is involved in across any role".
+  - New `addresses(addr_id, email)` interned dictionary (~5 M rows,
+    ~200 MB).
+  - New `over_involvement(kind, addr_id, message_id, list,
+    date_unix_ns)` table with PK `(kind, addr_id, message_id, list)`
+    `WITHOUT ROWID`. Replaces the legacy
+    `over_trailer_email` (~240 M rows / 155 GB) with the same
+    information at ~13 GB (12× storage reduction).
+  - `from_addr` is now also indexed via `over_involvement` under
+    `kind='from'`, so the "any involvement" query covers authoring
+    too — no UNION across `over` + `over_trailer_email`.
+  - One-shot migration via the new
+    `_core.migrate_to_involvement_schema(data_dir)` entry point:
+    populates the dictionary, bulk-moves 240 M rows from
+    `over_trailer_email` JOIN `addresses` in 200 k-row chunks with
+    `wal_checkpoint(TRUNCATE)` between each, then adds the
+    `kind='from'` rows, drops the legacy table. Idempotent and
+    resumable. Holds the writer lock for its duration.
+  - `lore_header_search field=any` returns rows across every
+    indexed role for the matched address(es).
+
+### Changed
+
+- `OverDb::insert_batch_in_tx` writes through `addresses` +
+  `over_involvement` instead of `over_trailer_email`. Includes a
+  `kind='from'` row for the message author so live ingest keeps
+  the new "any involvement" path correct.
+- `OverDb::scan_eq` for trailer-email `EqField` variants resolves
+  the requested email to an `addr_id` once, then seeks
+  `over_involvement` by `(kind, addr_id, date)`. Empty result when
+  the address isn't in the dictionary (matches legacy behavior).
+- `backfill_trailer_emails` and `backfill_envelope_addresses` now
+  upsert into `addresses` and write to `over_involvement`.
+
 ## [0.4.3] - 2026-06-06
 
 ### Added

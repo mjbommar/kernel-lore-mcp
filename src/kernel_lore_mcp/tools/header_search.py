@@ -78,6 +78,7 @@ _NS_PER_DAY = 86_400 * 1_000_000_000
 async def lore_header_search(
     field: Annotated[
         Literal[
+            "any",
             "signed_off_by",
             "reviewed_by",
             "acked_by",
@@ -101,7 +102,11 @@ async def lore_header_search(
         ],
         Field(
             description=(
-                "Header or trailer to search. Email-bearing trailers "
+                "Header or trailer to search. `any` returns every "
+                "message the matched address appears in across ANY "
+                "role (from + every trailer + envelope) in one indexed "
+                "query — use this for 'all activity by X'. "
+                "Email-bearing trailers "
                 "(signed_off_by, reviewed_by, acked_by, tested_by, "
                 "co_developed_by, reported_by, suggested_by, helped_by, "
                 "assisted_by, cc, originally_by, inspired_by, "
@@ -218,12 +223,26 @@ def _query_index(
         # branch uses an existing btree index — verified via PRAGMA
         # index_list at design time.
         params: list = []
-        if field in _EMAIL_KINDS:
+        if field == "any" or field in _EMAIL_KINDS or field == "from":
+            # Normalized path: filter by email pattern against the
+            # `addresses` dictionary (small + hot), then join into
+            # `over_involvement` to get every matching (kind,
+            # message_id, list, date).
+            #
+            # `field="any"` returns rows across every indexed role
+            # for the matched address(es). Other email-kind values
+            # filter to that single role via an extra `kind=?` clause.
             sql = (
-                "SELECT message_id, list, date_unix_ns FROM over_trailer_email "
-                "WHERE kind = ? AND email LIKE ?"
+                "SELECT i.kind AS field_kind, i.message_id, i.list, "
+                "       i.date_unix_ns "
+                "FROM addresses a "
+                "JOIN over_involvement i USING (addr_id) "
+                "WHERE a.email LIKE ?"
             )
-            params.extend([field, pattern])
+            params.append(pattern)
+            if field != "any":
+                sql += " AND i.kind = ?"
+                params.append("from" if field == "from" else field)
         elif field == "reported_by_ref":
             sql = (
                 "SELECT message_id, list, date_unix_ns FROM over_trailer_ref "
@@ -236,20 +255,24 @@ def _query_index(
                 "WHERE kind = ? AND ref_value LIKE ?"
             )
             params.extend([field, pattern])
-        elif field == _FIELD_FROM:
-            sql = "SELECT message_id, list, date_unix_ns FROM over WHERE from_addr LIKE ?"
-            params.append(pattern)
         else:
             return []
 
+        # The involvement-table query aliases columns with `i.`; the
+        # ref-tier branches use unqualified column names. Pick the
+        # column-name shape based on the table actually being queried.
+        uses_involvement = "over_involvement" in sql
+        col_date = "i.date_unix_ns" if uses_involvement else "date_unix_ns"
+        col_list = "i.list" if uses_involvement else "list"
+
         if since_unix_ns is not None:
-            sql += " AND date_unix_ns >= ?"
+            sql += f" AND {col_date} >= ?"
             params.append(since_unix_ns)
         if list_filter is not None:
-            sql += " AND list = ?"
+            sql += f" AND {col_list} = ?"
             params.append(list_filter)
 
-        sql += " ORDER BY date_unix_ns DESC LIMIT ?"
+        sql += f" ORDER BY {col_date} DESC LIMIT ?"
         params.append(limit)
 
         index_rows = db.execute(sql, params).fetchall()

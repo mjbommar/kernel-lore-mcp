@@ -85,6 +85,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(
+        crate::python::py_migrate_to_involvement_schema,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
         crate::python::py_backfill_trailer_refs,
         m
     )?)?;

@@ -494,6 +494,44 @@ impl OverDb {
                 date_unix_ns  INTEGER,
                 PRIMARY KEY (function, message_id, list)
             );
+
+            -- Normalized involvement schema (introduced when the legacy
+            -- `over_trailer_email` had grown to 240 M rows / 155 GB
+            -- because every trailer stored the email string inline).
+            -- See `migrate_to_involvement_schema` for the one-shot
+            -- data migration.
+            --
+            -- `addresses` is the interned email dictionary. ~5 M
+            -- unique addresses across the kernel community. Every
+            -- trailer / envelope reference resolves to one addr_id.
+            CREATE TABLE IF NOT EXISTS addresses (
+                addr_id  INTEGER PRIMARY KEY,
+                email    TEXT NOT NULL UNIQUE
+            );
+
+            -- `over_involvement` replaces `over_trailer_email`. One
+            -- row per (kind, address, message). Unifies body-trailer
+            -- kinds (signed_off_by, reviewed_by, ...), envelope
+            -- recipients (to_env, cc_env), AND the message author
+            -- (kind='from') so "every message this person touched"
+            -- is one indexed query instead of a UNION across tables.
+            --
+            -- Storage: ~50 bytes/row × ~270 M rows ≈ 13 GB. The
+            -- legacy table stored ~80 bytes/row because each row
+            -- repeated the full email string.
+            --
+            -- WITHOUT ROWID: PK = entire row, so the b-tree leaf
+            -- IS the storage. Saves ~2 GB vs row-id-based table.
+            CREATE TABLE IF NOT EXISTS over_involvement (
+                kind          TEXT    NOT NULL,
+                addr_id       INTEGER NOT NULL REFERENCES addresses(addr_id),
+                message_id    TEXT    NOT NULL,
+                list          TEXT    NOT NULL,
+                -- Denormalized from over.date_unix_ns for date-DESC
+                -- covering on the per-person index below.
+                date_unix_ns  INTEGER,
+                PRIMARY KEY (kind, addr_id, message_id, list)
+            ) WITHOUT ROWID;
             "#,
         )?;
 
@@ -606,6 +644,15 @@ impl OverDb {
             -- make message_id alone UNIQUE. INSERT OR REPLACE on this
             -- index gives us re-ingest idempotency.
             CREATE UNIQUE INDEX IF NOT EXISTS over_mid_list ON over (message_id, list);
+
+            -- "Any involvement by this person, newest first" — the
+            -- single-query feature the normalized schema exists for.
+            CREATE INDEX IF NOT EXISTS inv_addr_date
+                ON over_involvement (addr_id, date_unix_ns DESC);
+
+            -- "Everyone on this message" — inverse lookup.
+            CREATE INDEX IF NOT EXISTS inv_msg
+                ON over_involvement (message_id, list);
             "#,
         )?;
         Ok(())
@@ -987,12 +1034,17 @@ impl OverDb {
             let tx = self.conn.transaction()?;
             {
                 let mut del = tx.prepare(
-                    "DELETE FROM over_trailer_email \
-                     WHERE message_id = ?1 AND list = ?2",
+                    "DELETE FROM over_involvement \
+                      WHERE message_id = ?1 AND list = ?2 \
+                        AND kind NOT IN ('from','to_env','cc_env')",
                 )?;
+                let mut addr_upsert = tx
+                    .prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
+                let mut addr_lookup = tx
+                    .prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
                 let mut ins = tx.prepare(
-                    "INSERT OR IGNORE INTO over_trailer_email \
-                        (kind, email, message_id, list, date_unix_ns) \
+                    "INSERT OR IGNORE INTO over_involvement \
+                        (kind, addr_id, message_id, list, date_unix_ns) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                 )?;
                 for (mid, list, date, ddd) in &pending {
@@ -1000,27 +1052,41 @@ impl OverDb {
                     for (kind, raws) in trailer_email_sources(ddd) {
                         for raw in raws {
                             let email = crate::reader::extract_email(raw);
-                            if !email.is_empty() {
-                                total += ins
-                                    .execute(rusqlite::params![kind, email, mid, list, date])?
-                                    as u64;
+                            if email.is_empty() {
+                                continue;
+                            }
+                            addr_upsert.execute(rusqlite::params![email])?;
+                            let addr_id: Option<i64> = addr_lookup
+                                .query_row(rusqlite::params![email], |r| r.get(0))
+                                .optional()?;
+                            if let Some(addr_id) = addr_id {
+                                total += ins.execute(rusqlite::params![
+                                    kind, addr_id, mid, list, date
+                                ])? as u64;
                             }
                         }
                     }
                     for (kind, raws) in extra_trailer_email_kinds(ddd) {
                         for raw in &raws {
                             let email = crate::reader::extract_email(raw);
-                            if !email.is_empty() {
-                                total += ins
-                                    .execute(rusqlite::params![kind, email, mid, list, date])?
-                                    as u64;
+                            if email.is_empty() {
+                                continue;
+                            }
+                            addr_upsert.execute(rusqlite::params![email])?;
+                            let addr_id: Option<i64> = addr_lookup
+                                .query_row(rusqlite::params![email], |r| r.get(0))
+                                .optional()?;
+                            if let Some(addr_id) = addr_id {
+                                total += ins.execute(rusqlite::params![
+                                    kind, addr_id, mid, list, date
+                                ])? as u64;
                             }
                         }
                     }
                 }
             }
             tx.commit()?;
-            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
             cursor = last_rowid;
         }
         Ok(total)
@@ -1048,10 +1114,17 @@ impl OverDb {
         &mut self,
         data_dir: &std::path::Path,
     ) -> Result<(u64, u64)> {
-        const CHUNK: usize = 50_000;
+        // Smaller chunk + explicit progress logging. With 50k-row
+        // chunks the 5-hour run on 2026-06-06 produced a 44 GB WAL
+        // because each chunk-commit's `wal_checkpoint(PASSIVE)`
+        // failed silently — readers blocked the checkpoint and the
+        // WAL grew unbounded. 5k rows per chunk keeps each
+        // committed-and-not-yet-checkpointed slice under a few MB.
+        const CHUNK: usize = 5_000;
         let mut cursor: i64 = 0;
         let mut total_rows: u64 = 0;
         let mut skipped: u64 = 0;
+        let mut chunks_done: u64 = 0;
         let mut store_cache: std::collections::HashMap<String, crate::store::Store> =
             std::collections::HashMap::new();
         loop {
@@ -1083,13 +1156,17 @@ impl OverDb {
             let tx = self.conn.transaction()?;
             {
                 let mut del = tx.prepare(
-                    "DELETE FROM over_trailer_email \
+                    "DELETE FROM over_involvement \
                       WHERE kind IN ('to_env','cc_env') \
                         AND message_id = ?1 AND list = ?2",
                 )?;
+                let mut addr_upsert = tx
+                    .prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
+                let mut addr_lookup = tx
+                    .prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
                 let mut ins = tx.prepare(
-                    "INSERT OR IGNORE INTO over_trailer_email \
-                        (kind, email, message_id, list, date_unix_ns) \
+                    "INSERT OR IGNORE INTO over_involvement \
+                        (kind, addr_id, message_id, list, date_unix_ns) \
                      VALUES (?1, ?2, ?3, ?4, ?5)",
                 )?;
                 for (mid, list, date, seg, off) in &pending {
@@ -1114,27 +1191,234 @@ impl OverDb {
                     };
                     let parsed = crate::parse::parse_message(&bytes, None);
                     del.execute(rusqlite::params![mid, list])?;
-                    for addr in &parsed.to_addrs {
-                        if !addr.is_empty() {
-                            total_rows += ins
-                                .execute(rusqlite::params!["to_env", addr, mid, list, date])?
-                                as u64;
-                        }
-                    }
-                    for addr in &parsed.cc_addrs {
-                        if !addr.is_empty() {
-                            total_rows += ins
-                                .execute(rusqlite::params!["cc_env", addr, mid, list, date])?
-                                as u64;
+                    for (kind, addrs) in [
+                        ("to_env", &parsed.to_addrs),
+                        ("cc_env", &parsed.cc_addrs),
+                    ] {
+                        for addr in addrs {
+                            if addr.is_empty() {
+                                continue;
+                            }
+                            addr_upsert.execute(rusqlite::params![addr])?;
+                            let addr_id: Option<i64> = addr_lookup
+                                .query_row(rusqlite::params![addr], |r| r.get(0))
+                                .optional()?;
+                            if let Some(addr_id) = addr_id {
+                                total_rows += ins
+                                    .execute(rusqlite::params![
+                                        kind, addr_id, mid, list, date
+                                    ])?
+                                    as u64;
+                            }
                         }
                     }
                 }
             }
             tx.commit()?;
-            self.conn.pragma_update(None, "wal_checkpoint", "PASSIVE")?;
+            // TRUNCATE checkpoint keeps the WAL bounded even when a
+            // reader is open. PASSIVE silently no-ops under reader
+            // contention which is what produced the 44 GB WAL on the
+            // first run. We accept the small per-chunk wait cost
+            // because the alternative is an open-ended WAL that
+            // eventually blocks every reader, fills disk, and forces
+            // a 30-min recovery on the next process start.
+            self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
             cursor = last_rowid;
+            chunks_done += 1;
+            if chunks_done.is_multiple_of(20) {
+                tracing::info!(
+                    last_rowid = cursor,
+                    rows_written = total_rows,
+                    skipped,
+                    "backfill_envelope_addresses progress",
+                );
+            }
         }
         Ok((total_rows, skipped))
+    }
+
+    /// Migrate the legacy `over_trailer_email` table (denormalized
+    /// — every row stores the email string inline, 240 M rows
+    /// × ~80 bytes = 155 GB) to the normalized
+    /// `addresses` + `over_involvement` pair (~13 GB).
+    ///
+    /// Also adds `kind='from'` rows so "every message X is involved
+    /// in across any role" is a single indexed query.
+    ///
+    /// Restartable: every step is `INSERT OR IGNORE` against a PK or
+    /// UNIQUE constraint, so re-running picks up where it left off.
+    /// Chunked rowid walks with `wal_checkpoint(TRUNCATE)` between
+    /// chunks keep the WAL bounded.
+    ///
+    /// Returns `(addresses, involvement_rows, dropped_old_rows)`.
+    pub fn migrate_to_involvement_schema(&mut self) -> Result<(u64, u64, u64)> {
+        // Step 1: populate `addresses` from every email seen in
+        // `over_trailer_email` and `over.from_addr`. One transaction,
+        // ~5 M rows.
+        let addresses_before: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM addresses", [], |r| r.get::<_, i64>(0))?
+            as u64;
+        tracing::info!(
+            addresses_before,
+            "migrate_to_involvement_schema: populating addresses dict"
+        );
+        {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO addresses(email) \
+                 SELECT DISTINCT email FROM over_trailer_email WHERE email <> ''",
+            )?;
+            tx.execute_batch(
+                "INSERT OR IGNORE INTO addresses(email) \
+                 SELECT DISTINCT from_addr FROM over \
+                  WHERE from_addr IS NOT NULL AND from_addr <> ''",
+            )?;
+            tx.commit()?;
+        }
+        self.conn
+            .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        let addresses_after: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM addresses", [], |r| r.get::<_, i64>(0))?
+            as u64;
+        let addresses_new = addresses_after.saturating_sub(addresses_before);
+        tracing::info!(
+            addresses_total = addresses_after,
+            addresses_new,
+            "migrate_to_involvement_schema: addresses populated"
+        );
+
+        // Step 2: migrate `over_trailer_email` rows into
+        // `over_involvement` in chunks. 200 k rows per chunk =
+        // ~24 MB of WAL between checkpoints.
+        const TRAILER_CHUNK: i64 = 200_000;
+        let mut tr_cursor: i64 = 0;
+        let mut tr_total: u64 = 0;
+        let mut tr_chunks: u64 = 0;
+        loop {
+            // Probe range end first so we can break cleanly when
+            // there's no more data in this chunk window.
+            let probed: Option<i64> = self.conn.query_row(
+                "SELECT MAX(rowid) FROM over_trailer_email \
+                  WHERE rowid > ?1 AND rowid <= ?1 + ?2",
+                rusqlite::params![tr_cursor, TRAILER_CHUNK],
+                |r| r.get::<_, Option<i64>>(0),
+            )?;
+            let chunk_end = match probed {
+                Some(v) if v > tr_cursor => v,
+                _ => break,
+            };
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO over_involvement \
+                    (kind, addr_id, message_id, list, date_unix_ns) \
+                 SELECT t.kind, a.addr_id, t.message_id, t.list, t.date_unix_ns \
+                   FROM over_trailer_email t \
+                   JOIN addresses a ON a.email = t.email \
+                  WHERE t.rowid > ?1 AND t.rowid <= ?2",
+                rusqlite::params![tr_cursor, chunk_end],
+            )?;
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+            let chunk_rows: u64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM over_trailer_email \
+                  WHERE rowid > ?1 AND rowid <= ?2",
+                rusqlite::params![tr_cursor, chunk_end],
+                |r| r.get::<_, i64>(0),
+            )? as u64;
+            tr_total += chunk_rows;
+            tr_chunks += 1;
+            tr_cursor = chunk_end;
+            if tr_chunks.is_multiple_of(50) {
+                tracing::info!(
+                    chunks = tr_chunks,
+                    last_rowid = tr_cursor,
+                    rows_migrated = tr_total,
+                    "migrate_to_involvement_schema: trailer migration progress"
+                );
+            }
+        }
+        tracing::info!(
+            chunks = tr_chunks,
+            rows_migrated = tr_total,
+            "migrate_to_involvement_schema: trailer migration complete"
+        );
+
+        // Step 3: add `kind='from'` rows from over.from_addr. Same
+        // chunking pattern but rowid-walks over `over`.
+        const FROM_CHUNK: i64 = 200_000;
+        let mut fr_cursor: i64 = 0;
+        let mut fr_total: u64 = 0;
+        let mut fr_chunks: u64 = 0;
+        loop {
+            let tx = self.conn.transaction()?;
+            let last_rowid: Option<i64> = tx.query_row(
+                "SELECT MAX(o.rowid) \
+                   FROM over o \
+                  WHERE o.rowid > ?1 AND o.rowid <= ?1 + ?2",
+                rusqlite::params![fr_cursor, FROM_CHUNK],
+                |r| r.get::<_, Option<i64>>(0),
+            )?;
+            let last_rowid = match last_rowid {
+                Some(v) if v > fr_cursor => v,
+                _ => {
+                    tx.commit()?;
+                    break;
+                }
+            };
+            tx.execute(
+                "INSERT OR IGNORE INTO over_involvement \
+                    (kind, addr_id, message_id, list, date_unix_ns) \
+                 SELECT 'from', a.addr_id, o.message_id, o.list, o.date_unix_ns \
+                   FROM over o JOIN addresses a ON a.email = o.from_addr \
+                  WHERE o.rowid > ?1 AND o.rowid <= ?2 \
+                    AND o.from_addr IS NOT NULL",
+                rusqlite::params![fr_cursor, last_rowid],
+            )?;
+            tx.commit()?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+            fr_total += (last_rowid - fr_cursor) as u64;
+            fr_cursor = last_rowid;
+            fr_chunks += 1;
+            if fr_chunks.is_multiple_of(50) {
+                tracing::info!(
+                    chunks = fr_chunks,
+                    last_rowid = fr_cursor,
+                    "migrate_to_involvement_schema: from-kind backfill progress"
+                );
+            }
+        }
+        tracing::info!(
+            chunks = fr_chunks,
+            from_rows_visited = fr_total,
+            "migrate_to_involvement_schema: from-kind backfill complete"
+        );
+
+        // Step 4: count final rows + drop the legacy table + reclaim.
+        let final_inv_rows: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM over_involvement", [], |r| {
+                r.get::<_, i64>(0)
+            })? as u64;
+        let dropped_rows: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM over_trailer_email", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap_or(0) as u64;
+        tracing::info!(
+            final_involvement_rows = final_inv_rows,
+            legacy_rows = dropped_rows,
+            "migrate_to_involvement_schema: dropping legacy over_trailer_email"
+        );
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS over_trailer_email")?;
+        self.conn
+            .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+        Ok((addresses_after, final_inv_rows, dropped_rows))
     }
 
     /// Populate `over_trailer_ref` for every existing row by decoding
@@ -1230,15 +1514,41 @@ impl OverDb {
         // are now stale and need to go. We delete first (scoped by
         // message_id + list, spanning every kind), then re-populate
         // from the fresh ddd payload kind-by-kind.
+        //
+        // Side tables are normalized: `over_involvement` stores
+        // `addr_id` (FK into `addresses`), not the email text.
+        // `addr_upsert` interns the email and `addr_lookup` resolves
+        // it back to the id we just minted. Both run per-row in the
+        // hot ingest path — measured cost is ~1 % of the existing
+        // `over` row insert.
         let mut tr_del_all = tx.prepare(
-            "DELETE FROM over_trailer_email \
+            "DELETE FROM over_involvement \
              WHERE message_id = ?1 AND list = ?2",
         )?;
+        let mut addr_upsert = tx.prepare(
+            "INSERT OR IGNORE INTO addresses(email) VALUES (?1)",
+        )?;
+        let mut addr_lookup = tx.prepare(
+            "SELECT addr_id FROM addresses WHERE email = ?1",
+        )?;
         let mut tr_ins = tx.prepare(
-            "INSERT OR IGNORE INTO over_trailer_email \
-                (kind, email, message_id, list, date_unix_ns) \
+            "INSERT OR IGNORE INTO over_involvement \
+                (kind, addr_id, message_id, list, date_unix_ns) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
+        let intern_email = |upsert: &mut rusqlite::Statement<'_>,
+                            lookup: &mut rusqlite::Statement<'_>,
+                            email: &str|
+         -> Result<Option<i64>> {
+            if email.is_empty() {
+                return Ok(None);
+            }
+            upsert.execute(rusqlite::params![email])?;
+            let id: Option<i64> = lookup
+                .query_row(rusqlite::params![email], |r| r.get(0))
+                .optional()?;
+            Ok(id)
+        };
         let mut tr_ref_del = tx.prepare(
             "DELETE FROM over_trailer_ref \
              WHERE message_id = ?1 AND list = ?2",
@@ -1297,13 +1607,31 @@ impl OverDb {
             ])?;
 
             tr_del_all.execute(rusqlite::params![row.message_id, row.list])?;
+            // `from_addr` is now also indexed via `over_involvement`
+            // (kind='from'). This makes "every message X is involved
+            // in" a single indexed query covering authoring + every
+            // trailer kind + envelope recipients.
+            if let Some(ref from_lc) = from_addr_lc
+                && let Some(addr_id) =
+                    intern_email(&mut addr_upsert, &mut addr_lookup, from_lc)?
+            {
+                tr_ins.execute(rusqlite::params![
+                    "from",
+                    addr_id,
+                    row.message_id,
+                    row.list,
+                    row.date_unix_ns,
+                ])?;
+            }
             for (kind, raws) in trailer_email_sources(&row.ddd) {
                 for raw in raws {
                     let email = crate::reader::extract_email(raw);
-                    if !email.is_empty() {
+                    if let Some(addr_id) =
+                        intern_email(&mut addr_upsert, &mut addr_lookup, &email)?
+                    {
                         tr_ins.execute(rusqlite::params![
                             kind,
-                            email,
+                            addr_id,
                             row.message_id,
                             row.list,
                             row.date_unix_ns,
@@ -1314,10 +1642,12 @@ impl OverDb {
             for (kind, raws) in extra_trailer_email_kinds(&row.ddd) {
                 for raw in &raws {
                     let email = crate::reader::extract_email(raw);
-                    if !email.is_empty() {
+                    if let Some(addr_id) =
+                        intern_email(&mut addr_upsert, &mut addr_lookup, &email)?
+                    {
                         tr_ins.execute(rusqlite::params![
                             kind,
-                            email,
+                            addr_id,
                             row.message_id,
                             row.list,
                             row.date_unix_ns,
@@ -1624,13 +1954,29 @@ impl OverDb {
         list_filter: Option<&str>,
         limit: usize,
     ) -> Result<Vec<MessageRow>> {
+        // Normalized schema: resolve email → addr_id first (single
+        // index seek), then scan `over_involvement` by
+        // `(kind, addr_id, date)`. Returns Ok(empty) if the address
+        // isn't in the dictionary — equivalent to the old "no rows"
+        // result from the legacy table.
+        let addr_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT addr_id FROM addresses WHERE email = ?1",
+                rusqlite::params![email_lc],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(addr_id) = addr_id else {
+            return Ok(Vec::new());
+        };
         let mut inner = String::from(
             "SELECT message_id, list, date_unix_ns \
-             FROM over_trailer_email \
-             WHERE kind = ?1 AND email = ?2 AND date_unix_ns IS NOT NULL",
+             FROM over_involvement \
+             WHERE kind = ?1 AND addr_id = ?2 AND date_unix_ns IS NOT NULL",
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-            vec![Box::new(kind.to_string()), Box::new(email_lc.to_string())];
+            vec![Box::new(kind.to_string()), Box::new(addr_id)];
         let mut next_idx = 3_usize;
         if let Some(since) = since_unix_ns {
             inner.push_str(&format!(" AND date_unix_ns >= ?{next_idx}"));

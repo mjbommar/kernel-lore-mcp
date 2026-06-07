@@ -204,6 +204,32 @@ pub fn py_backfill_envelope_addresses<'py>(
     Ok(d)
 }
 
+/// One-shot migration from legacy denormalized `over_trailer_email`
+/// (~155 GB at 240 M rows) to normalized `addresses` + `over_involvement`
+/// (~13 GB at ~270 M rows). Idempotent — re-running picks up partial
+/// state via INSERT OR IGNORE on PK / UNIQUE constraints. Holds the
+/// writer lock for its duration. Returns
+/// `{"addresses": N, "involvement_rows": N, "dropped_legacy_rows": N}`.
+#[pyfunction]
+#[pyo3(name = "migrate_to_involvement_schema")]
+pub fn py_migrate_to_involvement_schema<'py>(
+    py: Python<'py>,
+    data_dir: PathBuf,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (addrs, inv, dropped) = py.detach(|| {
+        with_writer_lock(&data_dir, || {
+            let over_path = data_dir.join("over.db");
+            let mut db = crate::over::OverDb::open(&over_path)?;
+            db.migrate_to_involvement_schema()
+        })
+    })?;
+    let d = PyDict::new(py);
+    d.set_item("addresses", addrs)?;
+    d.set_item("involvement_rows", inv)?;
+    d.set_item("dropped_legacy_rows", dropped)?;
+    Ok(d)
+}
+
 /// One-off backfill for the normalized trailer-reference side table.
 /// Walks every existing over.db row, decodes its ddd blob, and
 /// materializes normalized lookup keys from {reported_by, fixes,
