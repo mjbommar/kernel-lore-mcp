@@ -224,20 +224,21 @@ def _query_index(
         # index_list at design time.
         params: list = []
         if field == "any" or field in _EMAIL_KINDS or field == "from":
-            # Normalized path: filter by email pattern against the
-            # `addresses` dictionary (small + hot), then join into
-            # `over_involvement` to get every matching (kind,
-            # message_id, list, date).
-            #
-            # `field="any"` returns rows across every indexed role
-            # for the matched address(es). Other email-kind values
-            # filter to that single role via an extra `kind=?` clause.
+            # Normalized path. CRITICAL query-plan note: SQLite's
+            # planner picks a SCAN of over_involvement (335 M rows)
+            # when this is written as a regular JOIN, even with the
+            # `inv_addr_date` index available. Rewriting as
+            # `addr_id IN (subquery)` forces it to resolve the
+            # address dictionary first (small + hot, sub-ms), then
+            # use the index on `over_involvement`. Empirical
+            # difference on the live corpus: 60 s timeout → 0.5 s.
             sql = (
                 "SELECT i.kind AS field_kind, i.message_id, i.list, "
                 "       i.date_unix_ns "
-                "FROM addresses a "
-                "JOIN over_involvement i USING (addr_id) "
-                "WHERE a.email LIKE ?"
+                "FROM over_involvement i "
+                "WHERE i.addr_id IN ("
+                "  SELECT addr_id FROM addresses WHERE email LIKE ?"
+                ")"
             )
             params.append(pattern)
             if field != "any":
