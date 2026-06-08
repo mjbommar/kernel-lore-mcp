@@ -412,6 +412,7 @@ async def lore_thread_state(
         evidence=evidence,
         latest_activity_unix_ns=latest_activity_ns or None,
         latest_activity_utc=_utc(latest_activity_ns or None),
+        backend=backend,
         caveat=caveat,
         freshness=build_freshness(reader),
     )
