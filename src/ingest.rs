@@ -689,6 +689,10 @@ pub fn rebuild_bm25(data_dir: &Path) -> Result<u64> {
 
     let reader = Reader::new(data_dir);
     let mut writer = BmWriter::open(data_dir)?;
+    // Rebuild means replace. `open()` attaches to whatever is already on
+    // disk, so skipping this turns each run into an append of the whole
+    // corpus. See BmWriter::delete_all.
+    writer.delete_all()?;
 
     // Stream rows through the indexer; never materialize the full
     // corpus. Previously this called scan_all into a Vec which OOMed
@@ -1115,6 +1119,63 @@ Prose.\r\n"
         assert_eq!(
             gen1, gen0,
             "internal bump must defer to caller when skip_bm25=true"
+        );
+    }
+
+    /// Sum `max_doc` across the segments tantivy currently considers
+    /// live. This is the number that exposed the leak in production:
+    /// meta.json claimed 46,396,230 docs for a 7,169,618-message corpus.
+    fn bm25_live_docs(data_dir: &Path) -> u64 {
+        let meta = std::fs::read_to_string(data_dir.join("bm25").join("meta.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        v["segments"]
+            .as_array()
+            .map(|segs| segs.iter().filter_map(|s| s["max_doc"].as_u64()).sum())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn rebuild_bm25_replaces_rather_than_appends() {
+        // Regression: rebuild_bm25 opened the existing index via
+        // Index::open_or_create and streamed the whole corpus back in
+        // without clearing it, so each "rebuild" appended another full
+        // copy. Running it daily against lkml grew <data_dir>/bm25 from
+        // 6 GB to 85 GB in four days and made lore_search return the
+        // same message up to six times.
+        let shard = tempdir().unwrap();
+        let shard_dir = shard.path().join("0.git");
+        let owned = sample_messages();
+        let refs: Vec<&[u8]> = owned.iter().map(|m| m.as_slice()).collect();
+        make_synthetic_shard(&shard_dir, &refs);
+
+        let data = tempdir().unwrap();
+        ingest_shard_with_bm25(
+            data.path(),
+            &shard_dir,
+            "linux-cifs",
+            "0",
+            "r1",
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        let first_rows = rebuild_bm25(data.path()).unwrap();
+        let first_docs = bm25_live_docs(data.path());
+        assert!(first_docs > 0, "first rebuild indexed nothing");
+
+        let second_rows = rebuild_bm25(data.path()).unwrap();
+        let second_docs = bm25_live_docs(data.path());
+
+        assert_eq!(
+            first_rows, second_rows,
+            "each rebuild streams the same corpus, so the row count must match"
+        );
+        assert_eq!(
+            first_docs, second_docs,
+            "second rebuild appended instead of replacing: {first_docs} -> {second_docs} live docs"
         );
     }
 
