@@ -21,7 +21,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from kernel_lore_mcp import _core
-from kernel_lore_mcp.config import get_settings, set_settings, Settings
+from kernel_lore_mcp.config import Settings, set_settings
 from kernel_lore_mcp.cursor import (
     _MIN_KEY_BYTES,
     cursor_secret,
@@ -53,7 +53,7 @@ def test_rust_cursor_rejects_wrong_secret() -> None:
     s1 = secrets.token_bytes(32)
     s2 = secrets.token_bytes(32)
     token = _core.sign_cursor(s1, 1, 1.0, "<m@x>")
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError, match="hmac mismatch"):
         _core.verify_cursor(s2, token)
 
 
@@ -117,9 +117,7 @@ def test_decode_cursor_rejects_wrong_query_hash(
     assert "different query" in str(exc.value)
 
 
-def test_decode_cursor_none_passes_through(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_decode_cursor_none_passes_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KLMCP_CURSOR_KEY", raising=False)
     set_settings(Settings(data_dir=tmp_path))
     assert decode_cursor(None, expected_q_hash=1) is None

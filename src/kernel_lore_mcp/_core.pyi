@@ -6,8 +6,9 @@ symbol; no docstrings needed here — the Rust side carries those.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from os import PathLike
-from typing import Any, Callable, TypedDict
+from typing import Any, TypedDict
 
 class IngestStats(TypedDict):
     ingested: int
@@ -53,6 +54,7 @@ def sign_cursor(
     last_seen_mid: str,
 ) -> str: ...
 def verify_cursor(secret: bytes, token: str) -> tuple[int, float, str]: ...
+
 # (float is Python's float == f64, consistent with the Rust surface.)
 
 class SidecarCommit(TypedDict):

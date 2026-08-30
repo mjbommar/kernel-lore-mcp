@@ -400,8 +400,7 @@ class MaintainerProfileResponse(BaseModel):
     )
     sampled_patches: int = Field(
         description=(
-            "How many patches touching this path were aggregated from "
-            "the observation window."
+            "How many patches touching this path were aggregated from the observation window."
         )
     )
     declared: list[DeclaredMaintainerEntry]

@@ -146,15 +146,13 @@ def _find_rust_binary() -> str:
     override = os.environ.get("KLMCP_SYNC_BINARY")
     if override:
         if not _is_executable_file(override):
-            raise SystemExit(
-                f"KLMCP_SYNC_BINARY={override} is not an executable file"
-            )
+            raise SystemExit(f"KLMCP_SYNC_BINARY={override} is not an executable file")
         if _same_path(override, current_wrapper):
             raise SystemExit(
                 "KLMCP_SYNC_BINARY points at the Python console-script wrapper, "
                 "not the Rust binary. Point it at the built binary instead "
                 "(e.g. target/release/kernel-lore-sync)."
-        )
+            )
         return override
 
     for cand in _dev_binary_candidates():
@@ -164,7 +162,7 @@ def _find_rust_binary() -> str:
                     f"{cand} is older than the source checkout. "
                     "Rebuild it with `cargo build --release --bin kernel-lore-sync` "
                     "or point KLMCP_SYNC_BINARY at a freshly built binary."
-            )
+                )
             return cand
 
     packaged = Path(__file__).resolve().parent.parent / "bin" / _BIN_NAME

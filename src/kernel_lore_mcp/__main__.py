@@ -95,10 +95,7 @@ def _run_serve(args: argparse.Namespace) -> int:
     from kernel_lore_mcp.config import Settings
     from kernel_lore_mcp.server import build_server
 
-    settings_kwargs: dict[str, object] = {}
-    if args.mode is not None:
-        settings_kwargs["mode"] = args.mode
-    settings = Settings(**settings_kwargs)
+    settings = Settings() if args.mode is None else Settings(mode=args.mode)
     configure_logging(
         transport=args.transport,
         mode=settings.mode,

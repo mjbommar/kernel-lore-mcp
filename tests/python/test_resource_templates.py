@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from fastmcp import Client
+from mcp.types import TextResourceContents
 
 from kernel_lore_mcp import _core
 from kernel_lore_mcp.server import build_server
@@ -78,6 +79,7 @@ async def test_read_lore_message_returns_real_body(client_with_data: Client) -> 
     contents = await client_with_data.read_resource("lore://message/m1@x")
     assert len(contents) == 1
     body = contents[0]
+    assert isinstance(body, TextResourceContents)
     # FastMCP returns TextResourceContents for str-returning resources.
     assert body.mimeType == "text/plain"
     assert hasattr(body, "text") and "ksmbd" in body.text.lower()
@@ -89,6 +91,7 @@ async def test_read_lore_message_returns_real_body(client_with_data: Client) -> 
 async def test_read_lore_patch_strips_prose(client_with_data: Client) -> None:
     contents = await client_with_data.read_resource("lore://patch/m1@x")
     body = contents[0]
+    assert isinstance(body, TextResourceContents)
     assert body.mimeType == "text/x-diff"
     # Diff payload starts at the first `diff --git ...` line; prose must
     # not be in the response.
@@ -101,6 +104,7 @@ async def test_read_lore_thread_concatenates(client_with_data: Client) -> None:
     # Seed with m1 — thread walker will include m2 via in_reply_to.
     contents = await client_with_data.read_resource("lore://thread/m1@x")
     body = contents[0]
+    assert isinstance(body, TextResourceContents)
     assert body.mimeType == "text/plain"
     assert "Message-ID: <m1@x>" in body.text
     assert "Message-ID: <m2@x>" in body.text
@@ -110,6 +114,7 @@ async def test_read_lore_thread_concatenates(client_with_data: Client) -> None:
 async def test_read_lore_maintainer_stub(client_with_data: Client) -> None:
     contents = await client_with_data.read_resource("lore://maintainer/fs%2Fsmb%2Fserver")
     body = contents[0]
+    assert isinstance(body, TextResourceContents)
     assert body.mimeType == "text/plain"
     assert "Not yet implemented" in body.text
     assert "Phase 18A" in body.text
@@ -119,6 +124,7 @@ async def test_read_lore_maintainer_stub(client_with_data: Client) -> None:
 async def test_read_lore_patchwork_stub_is_json(client_with_data: Client) -> None:
     contents = await client_with_data.read_resource("lore://patchwork/m1@x")
     body = contents[0]
+    assert isinstance(body, TextResourceContents)
     assert body.mimeType == "application/json"
     payload = json.loads(body.text)
     assert payload["status"] == "not_yet_implemented"
@@ -140,5 +146,6 @@ async def test_blind_spots_still_reachable(client_with_data: Client) -> None:
     # new templates.
     contents = await client_with_data.read_resource("blind-spots://coverage")
     body = contents[0]
+    assert isinstance(body, TextResourceContents)
     assert body.mimeType == "text/plain"
     assert "security@kernel.org" in body.text

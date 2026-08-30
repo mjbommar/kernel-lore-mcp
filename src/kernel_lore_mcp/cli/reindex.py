@@ -122,7 +122,7 @@ def _find_rust_binary() -> str:
                     f"{cand} is older than the source checkout. "
                     "Rebuild it with `cargo build --release --bin kernel-lore-reindex` "
                     "or point KLMCP_REINDEX_BINARY at a freshly built binary."
-            )
+                )
             return cand
 
     packaged = Path(__file__).resolve().parent.parent / "bin" / _BIN_NAME

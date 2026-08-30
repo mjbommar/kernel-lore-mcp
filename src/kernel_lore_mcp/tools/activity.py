@@ -6,6 +6,7 @@ rollup lands in Phase 2.5 once the tid computation pass is wired.
 
 from __future__ import annotations
 
+from builtins import list as list_type
 from typing import Annotated, Literal
 
 from pydantic import Field
@@ -111,7 +112,7 @@ async def lore_activity(
     )
     resume = decode_cursor(cursor, expected_q_hash=q_hash, arg_name="cursor")
 
-    # Oversample 2× for the cursor-skip headroom + one-row
+    # Oversample 2x for the cursor-skip headroom + one-row
     # look-ahead to detect "more pages exist."
     fetch_budget = max(limit * 2 + 1, 32)
     rows = await run_with_timeout(
@@ -127,7 +128,7 @@ async def lore_activity(
     # Skip past the resume point (newest-first by date_unix_ns).
     if resume is not None:
         last_date, last_mid = resume
-        kept: list[dict] = []
+        kept: list_type[dict] = []
         for r in rows:
             date = float(r.get("date_unix_ns") or 0)
             mid = str(r.get("message_id") or "")
@@ -140,7 +141,7 @@ async def lore_activity(
     page = rows[:effective_limit]
 
     activity_rows = [row_to_activity_row(r) for r in page]
-    default_applied: list[str] = []
+    default_applied: list_type[str] = []
     if response_format == "concise" and total_available > _CONCISE_ROWS:
         default_applied.append(f"response_format=concise (showing top {_CONCISE_ROWS})")
 

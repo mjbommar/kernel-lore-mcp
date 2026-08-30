@@ -18,6 +18,7 @@ already exposed as `lore_patch_search`.)
 from __future__ import annotations
 
 import difflib
+from builtins import list as list_type
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -547,7 +548,7 @@ async def lore_regex(
 
     if resume is not None:
         last_date, last_mid = resume
-        kept: list[dict] = []
+        kept: list_type[dict] = []
         for r in rows:
             date = float(r.get("date_unix_ns") or 0)
             mid = str(r.get("message_id") or "")

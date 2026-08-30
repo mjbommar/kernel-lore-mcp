@@ -19,6 +19,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -173,6 +174,10 @@ fn load_maintainers(data_dir: &Path) -> Option<Arc<MaintainersIndex>> {
 /// message-ids into a HashSet before any confirm step runs.
 const MAX_PATCH_CANDIDATES: usize = 100_000;
 
+fn env_flag_enabled(value: Option<&OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 pub struct Reader {
     data_dir: PathBuf,
     over: Option<Arc<OverDbPool>>,
@@ -203,8 +208,8 @@ pub struct Reader {
 
 impl Reader {
     pub fn new(data_dir: impl AsRef<Path>) -> Self {
-        let disabled =
-            std::env::var_os("KLMCP_DISABLE_OVER").is_some_and(|v| !v.is_empty() && v != "0");
+        let disable_over = std::env::var_os("KLMCP_DISABLE_OVER");
+        let disabled = env_flag_enabled(disable_over.as_deref());
         if disabled {
             tracing::debug!("Reader: over.db disabled via KLMCP_DISABLE_OVER");
             return Self::new_no_over(data_dir);
@@ -4146,10 +4151,9 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         );
     }
 
-    /// `KLMCP_DISABLE_OVER=1` forces the over-free Parquet path even
-    /// when over.db is present and current. This replaces the old
-    /// rename-the-file parity-test protocol that once left a live
-    /// deploy with a 0-byte over.db when the test crashed mid-run.
+    /// The environment flag parser accepts non-empty values other
+    /// than `0`. Keep this pure: mutating process-wide environment
+    /// variables races with the module's parallel Reader tests.
     #[test]
     fn reader_respects_klmcp_disable_over() {
         use crate::over::OverDb;
@@ -4161,26 +4165,16 @@ diff --git a/fs/smb/server/smb2pdu.c b/fs/smb/server/smb2pdu.c\r\n\
         state.set_tier_generation("over", 5).unwrap();
         let _ = OverDb::open(&dir.path().join("over.db")).unwrap();
 
-        // Baseline: the Reader would normally enable over.db here.
+        assert!(!env_flag_enabled(None));
+        assert!(!env_flag_enabled(Some(OsStr::new(""))));
+        assert!(!env_flag_enabled(Some(OsStr::new("0"))));
+        assert!(env_flag_enabled(Some(OsStr::new("1"))));
+        assert!(env_flag_enabled(Some(OsStr::new("true"))));
+
+        // The explicit constructor is the environment flag's target.
         let baseline = Reader::new(dir.path());
         assert!(baseline.over_db().is_some());
         drop(baseline);
-
-        // SAFETY: env mutation is process-global; this test must not
-        // run in parallel with reader_uses_over_db_when_marker_current
-        // (cargo test serializes within a module by default, so the
-        // risk is hypothetical). We restore on exit regardless.
-        // SAFETY: std::env::set_var is unsafe in edition 2024+.
-        unsafe { std::env::set_var("KLMCP_DISABLE_OVER", "1") };
-        let disabled = Reader::new(dir.path());
-        // SAFETY: std::env::remove_var is unsafe in edition 2024+.
-        unsafe { std::env::remove_var("KLMCP_DISABLE_OVER") };
-        assert!(
-            disabled.over_db().is_none(),
-            "KLMCP_DISABLE_OVER=1 did not suppress over.db"
-        );
-
-        // new_no_over() is the explicit constructor equivalent.
         let explicit = Reader::new_no_over(dir.path());
         assert!(explicit.over_db().is_none());
     }

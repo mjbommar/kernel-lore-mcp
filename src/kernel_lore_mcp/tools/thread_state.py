@@ -160,17 +160,13 @@ async def lore_thread_state(
     merged_hits: list[MergedEvidence] = []
     sidecar_repos: list[str] = []
     try:
-        repos = await run_with_timeout(
-            _core.git_sidecar_repos, settings.data_dir
-        )
+        repos = await run_with_timeout(_core.git_sidecar_repos, settings.data_dir)
         sidecar_repos = [r["repo"] for r in repos]
-    except Exception:  # noqa: BLE001
+    except Exception:
         sidecar_repos = []
 
     if sidecar_repos:
-        subject = (
-            seed.get("subject_normalized") or seed.get("subject_raw") or ""
-        )
+        subject = seed.get("subject_normalized") or seed.get("subject_raw") or ""
         from_addr = (seed.get("from_addr") or "").lower()
         seed_date_ns = int(seed.get("date_unix_ns") or 0)
         if subject and from_addr and seed_date_ns > 0:
@@ -197,7 +193,7 @@ async def lore_thread_state(
                     )
                     for h in hits
                 ]
-            except Exception:  # noqa: BLE001
+            except Exception:
                 merged_hits = []
 
     def _caveat(state: str) -> str:
@@ -288,10 +284,7 @@ async def lore_thread_state(
                 message_id=newer_sibling.get("message_id"),
                 subject=newer_sibling.get("subject_raw"),
                 from_addr=newer_sibling.get("from_addr"),
-                detail=(
-                    f"later series version exists "
-                    f"(v{seed_version} → v{max_sibling_version})"
-                ),
+                detail=(f"later series version exists (v{seed_version} → v{max_sibling_version})"),
             )
         )
         return ThreadStateResponse(
@@ -346,18 +339,16 @@ async def lore_thread_state(
                     evidence=evidence,
                     latest_activity_unix_ns=latest_activity_ns or None,
                     latest_activity_utc=_utc(latest_activity_ns or None),
+                    backend="lore_heuristic",
                     caveat=caveat,
                     freshness=build_freshness(reader),
                 )
 
     # 4. Under review — trailer signal + recent activity.
-    has_review_trailer = any(
-        r.get("reviewed_by") or r.get("acked_by") for r in thread_rows
-    )
+    has_review_trailer = any(r.get("reviewed_by") or r.get("acked_by") for r in thread_rows)
     now_ns = int(datetime.now(tz=UTC).timestamp() * 1_000_000_000)
     recent = bool(latest_activity_ns) and (
-        now_ns - latest_activity_ns
-        < int(_REVIEW_WINDOW.total_seconds() * 1_000_000_000)
+        now_ns - latest_activity_ns < int(_REVIEW_WINDOW.total_seconds() * 1_000_000_000)
     )
     if has_review_trailer and recent:
         evidence.append(
@@ -387,8 +378,7 @@ async def lore_thread_state(
                 message_id=seed.get("message_id"),
                 subject=seed.get("subject_raw"),
                 detail=(
-                    f"no trailer activity and >{int(days_silent)} days "
-                    f"since last thread message"
+                    f"no trailer activity and >{int(days_silent)} days since last thread message"
                 ),
             )
         )

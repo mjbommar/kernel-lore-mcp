@@ -165,8 +165,6 @@ async def lore_author_footprint(
     authored_rows = await run_with_timeout(
         reader.eq, "from_addr", addr, None, None, list_filter, limit
     )
-    authored_mids = {r["message_id"] for r in authored_rows}
-
     # Source 2: trailer mentions. Reuse author_profile's
     # include_mentions path — requires list_filter OR since (see
     # production-hardening); footprint takes list_filter if given,
@@ -192,8 +190,8 @@ async def lore_author_footprint(
             # Easiest: we know the counts from the profile but not
             # the rows. Skip this source for now; revisit if needed.
             _ = profile
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:
+            trailer_rows = []
 
     # Source 3: BM25 body match — the shape lore's q=addr covers.
     # Email literals `alice@example.com` trip tantivy's phrase-query
@@ -209,10 +207,10 @@ async def lore_author_footprint(
         try:
             scored = await run_with_timeout(reader.prose_search, query, limit)
             body_rows = [(r, r.get("_score", 0.0)) for r in scored if r.get("message_id")]
-        except Exception:  # noqa: BLE001
+        except Exception:
             # BM25 can still error on pathological inputs; skipping
             # this source is better than 500ing the whole tool.
-            pass
+            body_rows = []
 
     # Merge. Track roles per mid.
     per_mid: dict[str, dict] = {}

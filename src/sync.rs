@@ -538,6 +538,7 @@ mod tests {
             work.path(),
         );
         git(&["push", "-q", "origin", "master"], work.path());
+        git(&["symbolic-ref", "HEAD", "refs/heads/master"], &remote);
 
         let data = tempfile::tempdir().unwrap();
         let local = shard_local_path(data.path(), "/list.git");

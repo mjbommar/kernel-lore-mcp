@@ -106,9 +106,7 @@ def _find_rust_binary() -> str:
     override = os.environ.get("KLMCP_DOCTOR_BINARY")
     if override:
         if not _is_executable_file(override):
-            raise SystemExit(
-                f"KLMCP_DOCTOR_BINARY={override} is not an executable file"
-            )
+            raise SystemExit(f"KLMCP_DOCTOR_BINARY={override} is not an executable file")
         if _same_path(override, current_wrapper):
             raise SystemExit(
                 "KLMCP_DOCTOR_BINARY points at the Python console-script wrapper, "
@@ -124,7 +122,7 @@ def _find_rust_binary() -> str:
                     f"{cand} is older than the source checkout. "
                     "Rebuild it with `cargo build --release --bin kernel-lore-doctor` "
                     "or point KLMCP_DOCTOR_BINARY at a freshly built binary."
-            )
+                )
             return cand
 
     packaged = Path(__file__).resolve().parent.parent / "bin" / _BIN_NAME

@@ -35,7 +35,9 @@ def test_extract_kwic_returns_none_when_missing() -> None:
 
 def test_extract_kwic_finds_first_occurrence_with_window() -> None:
     source = "a" * 300 + "NEEDLE" + "b" * 300
-    offset, length, text = extract_kwic(source, "NEEDLE", window=50)
+    result = extract_kwic(source, "NEEDLE", window=50)
+    assert result is not None
+    offset, length, text = result
     # Excerpt is window-sized and includes the needle.
     assert length == len(text.encode("utf-8"))
     assert length <= 50 + len("NEEDLE")

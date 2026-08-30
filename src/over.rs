@@ -1038,10 +1038,10 @@ impl OverDb {
                       WHERE message_id = ?1 AND list = ?2 \
                         AND kind NOT IN ('from','to_env','cc_env')",
                 )?;
-                let mut addr_upsert = tx
-                    .prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
-                let mut addr_lookup = tx
-                    .prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
+                let mut addr_upsert =
+                    tx.prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
+                let mut addr_lookup =
+                    tx.prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
                 let mut ins = tx.prepare(
                     "INSERT OR IGNORE INTO over_involvement \
                         (kind, addr_id, message_id, list, date_unix_ns) \
@@ -1060,9 +1060,9 @@ impl OverDb {
                                 .query_row(rusqlite::params![email], |r| r.get(0))
                                 .optional()?;
                             if let Some(addr_id) = addr_id {
-                                total += ins.execute(rusqlite::params![
-                                    kind, addr_id, mid, list, date
-                                ])? as u64;
+                                total += ins
+                                    .execute(rusqlite::params![kind, addr_id, mid, list, date])?
+                                    as u64;
                             }
                         }
                     }
@@ -1077,16 +1077,17 @@ impl OverDb {
                                 .query_row(rusqlite::params![email], |r| r.get(0))
                                 .optional()?;
                             if let Some(addr_id) = addr_id {
-                                total += ins.execute(rusqlite::params![
-                                    kind, addr_id, mid, list, date
-                                ])? as u64;
+                                total += ins
+                                    .execute(rusqlite::params![kind, addr_id, mid, list, date])?
+                                    as u64;
                             }
                         }
                     }
                 }
             }
             tx.commit()?;
-            self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
             cursor = last_rowid;
         }
         Ok(total)
@@ -1160,10 +1161,10 @@ impl OverDb {
                       WHERE kind IN ('to_env','cc_env') \
                         AND message_id = ?1 AND list = ?2",
                 )?;
-                let mut addr_upsert = tx
-                    .prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
-                let mut addr_lookup = tx
-                    .prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
+                let mut addr_upsert =
+                    tx.prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
+                let mut addr_lookup =
+                    tx.prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
                 let mut ins = tx.prepare(
                     "INSERT OR IGNORE INTO over_involvement \
                         (kind, addr_id, message_id, list, date_unix_ns) \
@@ -1191,10 +1192,9 @@ impl OverDb {
                     };
                     let parsed = crate::parse::parse_message(&bytes, None);
                     del.execute(rusqlite::params![mid, list])?;
-                    for (kind, addrs) in [
-                        ("to_env", &parsed.to_addrs),
-                        ("cc_env", &parsed.cc_addrs),
-                    ] {
+                    for (kind, addrs) in
+                        [("to_env", &parsed.to_addrs), ("cc_env", &parsed.cc_addrs)]
+                    {
                         for addr in addrs {
                             if addr.is_empty() {
                                 continue;
@@ -1205,9 +1205,7 @@ impl OverDb {
                                 .optional()?;
                             if let Some(addr_id) = addr_id {
                                 total_rows += ins
-                                    .execute(rusqlite::params![
-                                        kind, addr_id, mid, list, date
-                                    ])?
+                                    .execute(rusqlite::params![kind, addr_id, mid, list, date])?
                                     as u64;
                             }
                         }
@@ -1222,7 +1220,8 @@ impl OverDb {
             // because the alternative is an open-ended WAL that
             // eventually blocks every reader, fills disk, and forces
             // a 30-min recovery on the next process start.
-            self.conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
+            self.conn
+                .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
             cursor = last_rowid;
             chunks_done += 1;
             if chunks_done.is_multiple_of(20) {
@@ -1255,10 +1254,10 @@ impl OverDb {
         // Step 1: populate `addresses` from every email seen in
         // `over_trailer_email` and `over.from_addr`. One transaction,
         // ~5 M rows.
-        let addresses_before: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM addresses", [], |r| r.get::<_, i64>(0))?
-            as u64;
+        let addresses_before: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM addresses", [], |r| r.get::<_, i64>(0))?
+                as u64;
         tracing::info!(
             addresses_before,
             "migrate_to_involvement_schema: populating addresses dict"
@@ -1278,10 +1277,10 @@ impl OverDb {
         }
         self.conn
             .pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
-        let addresses_after: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM addresses", [], |r| r.get::<_, i64>(0))?
-            as u64;
+        let addresses_after: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM addresses", [], |r| r.get::<_, i64>(0))?
+                as u64;
         let addresses_new = addresses_after.saturating_sub(addresses_before);
         tracing::info!(
             addresses_total = addresses_after,
@@ -1398,11 +1397,11 @@ impl OverDb {
         );
 
         // Step 4: count final rows + drop the legacy table + reclaim.
-        let final_inv_rows: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM over_involvement", [], |r| {
-                r.get::<_, i64>(0)
-            })? as u64;
+        let final_inv_rows: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM over_involvement", [], |r| {
+                    r.get::<_, i64>(0)
+                })? as u64;
         let dropped_rows: u64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM over_trailer_email", [], |r| {
@@ -1525,12 +1524,8 @@ impl OverDb {
             "DELETE FROM over_involvement \
              WHERE message_id = ?1 AND list = ?2",
         )?;
-        let mut addr_upsert = tx.prepare(
-            "INSERT OR IGNORE INTO addresses(email) VALUES (?1)",
-        )?;
-        let mut addr_lookup = tx.prepare(
-            "SELECT addr_id FROM addresses WHERE email = ?1",
-        )?;
+        let mut addr_upsert = tx.prepare("INSERT OR IGNORE INTO addresses(email) VALUES (?1)")?;
+        let mut addr_lookup = tx.prepare("SELECT addr_id FROM addresses WHERE email = ?1")?;
         let mut tr_ins = tx.prepare(
             "INSERT OR IGNORE INTO over_involvement \
                 (kind, addr_id, message_id, list, date_unix_ns) \
@@ -1612,8 +1607,7 @@ impl OverDb {
             // in" a single indexed query covering authoring + every
             // trailer kind + envelope recipients.
             if let Some(ref from_lc) = from_addr_lc
-                && let Some(addr_id) =
-                    intern_email(&mut addr_upsert, &mut addr_lookup, from_lc)?
+                && let Some(addr_id) = intern_email(&mut addr_upsert, &mut addr_lookup, from_lc)?
             {
                 tr_ins.execute(rusqlite::params![
                     "from",
@@ -1626,8 +1620,7 @@ impl OverDb {
             for (kind, raws) in trailer_email_sources(&row.ddd) {
                 for raw in raws {
                     let email = crate::reader::extract_email(raw);
-                    if let Some(addr_id) =
-                        intern_email(&mut addr_upsert, &mut addr_lookup, &email)?
+                    if let Some(addr_id) = intern_email(&mut addr_upsert, &mut addr_lookup, &email)?
                     {
                         tr_ins.execute(rusqlite::params![
                             kind,
@@ -1642,8 +1635,7 @@ impl OverDb {
             for (kind, raws) in extra_trailer_email_kinds(&row.ddd) {
                 for raw in &raws {
                     let email = crate::reader::extract_email(raw);
-                    if let Some(addr_id) =
-                        intern_email(&mut addr_upsert, &mut addr_lookup, &email)?
+                    if let Some(addr_id) = intern_email(&mut addr_upsert, &mut addr_lookup, &email)?
                     {
                         tr_ins.execute(rusqlite::params![
                             kind,
@@ -2241,9 +2233,9 @@ const NAMED_TRAILER_KEYS: &[&str] = &[
     "helped-by",
     "assisted-by",
     "co-authored-by", // parse.rs already routes co-authored-by into assisted_by
-    // envelope addresses are surfaced under `to_env` / `cc_env` from
-    // ddd.to_addrs / ddd.cc_addrs (NOT from ddd.trailers); the body-level
-    // `to:` / `cc:` trailers come through the generic walker as before.
+                      // envelope addresses are surfaced under `to_env` / `cc_env` from
+                      // ddd.to_addrs / ddd.cc_addrs (NOT from ddd.trailers); the body-level
+                      // `to:` / `cc:` trailers come through the generic walker as before.
 ];
 
 /// Walk `ddd.trailers_json` and yield every email-bearing trailer

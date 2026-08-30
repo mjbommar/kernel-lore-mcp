@@ -13,6 +13,7 @@ import asyncio
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 import mcp.types as mt
 import pytest
@@ -105,7 +106,10 @@ async def test_rate_limited_tool_call_records_queue_wait_and_inflight(
         return await wrapped()
 
     async def _invoke_via_middleware() -> str:
-        return await mw.on_request(ctx, lambda inner: mw.on_call_tool(inner, _invoke))
+        return await cast("Any", mw.on_request)(
+            ctx,
+            lambda inner: cast("Any", mw.on_call_tool)(inner, _invoke),
+        )
 
     first = asyncio.create_task(_invoke_via_middleware())
     await asyncio.sleep(0.01)
@@ -119,10 +123,7 @@ async def test_rate_limited_tool_call_records_queue_wait_and_inflight(
     assert exc_info.value.retry_after_seconds == 5
 
     body = generate_latest(REGISTRY).decode()
-    assert (
-        'kernel_lore_mcp_tool_calls_total{status="rate_limited",tool="queue_probe_tool"}'
-        in body
-    )
+    assert 'kernel_lore_mcp_tool_calls_total{status="rate_limited",tool="queue_probe_tool"}' in body
     assert 'kernel_lore_mcp_requests_total{method="tools/call",status="rate_limited"}' in body
     assert (
         'kernel_lore_mcp_tool_queue_wait_seconds_bucket{cost_class="moderate",'
@@ -132,6 +133,6 @@ async def test_rate_limited_tool_call_records_queue_wait_and_inflight(
     gate.set()
     await first
 
-    await metrics_endpoint(None)  # type: ignore[arg-type]
+    await metrics_endpoint(cast("Any", None))
     body = generate_latest(REGISTRY).decode()
     assert 'kernel_lore_mcp_tool_inflight{cost_class="moderate"} 0.0' in body

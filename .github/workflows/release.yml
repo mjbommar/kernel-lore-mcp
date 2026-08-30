@@ -59,7 +59,7 @@ jobs:
             maturin-target: aarch64-apple-darwin
             manylinux: auto
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
@@ -82,7 +82,7 @@ jobs:
           manylinux: ${{ matrix.target.manylinux }}
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target.name }}
           path: dist/*.whl
@@ -92,7 +92,7 @@ jobs:
     name: sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Install Python 3.12
         uses: actions/setup-python@v6
         with:
@@ -103,7 +103,7 @@ jobs:
           command: sdist
           args: --out dist
       - name: Upload sdist artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -125,7 +125,7 @@ jobs:
       url: https://pypi.org/project/kernel-lore-mcp/
     steps:
       - name: Download all artifacts into dist/
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: "*"
@@ -149,9 +149,9 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: "*"

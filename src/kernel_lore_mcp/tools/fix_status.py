@@ -15,6 +15,8 @@ from kernel_lore_mcp.freshness import Freshness, build_freshness
 from kernel_lore_mcp.timeout import run_with_timeout
 
 _SIDE_WINDOW_NS = 90 * 24 * 3600 * 1_000_000_000
+TrailerKind = Literal["reported_by", "link", "closes", "thread_command"]
+MatchKind = Literal["email", "syzbot_hash", "lore_mid", "dup_command"]
 
 
 def _utc(ns: int | None) -> datetime | None:
@@ -216,7 +218,7 @@ async def lore_fix_status(
     candidate_rows: dict[str, dict] = OrderedDict()
     evidence_by_mid: dict[str, list[FixEvidence]] = defaultdict(list)
 
-    async def _collect(kind: str, match_kind: str, value: str) -> None:
+    async def _collect(kind: TrailerKind, match_kind: MatchKind, value: str) -> None:
         rows = await run_with_timeout(
             reader.trailer_ref_lookup,
             kind,
@@ -232,8 +234,8 @@ async def lore_fix_status(
             candidate_rows.setdefault(mid, row)
             evidence_by_mid[mid].append(
                 FixEvidence(
-                    trailer_kind=kind,  # type: ignore[arg-type]
-                    match_kind=match_kind,  # type: ignore[arg-type]
+                    trailer_kind=kind,
+                    match_kind=match_kind,
                     matched_value=value,
                     message_id=mid,
                     subject=row.get("subject_raw"),

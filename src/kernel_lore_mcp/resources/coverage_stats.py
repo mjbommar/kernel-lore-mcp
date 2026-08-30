@@ -21,9 +21,7 @@ COVERAGE_STATS_URI = "stats://coverage"
 def _utc_str(ns: int | None) -> str:
     if ns is None:
         return "never"
-    return datetime.fromtimestamp(ns / 1_000_000_000, tz=UTC).strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
+    return datetime.fromtimestamp(ns / 1_000_000_000, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def _fmt_int(n: int) -> str:

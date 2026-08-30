@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from pydantic import AnyUrl
 
 from kernel_lore_mcp import _core
 from tests.python.fixtures import make_synthetic_shard
@@ -133,7 +134,7 @@ async def test_stdio_blind_spots_resource(server_params: StdioServerParameters) 
         resources = await session.list_resources()
         uris = {str(r.uri) for r in resources.resources}
         assert "blind-spots://coverage" in uris
-        body = await session.read_resource("blind-spots://coverage")
+        body = await session.read_resource(AnyUrl("blind-spots://coverage"))
         text = "".join(getattr(c, "text", "") or "" for c in body.contents)
         assert "security@kernel.org" in text
 

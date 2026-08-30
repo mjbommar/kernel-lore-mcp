@@ -7,14 +7,13 @@ on stdout corrupts the protocol.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from typing import Literal
 
 import structlog
-
 
 Mode = Literal["local", "hosted"]
 

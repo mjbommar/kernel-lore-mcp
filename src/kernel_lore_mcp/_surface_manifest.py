@@ -21,7 +21,6 @@ containment and will fail CI if either side drifts.
 
 from __future__ import annotations
 
-
 REQUIRED_TOOLS: frozenset[str] = frozenset(
     {
         "lore_search",
@@ -65,8 +64,8 @@ REQUIRED_STATIC_RESOURCES: frozenset[str] = frozenset(
 
 
 __all__ = [
-    "REQUIRED_TOOLS",
-    "REQUIRED_RESOURCE_TEMPLATES",
     "REQUIRED_PROMPTS",
+    "REQUIRED_RESOURCE_TEMPLATES",
     "REQUIRED_STATIC_RESOURCES",
+    "REQUIRED_TOOLS",
 ]

@@ -131,7 +131,7 @@ async def lore_author_profile(
 
     Cost: cheap — expected p95 100 ms for typical addresses (one
     indexed over.db scan + in-memory aggregation). Scales with
-    `limit` × row decode cost, so 50 000 on a prolific author is
+    `limit` x row decode cost, so 50 000 on a prolific author is
     closer to 500 ms.
     """
     if "@" not in addr:

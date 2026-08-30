@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import time
+from builtins import list as list_type
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -170,7 +171,7 @@ async def lore_header_search(
     over_path = data_dir / "over.db"
 
     since_unix_ns: int | None = None
-    default_applied: list[str] = []
+    default_applied: list_type[str] = []
     if since_days > 0:
         since_unix_ns = int(time.time() * 1_000_000_000) - since_days * _NS_PER_DAY
         default_applied.append(f"since={since_days}d")

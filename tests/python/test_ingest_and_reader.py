@@ -16,7 +16,7 @@ from tests.python.fixtures import make_synthetic_shard
 
 
 @pytest.fixture
-def ingested(tmp_path: Path) -> tuple[Path, dict]:
+def ingested(tmp_path: Path) -> tuple[Path, _core.IngestStats]:
     """Ingest a two-message synthetic shard; return (data_dir, stats)."""
     shard_dir = tmp_path / "shards" / "0.git"
     shard_dir.parent.mkdir(parents=True)
@@ -35,7 +35,7 @@ def ingested(tmp_path: Path) -> tuple[Path, dict]:
     return data_dir, stats
 
 
-def test_ingest_stats_shape(ingested: tuple[Path, dict]) -> None:
+def test_ingest_stats_shape(ingested: tuple[Path, _core.IngestStats]) -> None:
     _data, stats = ingested
     assert stats["ingested"] == 2
     assert stats["skipped_no_m"] == 0
@@ -102,7 +102,9 @@ def test_activity_since_filter(ingested: tuple[Path, dict]) -> None:
     reader = _core.Reader(data_dir)
     # Set the cutoff AFTER m1's date but before m2's; only m2 survives.
     # m1 = 12:00:00 UTC, m2 = 12:05:00 UTC on 2026-04-14.
-    m2_nanos = reader.fetch_message("m2@x")["date_unix_ns"]
+    m2 = reader.fetch_message("m2@x")
+    assert m2 is not None
+    m2_nanos = m2["date_unix_ns"]
     cutoff = m2_nanos - 1
     rows = reader.activity(file=None, function=None, since_unix_ns=cutoff)
     assert {r["message_id"] for r in rows} == {"m2@x"}

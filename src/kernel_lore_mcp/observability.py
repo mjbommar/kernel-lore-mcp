@@ -8,6 +8,7 @@ tool body runs.
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from typing import Any
 
 import mcp.types as mt
@@ -48,14 +49,10 @@ def _request_context_fields(ctx: FastMCPContext | None) -> dict[str, object]:
     fields: dict[str, object] = {}
     if ctx.transport is not None:
         fields["transport"] = ctx.transport
-    try:
+    with suppress(RuntimeError):
         fields["request_id"] = ctx.request_id
-    except RuntimeError:
-        pass
-    try:
+    with suppress(RuntimeError):
         fields["session_id"] = ctx.session_id
-    except RuntimeError:
-        pass
     if ctx.client_id is not None:
         fields["client_id"] = ctx.client_id
     return fields

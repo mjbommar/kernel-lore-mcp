@@ -36,6 +36,8 @@ from kernel_lore_mcp.health import (
 # Cache keyed by data_dir so multi-config / test embedding doesn't
 # cross-contaminate. TTL from settings.freshness_cache_ttl_seconds.
 _cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
 def _per_list_shards(data_dir: Path) -> dict[str, list[dict[str, str]]]:
     """Enumerate `<data_dir>/state/shards/<list>/<shard>.oid` files."""
     shards_root = data_dir / "state" / "shards"

@@ -20,11 +20,11 @@ from typing import Any
 
 import structlog
 
+from kernel_lore_mcp import _core
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import LoreError
 from kernel_lore_mcp.health import suggest_retry_after_seconds
 from kernel_lore_mcp.logging_ import profiling_thresholds
-from kernel_lore_mcp import _core
 
 log = structlog.get_logger(__name__)
 

@@ -13,7 +13,7 @@ jobs:
     name: rust (fmt + clippy + test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
@@ -26,13 +26,11 @@ jobs:
     name: python (ruff + ty)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v9
         with:
           python-version: "3.12"
-      - run: uv sync --frozen --no-install-project
-        continue-on-error: true
-      - run: uv sync
+      - run: uv sync --frozen
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run ty check src/kernel_lore_mcp tests/python
@@ -41,13 +39,13 @@ jobs:
     name: maturin build + pytest (smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v9
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - run: uv sync
+      - run: uv sync --frozen
       - run: uv run maturin develop --release
       - run: uv run pytest -v
 
@@ -55,16 +53,16 @@ jobs:
     name: hosted load harness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v9
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - run: uv sync
+      - run: uv sync --frozen
       - run: uv run maturin develop --release
       - run: .venv/bin/python scripts/bench/bench_hosted_adversarial.py --json-out hosted-load.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: hosted-load-report
           path: hosted-load.json
@@ -78,10 +76,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -89,7 +87,7 @@ jobs:
           args: --release --out dist
           sccache: true
           manylinux: auto
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.target }}
           path: dist

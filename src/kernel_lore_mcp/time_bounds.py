@@ -55,10 +55,7 @@ def parse_time_bound(
             dt = datetime.combine(date.fromisoformat(raw), datetime.min.time(), tzinfo=UTC)
         else:
             dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=UTC)
-            else:
-                dt = dt.astimezone(UTC)
+            dt = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
     except ValueError as exc:
         raise invalid_argument(
             name=name,

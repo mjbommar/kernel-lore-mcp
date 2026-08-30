@@ -68,23 +68,15 @@ class TierGeneration(BaseModel):
 
 class CorpusStatsResponse(BaseModel):
     total_rows: int = Field(
-        description="Sum of all per-list row counts. "
-        "Equals COUNT(*) FROM over."
+        description="Sum of all per-list row counts. Equals COUNT(*) FROM over."
     )
-    lists_covered: int = Field(
-        description="Number of distinct mailing lists in the corpus."
-    )
-    generation: int = Field(
-        description="Corpus generation counter. Bumps once per ingest."
-    )
+    lists_covered: int = Field(description="Number of distinct mailing lists in the corpus.")
+    generation: int = Field(description="Corpus generation counter. Bumps once per ingest.")
     last_ingest_utc: datetime | None = Field(
         default=None,
-        description="UTC timestamp of the most recent generation bump. "
-        "`None` on a fresh data_dir.",
+        description="UTC timestamp of the most recent generation bump. `None` on a fresh data_dir.",
     )
-    schema_version: int = Field(
-        description="over.db schema version. Rebuild required on mismatch."
-    )
+    schema_version: int = Field(description="over.db schema version. Rebuild required on mismatch.")
     tiers: list[TierGeneration]
     lists: list[PerListStats]
     capabilities: dict[str, bool] = Field(
@@ -217,9 +209,7 @@ async def lore_corpus_stats(
     generation = 0
     with suppress(Exception):
         generation = reader.generation()
-    stats = await run_with_timeout(
-        _cached_corpus_stats, reader, str(settings.data_dir), generation
-    )
+    stats = await run_with_timeout(_cached_corpus_stats, reader, str(settings.data_dir), generation)
 
     generation = int(stats.get("generation", 0))
     tier_dict: dict[str, int | None] = stats.get("tier_generations", {})

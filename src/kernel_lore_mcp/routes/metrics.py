@@ -18,43 +18,22 @@ Bind localhost-only by default. Exposed via `@mcp.custom_route`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Iterator
 
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 from starlette.requests import Request
 from starlette.responses import Response
 
 from kernel_lore_mcp.routes.status import get_status
-
-try:
-    from prometheus_client import (
-        CONTENT_TYPE_LATEST,
-        CollectorRegistry,
-        Counter,
-        Gauge,
-        Histogram,
-        generate_latest,
-    )
-except ImportError:  # pragma: no cover — prometheus_client is a hard dep
-    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4"  # type: ignore[assignment]
-
-    def generate_latest(_: object = None) -> bytes:  # type: ignore[misc]
-        return b""
-
-    class _Stub:
-        def labels(self, **_: object) -> _Stub:
-            return self
-
-        def inc(self, *_: object) -> None: ...
-
-        def observe(self, *_: object) -> None: ...
-
-        def set(self, *_: object) -> None: ...
-
-    Counter = Histogram = Gauge = _Stub  # type: ignore[misc, assignment]
-    CollectorRegistry = object  # type: ignore[misc, assignment]
-
 
 REGISTRY = CollectorRegistry()
 
@@ -130,6 +109,7 @@ _CURRENT_TOOL_REQUEST_STARTED: ContextVar[float | None] = ContextVar(
     "kernel_lore_mcp_tool_request_started",
     default=None,
 )
+
 
 def record_request(method: str, elapsed_seconds: float, status: str = "ok") -> None:
     """Record one end-to-end MCP request."""

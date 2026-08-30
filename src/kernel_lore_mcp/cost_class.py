@@ -19,7 +19,7 @@ Approach (minimal viable, per the backlog scope):
 
 Class limits (tunable via env):
   - cheap:     1024 — effectively no cap for sub-10ms indexed paths
-  - moderate:   32  — 4 vCPU × 8, covers BM25/trigram/router
+  - moderate:   32  — 4 vCPU x 8, covers BM25/trigram/router
   - expensive:   4  — the tools that fire full-Parquet scans or
                      external LLM calls; strict cap
 
@@ -34,8 +34,8 @@ import functools
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
-from typing import Literal, ParamSpec, TypeVar
+from collections.abc import Callable, Coroutine
+from typing import Any, Literal, cast
 
 import structlog
 
@@ -86,7 +86,7 @@ def cost_class_of(fn: Callable[..., object]) -> CostClass:
     m = _COST_LINE.search(doc)
     if not m:
         return "moderate"
-    return m.group(1).lower()  # type: ignore[return-value]
+    return cast("CostClass", m.group(1).lower())
 
 
 def current_inflight(cost: CostClass) -> int:
@@ -118,13 +118,9 @@ def _rate_limited(cost: CostClass, tool_name: str) -> LoreError:
     )
 
 
-P = ParamSpec("P")
-R = TypeVar("R")
-
-
-def cost_limited(
-    fn: Callable[P, Awaitable[R]],
-) -> Callable[P, Awaitable[R]]:
+def cost_limited[**P, R](
+    fn: Callable[P, Coroutine[Any, Any, R]],
+) -> Callable[P, Coroutine[Any, Any, R]]:
     """Wrap an async tool function with a concurrency cap keyed on
     its declared cost class. Rejects fast when the class semaphore
     is exhausted — queueing under load would grow tail latency
@@ -133,7 +129,7 @@ def cost_limited(
     """
     cost = cost_class_of(fn)
     sem = _SEMAPHORES[cost]
-    tool_name = fn.__name__
+    tool_name = getattr(fn, "__name__", fn.__class__.__name__)
 
     @functools.wraps(fn)
     async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:

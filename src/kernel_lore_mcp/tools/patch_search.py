@@ -13,6 +13,7 @@ instance; local users uncapped.
 from __future__ import annotations
 
 import asyncio
+from builtins import list as list_type
 from typing import Annotated
 
 from pydantic import Field
@@ -102,7 +103,7 @@ async def lore_patch_search(
     # resume point: strictly older date OR same-date + mid > last.
     if resume is not None:
         last_date, last_mid = resume
-        kept: list[dict] = []
+        kept: list_type[dict] = []
         for r in rows:
             date = float(r.get("date_unix_ns") or 0)
             mid = str(r.get("message_id") or "")
@@ -130,7 +131,7 @@ async def lore_patch_search(
             last_mid=str(last.get("message_id") or ""),
         )
 
-    default_applied: list[str] = []
+    default_applied: list_type[str] = []
     if fuzzy_edits > 0:
         default_applied.append(f"fuzzy_edits={fuzzy_edits}")
 

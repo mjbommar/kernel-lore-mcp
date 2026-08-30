@@ -13,8 +13,8 @@ from fastmcp.exceptions import ToolError
 
 from kernel_lore_mcp.server import build_server
 
-
 # --- Finding 1 — hyphens in free text -----------------------------
+
 
 @pytest.mark.asyncio
 async def test_hyphenated_free_text_does_not_reject() -> None:
@@ -24,14 +24,13 @@ async def test_hyphenated_free_text_does_not_reject() -> None:
     `hyphen-split` in `default_applied`.
     """
     async with Client(build_server()) as c:
-        res = await c.call_tool(
-            "lore_search", {"query": "use-after-free cifs", "limit": 5}
-        )
+        res = await c.call_tool("lore_search", {"query": "use-after-free cifs", "limit": 5})
     defaults = res.data.default_applied
     assert "hyphen-split" in defaults
 
 
 # --- Finding 2 — lore_thread on missing mid -----------------------
+
 
 @pytest.mark.asyncio
 async def test_thread_on_missing_mid_short_circuits() -> None:
@@ -51,6 +50,7 @@ async def test_thread_on_missing_mid_short_circuits() -> None:
 
 
 # --- Finding 3 — forged cursor ------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_forged_cursor_is_rejected() -> None:
@@ -80,6 +80,7 @@ async def test_forged_cursor_is_rejected() -> None:
 
 
 # --- Finding 4 — query length cap ---------------------------------
+
 
 @pytest.mark.asyncio
 async def test_oversized_query_raises_structured_error() -> None:
@@ -122,6 +123,7 @@ async def test_empty_query_raises_structured_error() -> None:
 
 # --- Pre-existing hardening — positions-off phrase reject ---------
 
+
 @pytest.mark.asyncio
 async def test_phrase_query_on_prose_still_rejected() -> None:
     """Phrase queries remain rejected — the index is WithFreqs by
@@ -129,8 +131,6 @@ async def test_phrase_query_on_prose_still_rejected() -> None:
     """
     async with Client(build_server()) as c:
         with pytest.raises(ToolError) as exc_info:
-            await c.call_tool(
-                "lore_search", {"query": '"use after free"', "limit": 5}
-            )
+            await c.call_tool("lore_search", {"query": '"use after free"', "limit": 5})
     msg = str(exc_info.value)
     assert "phrase" in msg.lower() or "positions" in msg.lower()

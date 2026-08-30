@@ -129,7 +129,7 @@ async def lore_stable_backport_status(
             min_length=7,
             max_length=40,
             description=(
-                "Mainline commit SHA (7–40 hex chars). Short SHAs are "
+                "Mainline commit SHA (7-40 hex chars). Short SHAs are "
                 "accepted; the tool uses substring match, so give as "
                 "many characters as you have."
             ),
@@ -197,7 +197,7 @@ async def lore_stable_backport_status(
                             author_date_unix_ns=hit["author_date_ns"],
                         )
                     )
-        except Exception:  # noqa: BLE001
+        except Exception:
             # Sidecar absent / schema mismatch / concurrent writer —
             # fall through to the lore-only heuristic path. Tools
             # never fail a caller because an optional tier is
@@ -215,7 +215,7 @@ async def lore_stable_backport_status(
                 search_limit,
             )
             return list(result.get("hits") or [])
-        except Exception:  # noqa: BLE001
+        except Exception:
             # If the router errors (e.g. BM25 not built for this list),
             # swallow and let the caller see the evidence list is empty
             # for this role — captured in the caveat.
@@ -263,13 +263,13 @@ async def lore_stable_backport_status(
     # heterogeneous indexing.
     noautosel_seen = False
     try:
-        nauto = await run_with_timeout(reader.substr_subject, f"noautosel", None, None, None, 10)
+        nauto = await run_with_timeout(reader.substr_subject, "noautosel", None, None, None, 10)
         for hit in nauto:
             if needle in ((hit.get("subject_raw") or "") + (hit.get("message_id") or "")):
                 noautosel_seen = True
                 break
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:
+        noautosel_seen = False
 
     # 4. Decide status. The git sidecar wins over any lore-side
     # inference when it's present: a hit in linux-stable* is the

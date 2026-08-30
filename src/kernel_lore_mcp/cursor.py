@@ -20,7 +20,6 @@ server uses internally. This module wraps them with:
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
 import secrets
@@ -29,7 +28,6 @@ from pathlib import Path
 from kernel_lore_mcp import _core
 from kernel_lore_mcp.config import get_settings
 from kernel_lore_mcp.errors import invalid_argument
-
 
 _CURSOR_KEY_FILE = "cursor.key"
 _MIN_KEY_BYTES = 32
@@ -62,8 +60,8 @@ def _auto_generate_key() -> bytes:
     # rename for atomic write across signal/crash boundaries.
     tmp = path.with_suffix(".key.tmp")
     tmp.write_text(key.hex())
-    os.replace(tmp, path)
-    os.chmod(path, 0o600)
+    tmp.replace(path)
+    path.chmod(0o600)
     return key
 
 
@@ -100,14 +98,10 @@ def cursor_secret() -> bytes:
         try:
             key = bytes.fromhex(env)
         except ValueError as e:
-            raise ValueError(
-                "KLMCP_CURSOR_KEY must be hex-encoded; "
-                f"decode failed: {e}"
-            ) from e
+            raise ValueError(f"KLMCP_CURSOR_KEY must be hex-encoded; decode failed: {e}") from e
         if len(key) < _MIN_KEY_BYTES:
             raise ValueError(
-                f"KLMCP_CURSOR_KEY must be at least {_MIN_KEY_BYTES} "
-                f"bytes; got {len(key)}"
+                f"KLMCP_CURSOR_KEY must be at least {_MIN_KEY_BYTES} bytes; got {len(key)}"
             )
         return key
     disk = _load_key_from_disk()
@@ -169,7 +163,7 @@ def decode_cursor(
     secret = cursor_secret()
     try:
         q_hash, last_score, last_mid = _core.verify_cursor(secret, token)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise invalid_argument(
             name=arg_name,
             reason=f"cursor could not be verified: {e}",
@@ -200,7 +194,7 @@ def _preview(token: str) -> str:
 
 __all__ = [
     "cursor_secret",
-    "query_hash",
-    "mint_cursor",
     "decode_cursor",
+    "mint_cursor",
+    "query_hash",
 ]
