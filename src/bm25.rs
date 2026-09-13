@@ -274,6 +274,24 @@ impl BmWriter {
         let opstamp = self.writer.commit()?;
         Ok(opstamp)
     }
+
+    /// Drop every document currently in the index.
+    ///
+    /// `rebuild_bm25` streams the entire corpus back in, and `open()`
+    /// uses `Index::open_or_create`, so without this a "rebuild" is an
+    /// append: every run stacks another full copy of the corpus on top
+    /// of the last. On a 7.2M-message index four daily rebuilds grew
+    /// `<data_dir>/bm25` from 6 GB to 85 GB, left `meta.json` claiming
+    /// 46.4M docs, and made `lore_search` return the same message up to
+    /// six times.
+    ///
+    /// tantivy's `delete_all_documents` drops the segments themselves
+    /// rather than writing tombstones, so the space is reclaimed at the
+    /// next commit instead of waiting for a merge.
+    pub fn delete_all(&mut self) -> Result<()> {
+        self.writer.delete_all_documents()?;
+        Ok(())
+    }
 }
 
 // --------------------------------------------------------------------
