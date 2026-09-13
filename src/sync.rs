@@ -284,10 +284,18 @@ pub fn fetch_shard(data_dir: &Path, shard_path: &str, manifest_url: &str) -> Res
         reclone_shard(&url, &local)?;
         return Ok(FetchOutcome::Recloned);
     }
-    fetch_existing_shard(&url, &local)?;
+    let edits = fetch_existing_shard(&url, &local)?;
     if !repo_has_usable_refs(&local) {
         reclone_shard(&url, &local)?;
         return Ok(FetchOutcome::Recloned);
+    }
+    if edits == 0 {
+        // The caller only fetches shards whose fingerprint moved, so a
+        // fetch that changed no ref is worth surfacing: it is either a
+        // fingerprint change in a ref we do not mirror (benign) or a
+        // fetch that silently did nothing (the regression this variant
+        // exists to make visible).
+        tracing::debug!(%url, "fetch updated no references");
     }
     Ok(FetchOutcome::Fetched)
 }
@@ -329,14 +337,27 @@ fn remove_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn fetch_existing_shard(url: &str, local: &Path) -> Result<()> {
+/// Incremental fetch into an existing bare shard. Returns the number of
+/// references the fetch actually updated.
+///
+/// The refspec matters more than it looks. `+refs/*:refs/*` — which this
+/// used before — produces *zero* ref mappings in gix 0.81, so `receive()`
+/// reports `NoPackReceived { negotiate: None, update_refs: { edits: [] } }`
+/// without contacting the server for a pack at all. Every incremental
+/// fetch was therefore a no-op while still returning `Ok`. Clone is a
+/// separate code path (`prepare_clone_bare`), which is why first-time
+/// setup looked healthy and only updates went missing.
+fn fetch_existing_shard(url: &str, local: &Path) -> Result<usize> {
     let repo =
         gix::open(local).map_err(|e| Error::Sync(format!("open repo {}: {e}", local.display())))?;
     let should_interrupt = &std::sync::atomic::AtomicBool::new(false);
     let remote = repo
         .remote_at(url)
         .map_err(|e| Error::Sync(format!("remote_at {url}: {e}")))?
-        .with_refspecs(["+refs/*:refs/*"], gix::remote::Direction::Fetch)
+        .with_refspecs(
+            ["+refs/heads/*:refs/heads/*"],
+            gix::remote::Direction::Fetch,
+        )
         .map_err(|e| Error::Sync(format!("refspecs {url}: {e}")))?;
     let connection = remote
         .connect(gix::remote::Direction::Fetch)
@@ -344,10 +365,24 @@ fn fetch_existing_shard(url: &str, local: &Path) -> Result<()> {
     let prepare = connection
         .prepare_fetch(gix::progress::Discard, Default::default())
         .map_err(|e| Error::Sync(format!("prepare_fetch {url}: {e}")))?;
-    prepare
+    let outcome = prepare
         .receive(gix::progress::Discard, should_interrupt)
         .map_err(|e| Error::Sync(format!("receive {url}: {e}")))?;
-    Ok(())
+
+    let edits = match &outcome.status {
+        gix::remote::fetch::Status::Change { update_refs, .. } => update_refs.edits.len(),
+        gix::remote::fetch::Status::NoPackReceived { update_refs, .. } => update_refs.edits.len(),
+    };
+    if outcome.ref_map.mappings.is_empty() {
+        // Zero mappings means the refspec matched nothing the remote
+        // advertised — the shape of the original bug. Never let that pass
+        // as a successful fetch again.
+        tracing::warn!(
+            url,
+            "fetch produced no ref mappings; refspec matched nothing the remote advertises"
+        );
+    }
+    Ok(edits)
 }
 
 fn repo_has_usable_refs(local: &Path) -> bool {
@@ -554,5 +589,72 @@ mod tests {
         let remote_head = git_stdout(&["rev-parse", "refs/heads/master"], &remote);
         let local_head = git_stdout(&["rev-parse", "refs/heads/master"], &local);
         assert_eq!(local_head.trim(), remote_head.trim());
+    }
+
+    /// A shard that already exists locally must actually advance when
+    /// upstream gains commits.
+    ///
+    /// Regression: `fetch_existing_shard` discarded the outcome of
+    /// `receive()` and `fetch_shard` reported `Fetched` unconditionally,
+    /// so an incremental fetch that transferred nothing still looked
+    /// like a success. Because `sync` then persisted the new manifest
+    /// fingerprint, the shard was never retried and the corpus silently
+    /// froze at the initial clone while `/status` kept reporting every
+    /// tier "in sync".
+    #[test]
+    fn fetch_shard_advances_existing_repo_when_upstream_moves() {
+        let upstream_root = tempfile::tempdir().unwrap();
+        let remote = upstream_root.path().join("list.git");
+        git(&["init", "-q", "--bare", "list.git"], upstream_root.path());
+
+        let work = tempfile::tempdir().unwrap();
+        git(&["init", "-q", "-b", "master", "."], work.path());
+        fs::write(work.path().join("m"), "c1\n").unwrap();
+        git(&["add", "m"], work.path());
+        git(&["commit", "-q", "-m", "c1"], work.path());
+        git(
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+            work.path(),
+        );
+        git(&["push", "-q", "origin", "master"], work.path());
+
+        let data = tempfile::tempdir().unwrap();
+        let local = shard_local_path(data.path(), "/list.git");
+        let manifest_url = format!("{}/manifest.js.gz", upstream_root.path().display());
+
+        let outcome = fetch_shard(data.path(), "/list.git", &manifest_url).unwrap();
+        assert!(matches!(outcome, FetchOutcome::Cloned));
+        let after_clone = git_stdout(&["rev-parse", "refs/heads/master"], &local);
+
+        // Upstream gains a second commit.
+        fs::write(work.path().join("m"), "c2\n").unwrap();
+        git(&["add", "m"], work.path());
+        git(&["commit", "-q", "-m", "c2"], work.path());
+        git(&["push", "-q", "origin", "master"], work.path());
+        let remote_head = git_stdout(&["rev-parse", "refs/heads/master"], &remote);
+        assert_ne!(remote_head.trim(), after_clone.trim());
+
+        let outcome = fetch_shard(data.path(), "/list.git", &manifest_url).unwrap();
+        assert!(matches!(outcome, FetchOutcome::Fetched));
+
+        // The commit must be present as an object...
+        let local_head = git_stdout(&["rev-parse", "refs/heads/master"], &local);
+        assert_eq!(
+            local_head.trim(),
+            remote_head.trim(),
+            "refs/heads/master did not advance after fetch"
+        );
+        // ...not merely reachable through a remote-tracking ref, because
+        // ingest walks refs/heads.
+        let cat = Command::new("git")
+            .args(["--git-dir", local.to_str().unwrap(), "cat-file", "-t"])
+            .arg(remote_head.trim())
+            .output()
+            .unwrap();
+        assert!(
+            cat.status.success(),
+            "new commit object missing from the local shard: {}",
+            String::from_utf8_lossy(&cat.stderr)
+        );
     }
 }
